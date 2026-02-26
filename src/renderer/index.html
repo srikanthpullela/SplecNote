@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; script-src 'self' 'unsafe-inline';" />
+  <title>SplecNote</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Title bar -->
+  <div id="titlebar">
+    <div id="titlebar-drag"></div>
+    <button id="btn-toggle-sidebar" class="titlebar-btn" title="Toggle Sidebar (⌘B)">
+      <svg width="16" height="16" viewBox="0 0 16 16">
+        <rect x="1" y="2" width="14" height="12" rx="1" stroke="currentColor" stroke-width="1.2" fill="none"/>
+        <line x1="5.5" y1="2" x2="5.5" y2="14" stroke="currentColor" stroke-width="1.2"/>
+      </svg>
+    </button>
+    <span id="titlebar-title">SplecNote</span>
+  </div>
+
+  <!-- Main layout -->
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title">EXPLORER</span>
+        <button class="sidebar-btn" id="btn-collapse-sidebar" title="Close Sidebar (⌘B)">
+          <svg width="16" height="16" viewBox="0 0 16 16"><path d="M11 3L6 8l5 5" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+        </button>
+      </div>
+
+      <!-- Root folder name -->
+      <div id="root-folder-bar" class="root-folder-bar hidden">
+        <span class="root-folder-icon">📂</span>
+        <span id="root-folder-name" class="root-folder-name"></span>
+        <button class="sidebar-btn sidebar-btn-right" id="btn-open-folder" title="Open Folder">
+          <svg width="16" height="16" viewBox="0 0 16 16"><path d="M1 3h5l2 2h7v8H1V3z" stroke="currentColor" stroke-width="1" fill="none"/></svg>
+        </button>
+      </div>
+
+      <!-- File tree section -->
+      <div class="sidebar-section sidebar-section-tree">
+        <div id="file-tree" class="file-tree"></div>
+        <div id="file-tree-empty" class="tree-empty">
+          <p>No folder opened</p>
+          <button class="tree-empty-btn" id="btn-tree-open-folder">Open Folder</button>
+        </div>
+      </div>
+
+      <!-- Recent files section (resizable) -->
+      <div id="recent-resizer" class="recent-resizer"></div>
+      <div class="sidebar-section sidebar-section-recent" id="recent-section">
+        <div class="sidebar-section-header clickable" id="recent-section-header">
+          <span class="section-arrow" id="recent-toggle-icon">▶</span>
+          <span>RECENT FILES</span>
+        </div>
+        <div id="recent-list" class="recent-list collapsed"></div>
+      </div>
+    </aside>
+
+    <!-- Resize handle -->
+    <div id="sidebar-resizer" class="resizer"></div>
+
+    <!-- Editor area -->
+    <main id="editor-area">
+      <!-- Tab bar -->
+      <div id="tab-bar">
+        <div id="tabs-container"></div>
+        <button id="btn-new-tab" class="tab-btn-new" title="New Tab (⌘N)">
+          <svg width="14" height="14" viewBox="0 0 14 14"><line x1="7" y1="2" x2="7" y2="12" stroke="currentColor" stroke-width="1.5"/><line x1="2" y1="7" x2="12" y2="7" stroke="currentColor" stroke-width="1.5"/></svg>
+        </button>
+      </div>
+
+      <!-- Search / Replace bar (in-file) -->
+      <div id="search-bar" class="search-bar hidden">
+        <div class="search-row">
+          <input type="text" id="search-input" placeholder="Find…" spellcheck="false" />
+          <button class="search-btn" id="btn-search-prev" title="Previous (Shift+Enter)">▲</button>
+          <button class="search-btn" id="btn-search-next" title="Next (Enter)">▼</button>
+          <span id="search-count" class="search-count"></span>
+          <label class="search-option" title="Match Case"><input type="checkbox" id="search-case" /> Aa</label>
+          <label class="search-option" title="Regex"><input type="checkbox" id="search-regex" /> .*</label>
+          <label class="search-option" title="Whole Word"><input type="checkbox" id="search-whole" /> \b</label>
+          <button class="search-btn search-close" id="btn-search-close" title="Close (Esc)">✕</button>
+        </div>
+        <div class="search-row replace-row hidden" id="replace-row">
+          <input type="text" id="replace-input" placeholder="Replace…" spellcheck="false" />
+          <button class="search-btn" id="btn-replace-one" title="Replace">Replace</button>
+          <button class="search-btn" id="btn-replace-all" title="Replace All">All</button>
+        </div>
+      </div>
+
+      <!-- Go to Line bar -->
+      <div id="goto-bar" class="search-bar hidden">
+        <div class="search-row">
+          <input type="text" id="goto-input" placeholder="Go to Line…" spellcheck="false" />
+          <button class="search-btn" id="btn-goto-go">Go</button>
+          <button class="search-btn search-close" id="btn-goto-close">✕</button>
+        </div>
+      </div>
+
+      <!-- Monaco editor -->
+      <div id="editor-container"></div>
+
+      <!-- No editor open overlay -->
+      <div id="empty-tab-shortcuts" class="empty-tab-shortcuts hidden">
+        <div class="ets-watermark">
+          <div class="ets-shortcut-item" data-action="quick-open">
+            <span class="ets-action">Go to File...</span>
+            <span class="ets-kbd">⌘P</span>
+          </div>
+          <div class="ets-shortcut-item" data-action="new-file">
+            <span class="ets-action">New File...</span>
+            <span class="ets-kbd">⌘N</span>
+          </div>
+          <div class="ets-shortcut-item" data-action="open-file">
+            <span class="ets-action">Open File...</span>
+            <span class="ets-kbd">⌘O</span>
+          </div>
+          <div class="ets-shortcut-item" data-action="open-folder">
+            <span class="ets-action">Open Folder...</span>
+            <span class="ets-kbd">⇧⌘O</span>
+          </div>
+          <div class="ets-shortcut-item" data-action="command-palette">
+            <span class="ets-action">Show All Commands</span>
+            <span class="ets-kbd">⇧⌘P</span>
+          </div>
+          <div class="ets-shortcut-item" data-action="search-files">
+            <span class="ets-action">Search in Files</span>
+            <span class="ets-kbd">⇧⌘F</span>
+          </div>
+          <div class="ets-shortcut-item" data-action="toggle-terminal">
+            <span class="ets-action">Toggle Terminal</span>
+            <span class="ets-kbd">⌃`</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Status bar -->
+      <div id="status-bar">
+        <span id="status-position">Ln 1, Col 1</span>
+        <span id="status-encoding">UTF-8</span>
+        <span id="status-language">Plain Text</span>
+        <span id="status-eol">LF</span>
+        <span id="status-indent">Spaces: 2</span>
+        <span id="status-theme" class="status-clickable" title="Change Theme">Theme: Dark</span>
+        <span id="status-autosave" class="status-autosave">● Auto-saved</span>
+      </div>
+    </main>
+  </div>
+
+  <!-- Quick Open modal (Cmd+P) -->
+  <div id="quick-open-overlay" class="modal-overlay hidden">
+    <div class="quick-open-modal">
+      <input type="text" id="quick-open-input" placeholder="Type file name to search…" spellcheck="false" />
+      <div id="quick-open-results" class="quick-open-results"></div>
+    </div>
+  </div>
+
+  <!-- Command Palette modal (Cmd+Shift+P) -->
+  <div id="command-palette-overlay" class="modal-overlay hidden">
+    <div class="quick-open-modal">
+      <input type="text" id="command-palette-input" placeholder="> Type a command…" spellcheck="false" />
+      <div id="command-palette-results" class="quick-open-results"></div>
+    </div>
+  </div>
+
+  <!-- Theme Picker modal -->
+  <div id="theme-picker-overlay" class="modal-overlay hidden">
+    <div class="quick-open-modal">
+      <input type="text" id="theme-picker-input" placeholder="Select Color Theme…" spellcheck="false" />
+      <div id="theme-picker-results" class="quick-open-results"></div>
+    </div>
+  </div>
+
+  <!-- Global Search overlay (Cmd+Shift+F) - VS Code style top panel -->
+  <div id="global-search-overlay" class="modal-overlay hidden">
+    <div class="global-search-modal">
+      <div class="gs-header">
+        <div class="gs-input-row">
+          <svg class="gs-icon" width="16" height="16" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.2" fill="none"/><line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" stroke-width="1.5"/></svg>
+          <input type="text" id="global-search-input" placeholder="Search across files…" spellcheck="false" />
+          <div class="gs-options">
+            <label class="gs-opt" title="Match Case"><input type="checkbox" id="global-search-case" /><span>Aa</span></label>
+            <label class="gs-opt" title="Regex"><input type="checkbox" id="global-search-regex" /><span>.*</span></label>
+          </div>
+          <button class="search-btn search-close" id="btn-close-global-search" title="Close (Esc)">✕</button>
+        </div>
+        <div id="global-search-status" class="gs-status"></div>
+      </div>
+      <div id="global-search-results" class="gs-results"></div>
+    </div>
+  </div>
+
+  <!-- Context menu (file tree) -->
+  <div id="context-menu" class="context-menu hidden">
+    <div class="ctx-item" data-action="new-file">📄 New File</div>
+    <div class="ctx-item" data-action="new-folder">📁 New Folder</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-action="rename">✏️ Rename</div>
+    <div class="ctx-item" data-action="delete">🗑️ Delete</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-action="copy-path">📋 Copy Path</div>
+    <div class="ctx-item" data-action="reveal-finder">🔍 Reveal in Finder</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-action="open-terminal">💻 Open in Terminal</div>
+  </div>
+
+  <!-- Context menu (tab bar) -->
+  <div id="tab-context-menu" class="context-menu hidden">
+    <div class="ctx-item" data-action="tab-close">Close</div>
+    <div class="ctx-item" data-action="tab-close-others">Close Others</div>
+    <div class="ctx-item" data-action="tab-close-all">Close All</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-action="tab-copy-path">📋 Copy Path</div>
+    <div class="ctx-item" data-action="tab-reveal-finder">🔍 Reveal in Finder</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-action="tab-open-terminal">💻 Open in Terminal</div>
+  </div>
+
+  <!-- Welcome screen (full-screen overlay — shown before any folder/file is opened) -->
+  <div id="welcome-screen">
+    <div class="welcome-content">
+      <div class="welcome-header">
+        <h1 class="welcome-title">SplecNote</h1>
+        <p class="welcome-subtitle">Editing evolved</p>
+      </div>
+
+      <div class="welcome-body">
+        <div class="welcome-left">
+          <h2 class="welcome-section-title">Start</h2>
+          <div class="welcome-links">
+            <a class="welcome-link" id="btn-welcome-new">New File...</a>
+            <a class="welcome-link" id="btn-welcome-open">Open...</a>
+            <a class="welcome-link" id="btn-welcome-folder">Open Folder...</a>
+            <a class="welcome-link" id="btn-welcome-new-window">New Window</a>
+          </div>
+
+          <h2 class="welcome-section-title welcome-section-recent">Recent</h2>
+          <div id="welcome-recent" class="welcome-recent"></div>
+        </div>
+
+        <div class="welcome-right">
+          <h2 class="welcome-section-title">Shortcuts</h2>
+          <div class="welcome-shortcuts">
+            <div class="ws-row"><span class="ws-key">⌘P</span><span class="ws-label">Quick Open File</span></div>
+            <div class="ws-row"><span class="ws-key">⇧⌘P</span><span class="ws-label">Command Palette</span></div>
+            <div class="ws-row"><span class="ws-key">⌘F</span><span class="ws-label">Find in File</span></div>
+            <div class="ws-row"><span class="ws-key">⇧⌘F</span><span class="ws-label">Search in Files</span></div>
+            <div class="ws-row"><span class="ws-key">⌘B</span><span class="ws-label">Toggle Sidebar</span></div>
+            <div class="ws-row"><span class="ws-key">⌘G</span><span class="ws-label">Go to Line</span></div>
+            <div class="ws-row"><span class="ws-key">⌘H</span><span class="ws-label">Find & Replace</span></div>
+            <div class="ws-row"><span class="ws-key">⌥Z</span><span class="ws-label">Toggle Word Wrap</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="../../node_modules/monaco-editor/min/vs/loader.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

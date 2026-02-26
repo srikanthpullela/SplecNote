@@ -1,0 +1,95 @@
+{
+  "name": "splecnote",
+  "productName": "SplecNote",
+  "version": "1.0.0",
+  "description": "SplecNote — A modern text editor with auto-save, session persistence, and powerful editing features.",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "NODE_ENV=development electron .",
+    "build": "electron-builder --mac",
+    "build:all": "electron-builder --mac --win"
+  },
+  "author": "SplecNote",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1"
+  },
+  "dependencies": {
+    "monaco-editor": "^0.45.0",
+    "chokidar": "^3.5.3"
+  },
+  "build": {
+    "appId": "com.splecnote.app",
+    "productName": "SplecNote",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "**/*",
+      "!dist/**",
+      "!build/**",
+      "!.git/**",
+      "!.gitignore",
+      "!README.md",
+      "!SPLECNOTE.md",
+      "!.nvmrc",
+      "!node_modules/monaco-editor/dev/**",
+      "!node_modules/monaco-editor/esm/**",
+      "!node_modules/monaco-editor/min-maps/**",
+      "!node_modules/electron/**",
+      "!node_modules/electron-builder/**",
+      "!node_modules/app-builder-bin/**",
+      "!node_modules/7zip-bin/**",
+      "!node_modules/typescript/**"
+    ],
+    "asarUnpack": [
+      "node_modules/monaco-editor/min/**"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "darkModeSupport": true
+    },
+    "dmg": {
+      "title": "SplecNote",
+      "icon": "build/icon.icns",
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ],
+      "window": {
+        "width": 540,
+        "height": 380
+      }
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "fileAssociations": [
+      {
+        "ext": ["txt", "md", "json", "js", "ts", "jsx", "tsx", "py", "rb", "go", "rs", "java", "c", "cpp", "h", "hpp", "css", "scss", "html", "htm", "xml", "yaml", "yml", "toml", "sql", "sh", "bash", "zsh", "php", "swift", "kt", "scala", "lua", "r", "dart"],
+        "name": "Source Code",
+        "role": "Editor"
+      }
+    ]
+  }
+}
