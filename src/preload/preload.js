@@ -1,10 +1,10 @@
 /**
- * SplecNote — Preload Script
+ * CongaNote — Preload Script
  * Secure IPC bridge with fs ops for context menus, global search, quick open, etc.
  */
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('splecnote', {
+contextBridge.exposeInMainWorld('conganote', {
   // Dialogs
   openFileDialog: () => ipcRenderer.invoke('dialog:open-file'),
   openFolderDialog: () => ipcRenderer.invoke('dialog:open-folder'),
@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('splecnote', {
   getAllFiles: (dp) => ipcRenderer.invoke('fs:get-all-files', dp),
   searchInFiles: (dp, query, opts) => ipcRenderer.invoke('fs:search-in-files', dp, query, opts),
   readBinary: (fp) => ipcRenderer.invoke('fs:read-binary', fp),
+  systemSearch: (query) => ipcRenderer.invoke('fs:system-search', query),
 
   // Auto-save
   getAutoSavePath: (title) => ipcRenderer.invoke('autosave:get-path', title),
@@ -32,6 +33,7 @@ contextBridge.exposeInMainWorld('splecnote', {
   // Recent
   addRecent: (fp) => ipcRenderer.invoke('recent:add', fp),
   getRecent: () => ipcRenderer.invoke('recent:get'),
+  clearRecent: () => ipcRenderer.invoke('recent:clear'),
 
   // App paths
   getPaths: () => ipcRenderer.invoke('app:get-paths'),
@@ -49,8 +51,18 @@ contextBridge.exposeInMainWorld('splecnote', {
 
   // Git
   gitStatus: (dp) => ipcRenderer.invoke('git:status', dp),
+  gitInfo: (dp) => ipcRenderer.invoke('git:info', dp),
   gitLog: (dp, count) => ipcRenderer.invoke('git:log', dp, count),
   gitDiff: (dp, fp) => ipcRenderer.invoke('git:diff', dp, fp),
+  gitBlame: (dp, fp) => ipcRenderer.invoke('git:blame', dp, fp),
+  gitShow: (dp, relPath) => ipcRenderer.invoke('git:show', dp, relPath),
+  gitFileLog: (dp, relPath, count) => ipcRenderer.invoke('git:file-log', dp, relPath, count),
+  gitShowAt: (dp, commitHash, relPath) => ipcRenderer.invoke('git:show-at', dp, commitHash, relPath),
+
+  // Terminal
+  terminalRun: (command) => ipcRenderer.invoke('terminal:run', command),
+  terminalKill: () => ipcRenderer.invoke('terminal:kill'),
+  terminalSetCwd: (cwd) => ipcRenderer.invoke('terminal:set-cwd', cwd),
 
   // Settings
   readSettings: () => ipcRenderer.invoke('settings:read'),
@@ -58,6 +70,23 @@ contextBridge.exposeInMainWorld('splecnote', {
 
   // Markdown rendering
   renderMarkdown: (content) => ipcRenderer.invoke('markdown:render', content),
+
+  // API Client
+  sendApiRequest: (opts) => ipcRenderer.invoke('api:send-request', opts),
+
+  // Database Client
+  dbOpen: (filePath) => ipcRenderer.invoke('db:open', filePath),
+  dbQuery: (filePath, query, tableName) => ipcRenderer.invoke('db:query', filePath, query, tableName),
+
+  // Bookmarks
+  loadBookmarks: () => ipcRenderer.invoke('bookmarks:load'),
+  saveBookmarks: (bookmarks) => ipcRenderer.invoke('bookmarks:save', bookmarks),
+
+  // Screenshot
+  saveScreenshot: (dataUrl) => ipcRenderer.invoke('screenshot:save', dataUrl),
+
+  // TODO scanning
+  scanTodos: (folderPath) => ipcRenderer.invoke('todos:scan', folderPath),
 
   // IPC listener
   on: (channel, callback) => {
@@ -69,6 +98,11 @@ contextBridge.exposeInMainWorld('splecnote', {
       'view:toggle-sidebar', 'view:toggle-minimap', 'view:toggle-wordwrap',
       'view:zoom-in', 'view:zoom-out', 'view:zoom-reset', 'view:change-theme',
       'view:zen-mode', 'view:split-editor', 'view:markdown-preview',
+      'view:toggle-terminal', 'terminal:output', 'terminal:exit',
+      'view:api-client', 'view:regex-tester', 'view:json-viewer',
+      'view:bookmarks', 'view:screenshot', 'view:db-client',
+      'view:snippets', 'view:color-picker', 'view:todo-tracker', 'view:pomodoro',
+      'view:diff-checker',
       'selection:select-all', 'selection:expand', 'selection:duplicate-line',
       'selection:move-line-up', 'selection:move-line-down',
       'selection:cursor-above', 'selection:cursor-below',

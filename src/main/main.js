@@ -1,5 +1,5 @@
 /**
- * SplecNote — Main Process
+ * CongaNote — Main Process
  * Window management, file I/O, auto-save, session, menus, global search, context menu support.
  */
 
@@ -30,22 +30,22 @@ async function getMarked() {
 }
 
 // Set app name FIRST — fixes "Electron" in macOS menu bar
-app.setName('SplecNote');
+app.setName('CongaNote');
 
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
-const SPLECNOTE_DIR = path.join(os.homedir(), 'SplecNote');
-const SESSION_FILE = path.join(SPLECNOTE_DIR, '.session.json');
-const RECENT_FILE = path.join(SPLECNOTE_DIR, '.recent.json');
-const SETTINGS_FILE = path.join(SPLECNOTE_DIR, 'settings.json');
-const AUTOSAVE_DIR = path.join(SPLECNOTE_DIR, 'AutoSave');
+const CONGANOTE_DIR = path.join(os.homedir(), 'CongaNote');
+const SESSION_FILE = path.join(CONGANOTE_DIR, '.session.json');
+const RECENT_FILE = path.join(CONGANOTE_DIR, '.recent.json');
+const SETTINGS_FILE = path.join(CONGANOTE_DIR, 'settings.json');
+const AUTOSAVE_DIR = path.join(CONGANOTE_DIR, 'AutoSave');
 
 // File watcher instances (per watched directory)
 const watchers = new Map();
 
 function ensureDirs() {
-  for (const dir of [SPLECNOTE_DIR, AUTOSAVE_DIR]) {
+  for (const dir of [CONGANOTE_DIR, AUTOSAVE_DIR]) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   }
 }
@@ -72,22 +72,135 @@ function saveRecent(list) {
 function addRecent(fp) {
   let recent = loadRecent().filter(r => r !== fp);
   recent.unshift(fp);
-  if (recent.length > 25) recent = recent.slice(0, 25);
+  if (recent.length > 50) recent = recent.slice(0, 50);
   saveRecent(recent);
 }
 
+/**
+ * Build a smart grouped recent menu for the menu bar.
+ * - If multiple files share the same parent folder → show folder as a submenu
+ * - Standalone files → show directly
+ */
+function buildSmartRecentMenu(recentFiles) {
+  const home = os.homedir();
+  const shorten = (p) => p.replace(new RegExp('^' + home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '~');
+
+  const containers = new Set([
+    'Documents', 'Desktop', 'Downloads', 'Library',
+    'Applications', 'Pictures', 'Music', 'Movies', 'Public',
+  ]);
+
+  const directoryPaths = [];
+  const fileItems = [];
+
+  for (const fp of recentFiles) {
+    try {
+      if (fs.existsSync(fp) && fs.statSync(fp).isDirectory()) {
+        directoryPaths.push(fp);
+        continue;
+      }
+    } catch {}
+    fileItems.push(fp);
+  }
+
+  // Determine project root for each file
+  const projectMap = new Map();
+  const projectOrder = [];
+
+  for (const fp of fileItems) {
+    const rel = fp.substring(home.length + 1);
+    const segments = rel.split('/');
+
+    let projectRoot;
+    if (segments.length <= 1) {
+      projectRoot = home;
+    } else if (containers.has(segments[0]) && segments.length >= 3) {
+      projectRoot = home + '/' + segments[0] + '/' + segments[1];
+    } else {
+      projectRoot = home + '/' + segments[0];
+    }
+
+    if (!projectMap.has(projectRoot)) {
+      projectMap.set(projectRoot, []);
+      projectOrder.push(projectRoot);
+    }
+    projectMap.get(projectRoot).push(fp);
+  }
+
+  const items = [];
+  const coveredRoots = new Set(projectOrder);
+
+  // Directory entries not covered by a file group
+  for (const fp of directoryPaths) {
+    if (coveredRoots.has(fp)) continue;
+    items.push({
+      label: '📁 ' + path.basename(fp),
+      sublabel: shorten(fp),
+      click: () => sendToFocused('file:open-path', fp),
+    });
+  }
+
+  // File groups by project root
+  for (const root of projectOrder) {
+    const fps = projectMap.get(root);
+    const name = path.basename(root);
+
+    if (fps.length > 1) {
+      const submenuItems = fps.map(fp => ({
+        label: path.basename(fp),
+        click: () => sendToFocused('file:open-path', fp),
+      }));
+      submenuItems.unshift(
+        { label: 'Open Folder', click: () => sendToFocused('file:open-path', root) },
+        { type: 'separator' }
+      );
+      items.push({
+        label: '📁 ' + name,
+        sublabel: shorten(root),
+        submenu: submenuItems,
+      });
+    } else {
+      const fp = fps[0];
+      items.push({
+        label: path.basename(fp),
+        sublabel: shorten(path.dirname(fp)),
+        click: () => sendToFocused('file:open-path', fp),
+      });
+    }
+    if (items.length >= 20) break;
+  }
+  return items;
+}
+
+/**
+ * Update macOS dock right-click menu with recent files
+ */
+function updateDockMenu() {
+  if (process.platform !== 'darwin') return;
+  const recentFiles = loadRecent();
+  const items = recentFiles.slice(0, 10).map(fp => ({
+    label: path.basename(fp),
+    click: () => openFileInNewWindow(fp),
+  }));
+  if (items.length === 0) {
+    items.push({ label: 'No Recent Files', enabled: false });
+  }
+  const dockMenu = Menu.buildFromTemplate([
+    { label: 'New Window', click: () => createNewWindow() },
+    { type: 'separator' },
+    ...items,
+  ]);
+  app.dock.setMenu(dockMenu);
+}
+
 // ---------------------------------------------------------------------------
-// Auto-save path: ~/SplecNote/AutoSave/YYYY-MM-DD/Title.txt
+// Auto-save path: ~/CongaNote/AutoSave/YYYY-MM-DD/
+// Returns the day directory, creating it if needed.
 // ---------------------------------------------------------------------------
-function generateAutoSavePath(title) {
-  const today = new Date().toISOString().slice(0, 10);
-  const dayDir = path.join(AUTOSAVE_DIR, today);
+function generateAutoSavePath(dateStr) {
+  const dayDir = path.join(AUTOSAVE_DIR, dateStr || new Date().toISOString().slice(0, 10));
   if (!fs.existsSync(dayDir)) fs.mkdirSync(dayDir, { recursive: true });
-  const safeName = (title || 'Untitled').replace(/[^a-zA-Z0-9_\- ]/g, '').trim().slice(0, 80) || 'Untitled';
-  let candidate = path.join(dayDir, `${safeName}.txt`);
-  let i = 1;
-  while (fs.existsSync(candidate)) { candidate = path.join(dayDir, `${safeName}-${i}.txt`); i++; }
-  return candidate;
+  return dayDir;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +239,7 @@ function createNewWindow() {
   const win = new BrowserWindow({
     width: 1280, height: 800,
     minWidth: 600, minHeight: 400,
-    title: 'SplecNote',
+    title: 'CongaNote',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 14 },
     backgroundColor: '#1e1e2e',
@@ -167,7 +280,7 @@ function createWindow() {
     ...bounds,
     minWidth: 600,
     minHeight: 400,
-    title: 'SplecNote',
+    title: 'CongaNote',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 14 },
     backgroundColor: '#1e1e2e',
@@ -201,12 +314,24 @@ function createWindow() {
     }
   });
 
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('closed', () => {
+    // Clean up any file watchers belonging to this window
+    const winId = mainWindow?.id;
+    if (winId) {
+      for (const [key, watcher] of watchers) {
+        if (key.startsWith(`${winId}:`)) {
+          watcher.close().catch(() => {});
+          watchers.delete(key);
+        }
+      }
+    }
+    mainWindow = null;
+  });
   buildMenu();
 }
 
 // ---------------------------------------------------------------------------
-// Application menu — with "SplecNote" as first menu label
+// Application menu — with "CongaNote" as first menu label
 // ---------------------------------------------------------------------------
 // Helper: send IPC to the currently focused window (not just mainWindow)
 function sendToFocused(channel, ...args) {
@@ -217,23 +342,25 @@ function sendToFocused(channel, ...args) {
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   const recentFiles = loadRecent();
-  const recentMenu = recentFiles.length > 0
-    ? recentFiles.slice(0, 15).map(fp => ({ label: path.basename(fp), sublabel: fp, click: () => sendToFocused('file:open-path', fp) }))
+  // Smart grouping: group files from the same folder, show standalone files separately
+  const recentMenuItems = buildSmartRecentMenu(recentFiles);
+  const recentMenu = recentMenuItems.length > 0
+    ? recentMenuItems
     : [{ label: 'No Recent Files', enabled: false }];
 
   const template = [
     ...(isMac ? [{
-      label: 'SplecNote',
+      label: 'CongaNote',
       submenu: [
-        { label: 'About SplecNote', role: 'about' },
+        { label: 'About CongaNote', role: 'about' },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
-        { label: 'Hide SplecNote', role: 'hide' },
+        { label: 'Hide CongaNote', role: 'hide' },
         { role: 'hideOthers' },
         { role: 'unhide' },
         { type: 'separator' },
-        { label: 'Quit SplecNote', role: 'quit' },
+        { label: 'Quit CongaNote', role: 'quit' },
       ],
     }] : []),
     {
@@ -293,6 +420,25 @@ function buildMenu() {
         { label: 'Zen Mode', accelerator: 'CmdOrCtrl+K Z', click: () => sendToFocused('view:zen-mode') },
         { label: 'Split Editor', accelerator: 'CmdOrCtrl+\\', click: () => sendToFocused('view:split-editor') },
         { label: 'Toggle Markdown Preview', accelerator: 'CmdOrCtrl+Shift+V', click: () => sendToFocused('view:markdown-preview') },
+        { label: 'Toggle Terminal', accelerator: 'Ctrl+`', click: () => sendToFocused('view:toggle-terminal') },
+        { type: 'separator' },
+        {
+          label: 'Tools',
+          submenu: [
+            { label: 'API Client', accelerator: 'Ctrl+Shift+A', click: () => sendToFocused('view:api-client') },
+            { label: 'Regex Tester', accelerator: 'Ctrl+Shift+R', click: () => sendToFocused('view:regex-tester') },
+            { label: 'JSON / Data Viewer', accelerator: 'Ctrl+Shift+J', click: () => sendToFocused('view:json-viewer') },
+            { label: 'Bookmarks', accelerator: 'Ctrl+Shift+B', click: () => sendToFocused('view:bookmarks') },
+            { label: 'Code Screenshot', accelerator: 'Ctrl+Shift+S', click: () => sendToFocused('view:screenshot') },
+            { label: 'Database Client', accelerator: 'Ctrl+Shift+D', click: () => sendToFocused('view:db-client') },
+            { type: 'separator' },
+            { label: 'Snippet Manager', accelerator: 'Ctrl+Shift+E', click: () => sendToFocused('view:snippets') },
+            { label: 'Color Picker', accelerator: 'Ctrl+Shift+K', click: () => sendToFocused('view:color-picker') },
+            { label: 'TODO Tracker', accelerator: 'Ctrl+Shift+G', click: () => sendToFocused('view:todo-tracker') },
+            { label: 'Pomodoro Timer', accelerator: 'Ctrl+Shift+Y', click: () => sendToFocused('view:pomodoro') },
+            { label: 'Diff Checker', accelerator: 'Ctrl+Shift+I', click: () => sendToFocused('view:diff-checker') },
+          ],
+        },
         { type: 'separator' },
         { label: 'Change Theme…', click: () => sendToFocused('view:change-theme') },
         { type: 'separator' },
@@ -315,7 +461,7 @@ function buildMenu() {
       role: 'help',
       submenu: [
         { label: 'Open AutoSave Folder', click: () => shell.openPath(AUTOSAVE_DIR) },
-        { label: 'Open SplecNote Folder', click: () => shell.openPath(SPLECNOTE_DIR) },
+        { label: 'Open CongaNote Folder', click: () => shell.openPath(CONGANOTE_DIR) },
       ],
     },
   ];
@@ -335,9 +481,24 @@ ipcMain.handle('dialog:open-folder', async (e) => {
   const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
   return r.canceled ? null : r.filePaths[0];
 });
-ipcMain.handle('dialog:save-file', async (e, defaultPath) => {
+ipcMain.handle('dialog:save-file', async (e, defaultPath, filters) => {
   const win = BrowserWindow.fromWebContents(e.sender) || mainWindow;
-  const r = await dialog.showSaveDialog(win, { defaultPath, filters: [{ name: 'All Files', extensions: ['*'] }] });
+  const fileFilters = filters || [
+    { name: 'Text Files', extensions: ['txt'] },
+    { name: 'JavaScript', extensions: ['js', 'jsx', 'mjs'] },
+    { name: 'TypeScript', extensions: ['ts', 'tsx'] },
+    { name: 'JSON', extensions: ['json'] },
+    { name: 'HTML', extensions: ['html', 'htm'] },
+    { name: 'CSS', extensions: ['css', 'scss', 'less'] },
+    { name: 'Python', extensions: ['py'] },
+    { name: 'Markdown', extensions: ['md'] },
+    { name: 'Shell Script', extensions: ['sh', 'bash', 'zsh'] },
+    { name: 'YAML', extensions: ['yaml', 'yml'] },
+    { name: 'XML', extensions: ['xml'] },
+    { name: 'SQL', extensions: ['sql'] },
+    { name: 'All Files', extensions: ['*'] },
+  ];
+  const r = await dialog.showSaveDialog(win, { defaultPath, filters: fileFilters });
   return r.canceled ? null : r.filePath;
 });
 
@@ -354,6 +515,88 @@ ipcMain.handle('fs:read-dir', async (_e, dirPath) => {
   } catch { return []; }
 });
 ipcMain.handle('fs:stat', async (_e, fp) => { try { const s = fs.statSync(fp); return { size: s.size, mtime: s.mtimeMs, isDirectory: s.isDirectory() }; } catch { return null; } });
+
+// ---------------------------------------------------------------------------
+// System-wide file search using macOS Spotlight (mdfind)
+// ---------------------------------------------------------------------------
+ipcMain.handle('fs:system-search', async (_e, query) => {
+  if (!query || query.length < 2) return [];
+  return new Promise((resolve) => {
+    const home = os.homedir();
+    // Use mdfind with -name for filename matching, scoped to home directory
+    const args = ['-name', query, '-onlyin', home];
+    const proc = spawn('mdfind', args);
+    let output = '';
+
+    // Timeout after 3 seconds
+    const timer = setTimeout(() => { proc.kill(); }, 3000);
+
+    proc.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+      // Cap early to stay fast
+      if (output.split('\n').length > 500) proc.kill();
+    });
+    proc.stderr.on('data', () => {});
+    proc.on('close', () => {
+      clearTimeout(timer);
+      const shorten = (p) => p.replace(new RegExp('^' + home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '~');
+
+      // Noise patterns to exclude
+      const noisePatterns = [
+        '/Library/',
+        '/Application Support/',
+        '/Caches/',
+        '/node_modules/',
+        '/.git/',
+        '/.Trash/',
+        '/dist/',
+        '/build/',
+        '/__pycache__/',
+        '/.cache/',
+        '/.npm/',
+        '/.nvm/',
+        '/.cargo/',
+        '/venv/',
+        '/.venv/',
+      ];
+
+      const filtered = output
+        .split('\n')
+        .filter(line => line.trim().length > 0)
+        .filter(fp => {
+          const rel = fp.substring(home.length);
+          return !noisePatterns.some(p => rel.includes(p)) && !rel.startsWith('/.');
+        });
+
+      // Sort: prioritize shorter paths (closer to home), then alphabetical
+      filtered.sort((a, b) => {
+        const depthA = a.split('/').length;
+        const depthB = b.split('/').length;
+        if (depthA !== depthB) return depthA - depthB;
+        return a.localeCompare(b);
+      });
+
+      const results = filtered
+        .slice(0, 40)
+        .map(fp => {
+          let isDir = false;
+          try { isDir = fs.statSync(fp).isDirectory(); } catch {}
+          return {
+            path: fp,
+            name: path.basename(fp),
+            dir: shorten(path.dirname(fp)),
+            isDirectory: isDir,
+          };
+        });
+      resolve(results);
+    });
+    proc.on('error', () => {
+      clearTimeout(timer);
+      resolve([]);
+    });
+  });
+});
+
 ipcMain.handle('fs:delete', async (_e, tp) => {
   try { const s = fs.statSync(tp); if (s.isDirectory()) fs.rmSync(tp, { recursive: true, force: true }); else fs.unlinkSync(tp); return true; } catch { return false; }
 });
@@ -478,9 +721,10 @@ function parseSearchOutput(output, basePath) {
 ipcMain.handle('autosave:get-path', async (_e, title) => generateAutoSavePath(title));
 ipcMain.handle('session:save', async (e, data) => { const win = BrowserWindow.fromWebContents(e.sender) || mainWindow; if (win) data.windowBounds = win.getBounds(); saveSession(data); return true; });
 ipcMain.handle('session:load', async () => loadSession());
-ipcMain.handle('recent:add', async (_e, fp) => { addRecent(fp); buildMenu(); return true; });
+ipcMain.handle('recent:add', async (_e, fp) => { addRecent(fp); buildMenu(); updateDockMenu(); return true; });
 ipcMain.handle('recent:get', async () => loadRecent());
-ipcMain.handle('app:get-paths', async () => ({ splecnoteDir: SPLECNOTE_DIR, autosaveDir: AUTOSAVE_DIR, home: os.homedir() }));
+ipcMain.handle('recent:clear', async () => { saveRecent([]); buildMenu(); updateDockMenu(); return true; });
+ipcMain.handle('app:get-paths', async () => ({ conganoteDir: CONGANOTE_DIR, autosaveDir: AUTOSAVE_DIR, home: os.homedir() }));
 ipcMain.handle('app:new-window', async () => { createNewWindow(); return true; });
 ipcMain.handle('shell:show-item', async (_e, fp) => { shell.showItemInFolder(fp); return true; });
 ipcMain.handle('shell:open-path', async (_e, dp) => { shell.openPath(dp); return true; });
@@ -512,9 +756,13 @@ ipcMain.handle('watch:start', async (e, dirPath) => {
       awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 },
     });
     watcher.on('all', (event, changedPath) => {
-      const win = BrowserWindow.fromWebContents(e.sender);
-      if (win && !win.isDestroyed()) {
+      const win = BrowserWindow.fromId(winId);
+      if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
         win.webContents.send('watch:change', { event, path: changedPath });
+      } else {
+        // Window gone — clean up this watcher
+        watcher.close().catch(() => {});
+        watchers.delete(key);
       }
     });
     watchers.set(key, watcher);
@@ -539,6 +787,78 @@ ipcMain.handle('watch:stop', async (e, dirPath) => {
 // ---------------------------------------------------------------------------
 // Git Integration (simple-git)
 // ---------------------------------------------------------------------------
+
+// Rich git info — branch, tracking, remote, stashes, etc.
+ipcMain.handle('git:info', async (_e, dirPath) => {
+  try {
+    const git = simpleGit(dirPath);
+    const isRepo = await git.checkIsRepo();
+    if (!isRepo) return null;
+
+    const status = await git.status();
+    const branch = status.current;
+    const ahead = status.ahead;
+    const behind = status.behind;
+    const tracking = status.tracking || null;
+
+    // Remote URL
+    let remoteUrl = null;
+    try {
+      const remotes = await git.getRemotes(true);
+      const origin = remotes.find(r => r.name === 'origin') || remotes[0];
+      if (origin) remoteUrl = origin.refs.fetch || origin.refs.push || null;
+    } catch {}
+
+    // Stash count
+    let stashCount = 0;
+    try {
+      const stashList = await git.stashList();
+      stashCount = stashList.total || 0;
+    } catch {}
+
+    // Last commit on current branch
+    let lastCommit = null;
+    try {
+      const log = await git.log({ maxCount: 1 });
+      if (log.latest) {
+        lastCommit = {
+          hash: log.latest.hash.slice(0, 7),
+          message: log.latest.message,
+          author: log.latest.author_name,
+          date: log.latest.date,
+        };
+      }
+    } catch {}
+
+    // Changed files with detailed status
+    const files = {};
+    for (const f of status.modified) files[f] = 'modified';
+    for (const f of status.not_added) files[f] = 'untracked';
+    for (const f of status.created) files[f] = 'added';
+    for (const f of status.deleted) files[f] = 'deleted';
+    for (const f of status.renamed) files[f.to] = 'renamed';
+    for (const f of status.conflicted) files[f] = 'conflicted';
+
+    // Staged files
+    const staged = [];
+    for (const f of status.staged) staged.push(f);
+
+    return {
+      branch,
+      tracking,
+      remoteUrl,
+      ahead,
+      behind,
+      stashCount,
+      lastCommit,
+      files,
+      staged,
+    };
+  } catch {
+    return null;
+  }
+});
+
 ipcMain.handle('git:status', async (_e, dirPath) => {
   try {
     const git = simpleGit(dirPath);
@@ -576,6 +896,139 @@ ipcMain.handle('git:diff', async (_e, dirPath, filePath) => {
   } catch { return null; }
 });
 
+ipcMain.handle('git:blame', async (_e, dirPath, filePath) => {
+  try {
+    const git = simpleGit(dirPath);
+    const isRepo = await git.checkIsRepo();
+    if (!isRepo) return null;
+    const relPath = path.relative(dirPath, filePath);
+    const result = await git.raw(['blame', '--line-porcelain', relPath]);
+    const lines = result.split('\n');
+    const blameData = [];
+    let current = {};
+    for (const line of lines) {
+      if (line.match(/^[0-9a-f]{40} \d+ \d+/)) {
+        if (current.hash) blameData.push({ ...current });
+        const parts = line.split(' ');
+        current = { hash: parts[0].slice(0, 7), line: parseInt(parts[2]) };
+      } else if (line.startsWith('author ')) {
+        current.author = line.slice(7);
+      } else if (line.startsWith('author-time ')) {
+        const ts = parseInt(line.slice(12)) * 1000;
+        const d = new Date(ts);
+        current.date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      } else if (line.startsWith('summary ')) {
+        current.summary = line.slice(8);
+      }
+    }
+    if (current.hash) blameData.push({ ...current });
+    return blameData;
+  } catch { return null; }
+});
+
+ipcMain.handle('git:show', async (_e, dirPath, relPath) => {
+  try {
+    const git = simpleGit(dirPath);
+    return await git.show([`HEAD:${relPath}`]);
+  } catch { return null; }
+});
+
+ipcMain.handle('git:file-log', async (_e, dirPath, relPath, count = 50) => {
+  try {
+    const git = simpleGit(dirPath);
+    const isRepo = await git.checkIsRepo();
+    if (!isRepo) return null;
+    const log = await git.log({ file: relPath, maxCount: count, '--follow': null });
+    return log.all.map(c => ({
+      hash: c.hash.slice(0, 7),
+      fullHash: c.hash,
+      message: c.message,
+      author: c.author_name,
+      date: c.date,
+    }));
+  } catch { return null; }
+});
+
+ipcMain.handle('git:show-at', async (_e, dirPath, commitHash, relPath) => {
+  try {
+    const git = simpleGit(dirPath);
+    return await git.show([`${commitHash}:${relPath}`]);
+  } catch { return null; }
+});
+
+// ---------------------------------------------------------------------------
+// Terminal
+// ---------------------------------------------------------------------------
+let terminalCwd = null;
+let terminalProc = null;
+
+ipcMain.handle('terminal:run', async (e, command) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!terminalCwd) terminalCwd = os.homedir();
+  const trimmed = command.trim();
+
+  // Handle cd
+  const cdMatch = trimmed.match(/^cd\s+([\s\S]*)/);
+  if (cdMatch) {
+    let target = cdMatch[1].trim().replace(/^["']|["']$/g, '');
+    if (target === '' || target === '~') target = os.homedir();
+    else if (target === '-') target = os.homedir();
+    else if (target.startsWith('~/')) target = path.join(os.homedir(), target.slice(2));
+    else if (!path.isAbsolute(target)) target = path.resolve(terminalCwd, target);
+    if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
+      terminalCwd = target;
+      return { code: 0, cwd: terminalCwd };
+    }
+    return { code: 1, error: `cd: no such file or directory: ${cdMatch[1].trim()}`, cwd: terminalCwd };
+  }
+
+  if (trimmed === 'clear' || trimmed === 'cls') {
+    return { code: 0, cwd: terminalCwd, clear: true };
+  }
+
+  return new Promise((resolve) => {
+    const proc = spawn('/bin/zsh', ['-l', '-c', command], {
+      cwd: terminalCwd,
+      env: { ...process.env, TERM: 'dumb', CLICOLOR: '0', NO_COLOR: '1' },
+    });
+    terminalProc = proc;
+
+    proc.stdout.on('data', (chunk) => {
+      if (win && !win.isDestroyed()) win.webContents.send('terminal:output', chunk.toString());
+    });
+    proc.stderr.on('data', (chunk) => {
+      if (win && !win.isDestroyed()) win.webContents.send('terminal:output', chunk.toString());
+    });
+    proc.on('close', (code) => {
+      terminalProc = null;
+      resolve({ code, cwd: terminalCwd });
+    });
+    proc.on('error', (err) => {
+      terminalProc = null;
+      resolve({ code: 1, error: err.message, cwd: terminalCwd });
+    });
+    setTimeout(() => {
+      if (proc && !proc.killed) {
+        proc.kill('SIGTERM');
+        resolve({ code: 137, error: 'Command timed out (60s)', cwd: terminalCwd });
+      }
+    }, 60000);
+  });
+});
+
+ipcMain.handle('terminal:kill', async () => {
+  if (terminalProc && !terminalProc.killed) {
+    terminalProc.kill('SIGINT');
+    return true;
+  }
+  return false;
+});
+
+ipcMain.handle('terminal:set-cwd', async (_e, cwd) => {
+  if (cwd) terminalCwd = cwd;
+  return terminalCwd;
+});
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
@@ -593,6 +1046,8 @@ const DEFAULT_SETTINGS = {
   cursorBlinking: 'smooth',
   lineNumbers: 'on',
   theme: 'dark',
+  trimTrailingWhitespace: true,
+  insertFinalNewline: true,
 };
 
 ipcMain.handle('settings:read', async () => {
@@ -636,11 +1091,358 @@ ipcMain.handle('markdown:render', async (_e, content) => {
 });
 
 // ---------------------------------------------------------------------------
-// App lifecycle
+// API Client — send HTTP requests from main process (no CORS)
 // ---------------------------------------------------------------------------
-app.whenReady().then(() => { ensureDirs(); createWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });
+ipcMain.handle('api:send-request', async (_e, opts) => {
+  const { method, url, headers, body } = opts;
+  const http = url.startsWith('https') ? require('https') : require('http');
+  const parsedUrl = new URL(url);
+  const start = Date.now();
+
+  return new Promise((resolve) => {
+    const reqOpts = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: method.toUpperCase(),
+      headers: headers || {},
+      timeout: 30000,
+    };
+
+    const req = http.request(reqOpts, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const rawBody = Buffer.concat(chunks);
+        const time = Date.now() - start;
+        const responseHeaders = {};
+        for (const [k, v] of Object.entries(res.headers)) {
+          responseHeaders[k] = Array.isArray(v) ? v.join(', ') : v;
+        }
+        resolve({
+          status: res.statusCode,
+          statusText: res.statusMessage,
+          headers: responseHeaders,
+          body: rawBody.toString('utf-8'),
+          time,
+          size: rawBody.length,
+        });
+      });
+    });
+
+    req.on('error', (err) => {
+      resolve({ status: 0, statusText: err.message, headers: {}, body: err.message, time: Date.now() - start, size: 0 });
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ status: 0, statusText: 'Request timed out', headers: {}, body: 'Request timed out after 30s', time: Date.now() - start, size: 0 });
+    });
+
+    if (body && ['POST', 'PUT', 'PATCH'].includes(method.toUpperCase())) {
+      req.write(body);
+    }
+    req.end();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Database Client — SQLite, JSON, CSV file-based queries
+// ---------------------------------------------------------------------------
+ipcMain.handle('db:open', async (_e, filePath) => {
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.json') {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const data = JSON.parse(content);
+      // Return table names (top-level keys if object, or ['data'] if array)
+      if (Array.isArray(data)) return { ok: true, tables: ['data'], type: 'json' };
+      return { ok: true, tables: Object.keys(data), type: 'json' };
+    } else if (ext === '.csv') {
+      return { ok: true, tables: ['csv'], type: 'csv' };
+    } else if (ext === '.sqlite' || ext === '.db' || ext === '.sqlite3') {
+      // We'll use better-sqlite3 if available, otherwise fallback to reading as binary
+      try {
+        const Database = require('better-sqlite3');
+        const db = new Database(filePath, { readonly: true });
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+        db.close();
+        return { ok: true, tables, type: 'sqlite' };
+      } catch {
+        return { ok: false, error: 'SQLite support requires better-sqlite3 package. Install with: npm install better-sqlite3' };
+      }
+    }
+    return { ok: false, error: 'Unsupported file type: ' + ext };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('db:query', async (_e, filePath, query, tableName) => {
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.json') {
+      const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      let data = Array.isArray(raw) ? raw : (raw[tableName] || []);
+      if (!Array.isArray(data)) data = [data];
+      // Simple filter: if query looks like key=value
+      if (query && query.includes('=')) {
+        const [k, v] = query.split('=').map(s => s.trim());
+        data = data.filter(row => String(row[k]) === v);
+      }
+      const columns = data.length > 0 ? Object.keys(data[0]) : [];
+      return { ok: true, columns, rows: data.slice(0, 500) };
+    } else if (ext === '.csv') {
+      const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(l => l.trim());
+      if (lines.length === 0) return { ok: true, columns: [], rows: [] };
+      const columns = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+      const rows = lines.slice(1, 501).map(line => {
+        const vals = line.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+        const row = {};
+        columns.forEach((c, i) => row[c] = vals[i] || '');
+        return row;
+      });
+      return { ok: true, columns, rows };
+    } else if (ext === '.sqlite' || ext === '.db' || ext === '.sqlite3') {
+      try {
+        const Database = require('better-sqlite3');
+        const db = new Database(filePath, { readonly: true });
+        const stmt = db.prepare(query || `SELECT * FROM ${tableName} LIMIT 500`);
+        const rows = stmt.all();
+        const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+        db.close();
+        return { ok: true, columns, rows };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    }
+    return { ok: false, error: 'Unsupported file type' };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Bookmarks persistence
+// ---------------------------------------------------------------------------
+const BOOKMARKS_FILE = path.join(CONGANOTE_DIR, '.bookmarks.json');
+
+ipcMain.handle('bookmarks:load', async () => {
+  try { return JSON.parse(fs.readFileSync(BOOKMARKS_FILE, 'utf-8')); } catch { return []; }
+});
+
+ipcMain.handle('bookmarks:save', async (_e, bookmarks) => {
+  try { fs.writeFileSync(BOOKMARKS_FILE, JSON.stringify(bookmarks, null, 2)); return true; } catch { return false; }
+});
+
+// ---------------------------------------------------------------------------
+// Code Screenshot — export dialog
+// ---------------------------------------------------------------------------
+ipcMain.handle('screenshot:save', async (e, dataUrl) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Save Screenshot',
+    defaultPath: 'code-screenshot.png',
+    filters: [{ name: 'PNG', extensions: ['png'] }],
+  });
+  if (result.canceled || !result.filePath) return false;
+  const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+  fs.writeFileSync(result.filePath, base64, 'base64');
+  return result.filePath;
+});
+
+// ---------------------------------------------------------------------------
+// TODO / FIXME scanner — search workspace files via grep
+// ---------------------------------------------------------------------------
+ipcMain.handle('todos:scan', async (e, folderPath) => {
+  const { execFile } = require('child_process');
+  // Strong tags: always matched anywhere (they're unambiguous as comment markers)
+  // Weak tags: NOTE, WARN — only matched when inside comments
+  const STRONG_TAGS = ['TODO', 'FIXME', 'HACK', 'BUG', 'XXX', 'TO-DO'];
+  const WEAK_TAGS = ['NOTE', 'WARN'];
+  const ALL_TAGS = [...STRONG_TAGS, ...WEAK_TAGS];
+  // Pattern matches any of these tags (case-insensitive) — filtering happens post-match
+  const pattern = `(${ALL_TAGS.join('|')})[\\s:;\\-]*`;
+  // Regex to detect if a line is inside a comment
+  const commentPrefixRegex = /^\s*(\/\/|\/\*+|<!--|\*|#|--|%|@|;|REM\b)/i;
+
+  return new Promise((resolve) => {
+    const rgPath = require('path').join(__dirname, '..', '..', 'node_modules', '@vscode', 'ripgrep', 'bin', 'rg');
+    const tryRg = fs.existsSync(rgPath);
+    const cmd = tryRg ? rgPath : 'grep';
+    const args = tryRg
+      ? ['-n', '-i', '--no-heading', '-e', pattern, '-r',
+         '--glob', '!node_modules', '--glob', '!.git', '--glob', '!dist',
+         '--glob', '!build', '--glob', '!*.min.js', '--glob', '!*.min.css',
+         '--glob', '!package-lock.json', '--glob', '!yarn.lock',
+         '--glob', '!*.map',
+         folderPath]
+      : ['-rni', '-E', pattern,
+         '--exclude-dir=node_modules', '--exclude-dir=.git',
+         '--exclude-dir=dist', '--exclude-dir=build',
+         '--include=*.js', '--include=*.ts', '--include=*.jsx', '--include=*.tsx',
+         '--include=*.py', '--include=*.java', '--include=*.c', '--include=*.cpp',
+         '--include=*.h', '--include=*.cs', '--include=*.go', '--include=*.rb',
+         '--include=*.php', '--include=*.swift', '--include=*.rs', '--include=*.kt',
+         '--include=*.scala', '--include=*.vue', '--include=*.svelte',
+         '--include=*.html', '--include=*.css', '--include=*.scss', '--include=*.less',
+         '--include=*.json', '--include=*.yaml', '--include=*.yml',
+         '--include=*.md', '--include=*.sh', '--include=*.bash',
+         '--include=*.sql', '--include=*.xml',
+         folderPath];
+    execFile(cmd, args, { timeout: 15000, maxBuffer: 1024 * 1024 * 10 }, (err, stdout) => {
+      if (!stdout) { resolve({ items: [] }); return; }
+      const items = [];
+      const lines = stdout.split('\n');
+      const tagRegex = new RegExp(`\\b(${ALL_TAGS.join('|')})[\\s:;\\-]*(.*)`, 'i');
+      const weakSet = new Set(WEAK_TAGS.map(t => t.toLowerCase()));
+      for (const line of lines) {
+        const m = line.match(/^(.+?):(\d+):(.*)$/);
+        if (!m) continue;
+        const filePath = m[1];
+        const lineNum = parseInt(m[2], 10);
+        const text = m[3];
+        const tagMatch = text.match(tagRegex);
+        if (!tagMatch) continue;
+        const rawTag = tagMatch[1].toUpperCase().replace('-', '');
+        const isWeak = weakSet.has(tagMatch[1].toLowerCase());
+        // For weak tags (NOTE, WARN), require the line to look like a comment
+        if (isWeak) {
+          const trimmed = text.trimStart();
+          const hasCommentPrefix = commentPrefixRegex.test(trimmed);
+          // Also check if tag is preceded by comment chars inline: e.g. code /* NOTE: ... */
+          const beforeTag = text.substring(0, tagMatch.index);
+          const hasInlineComment = /\/\/|\/\*|#|<!--/.test(beforeTag);
+          if (!hasCommentPrefix && !hasInlineComment) continue;
+        }
+        const tag = rawTag;
+        items.push({
+          tag,
+          text: tagMatch[2].trim().replace(/\*\/\s*$/, '').replace(/-->$/, '').trim(),
+          file: require('path').basename(filePath),
+          filePath,
+          line: lineNum,
+        });
+      }
+      resolve({ items });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// App lifecycle — macOS open-file support (Finder "Open With…")
+// ---------------------------------------------------------------------------
+// Queue file paths that arrive before the app is ready
+let pendingFilesToOpen = [];
+let appIsReady = false;
+
+// macOS sends 'open-file' when user double-clicks a file or uses "Open With"
+app.on('open-file', (event, filePath) => {
+  event.preventDefault();
+  if (appIsReady) {
+    openFileInNewWindow(filePath);
+  } else {
+    // App not ready yet — queue for later
+    pendingFilesToOpen.push(filePath);
+  }
+});
+
+/**
+ * Open a file in a brand-new window.
+ * Creates a new BrowserWindow, waits for it to load, then sends the file path.
+ */
+function openFileInNewWindow(filePath) {
+  addRecent(filePath);
+  const win = new BrowserWindow({
+    width: 1280, height: 800,
+    minWidth: 600, minHeight: 400,
+    title: 'CongaNote',
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 14, y: 14 },
+    backgroundColor: '#1e1e2e',
+    webPreferences: {
+      preload: path.join(__dirname, '..', 'preload', 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      spellcheck: true,
+    },
+    show: false,
+  });
+  // Load with ?new=1 so the renderer skips session restore (starts clean)
+  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'), { query: { new: '1' } });
+  win.once('ready-to-show', () => win.show());
+
+  // Once the renderer finishes loading, send the file to open
+  win.webContents.once('did-finish-load', () => {
+    // Small delay to let renderer init() complete and register IPC listeners
+    setTimeout(() => {
+      win.webContents.send('file:open-path', filePath);
+    }, 500);
+  });
+
+  // Open external links in default browser
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('file://')) {
+      event.preventDefault();
+      shell.openExternal(url);
+    }
+  });
+
+  // Clean up file watchers when this window closes
+  win.on('closed', () => {
+    const wId = win.id;
+    for (const [key, w] of watchers) {
+      if (key.startsWith(`${wId}:`)) {
+        w.close().catch(() => {});
+        watchers.delete(key);
+      }
+    }
+  });
+}
+
+app.whenReady().then(() => {
+  ensureDirs();
+  appIsReady = true;
+
+  // If files were queued (from open-file before ready), open each in a new window
+  if (pendingFilesToOpen.length > 0) {
+    pendingFilesToOpen.forEach(fp => openFileInNewWindow(fp));
+    pendingFilesToOpen = [];
+  } else {
+    // No file to open — launch the normal main window with welcome screen
+    createWindow();
+  }
+
+  // Set up dock menu with recent files
+  updateDockMenu();
+
+  // Also handle files passed via command line
+  const args = process.argv.slice(app.isPackaged ? 1 : 2);
+  args.forEach(arg => {
+    if (!arg.startsWith('-') && fs.existsSync(arg)) {
+      openFileInNewWindow(path.resolve(arg));
+    }
+  });
+
+  app.on('activate', () => {
+    // macOS: re-create window when dock icon is clicked and no windows exist
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    } else if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+});
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('before-quit', () => {
+  // Clean up terminal
+  if (terminalProc && !terminalProc.killed) terminalProc.kill('SIGTERM');
   // Clean up file watchers
   for (const [key, watcher] of watchers) {
     watcher.close();

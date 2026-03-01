@@ -1,5 +1,5 @@
 /* ========================================================================
-   SplecNote — Renderer (app.js)
+   CongaNote — Renderer (app.js)
    ======================================================================== */
 
 'use strict';
@@ -13,7 +13,7 @@ const state = {
   tabs: [],               // { id, title, filePath, model, viewState, modified }
   activeTabId: null,
   folderPath: null,
-  sidebarVisible: true,
+  sidebarVisible: false,
   sidebarWidth: 260,      // remembered width before collapse
   searchDecorations: [],   // IDs for current in-file search decorations
   globalSearchAbort: null, // AbortController for async global search
@@ -33,6 +33,22 @@ const state = {
   gitStatus: null,         // { branch, files, ahead, behind }
   imagePreviewActive: false,
   settings: null,
+  terminalVisible: false,
+  terminalCwd: null,
+  terminalHistory: [],
+  terminalHistoryIdx: -1,
+  blameVisible: false,
+  blameData: null,
+  blameDecorations: [],
+  // Tool panels state
+  apiHistory: [],
+  apiCollections: [],
+  bookmarks: [],
+  dbFilePath: null,
+  dbType: null,
+  dbTables: [],
+  activeToolPanel: null, // 'api'|'regex'|'json'|'bookmarks'|'screenshot'|'db'|null
+  historySectionOpen: false,
 };
 
 /* ---- DOM cache ---- */
@@ -100,12 +116,43 @@ function cacheDom() {
   dom.outlineSectionHeader = $('#outline-section-header');
   dom.outlineToggleIcon = $('#outline-toggle-icon');
   dom.outlineList      = $('#outline-list');
+  dom.historySection     = $('#history-section');
+  dom.historySectionHeader = $('#history-section-header');
+  dom.historyToggleIcon  = $('#history-toggle-icon');
+  dom.historyList         = $('#history-list');
   dom.toastContainer   = $('#toast-container');
   dom.statusGit        = $('#status-git');
   dom.editorRow        = $('#editor-row');
   dom.editorSplitContainer = $('#editor-split-container');
   dom.editorSecondary  = $('#editor-container-secondary');
   dom.splitResizer     = $('#split-resizer');
+  // Terminal
+  dom.terminalPanel    = $('#terminal-panel');
+  dom.terminalOutput   = $('#terminal-output');
+  dom.terminalInput    = $('#terminal-input');
+  dom.terminalPrompt   = $('#terminal-prompt');
+  dom.terminalCwd      = $('#terminal-cwd');
+  dom.terminalResizer  = $('#terminal-resizer');
+  // Language picker
+  dom.languagePickerOverlay = $('#language-picker-overlay');
+  dom.languagePickerInput   = $('#language-picker-input');
+  dom.languagePickerResults = $('#language-picker-results');
+  // Minimap indicator
+  dom.statusMinimap    = $('#status-minimap');
+  // Git info popup
+  dom.gitInfoPopup     = $('#git-info-popup');
+  dom.gitInfoBranch    = $('#git-info-branch');
+  dom.gitInfoTracking  = $('#git-info-tracking');
+  dom.gitInfoSync      = $('#git-info-sync');
+  dom.gitInfoRemote    = $('#git-info-remote');
+  dom.gitInfoStash     = $('#git-info-stash');
+  dom.gitInfoFiles     = $('#git-info-files');
+  dom.gitInfoCommits   = $('#git-info-commits');
+  // Rich text editor
+  dom.richTextContainer = $('#richtext-container');
+  dom.richTextToolbar  = $('#richtext-toolbar');
+  dom.richTextEditor   = $('#richtext-editor');
+  dom.statusRichText   = $('#status-richtext');
 }
 
 /* ================================================================
@@ -126,7 +173,7 @@ const THEMES = [
   { id: 'tomorrow-night',   label: 'Tomorrow Night',    base: 'vs-dark' },
   { id: 'ayu-dark',         label: 'Ayu Dark',          base: 'vs-dark' },
   { id: 'gruvbox',          label: 'Gruvbox Dark',      base: 'vs-dark' },
-  { id: 'splec',             label: 'Splec Theme',       base: 'vs-dark' },
+  { id: 'conga',             label: 'Conga Theme',       base: 'vs-dark' },
 ];
 
 function defineMonacoThemes(monaco) {
@@ -324,7 +371,7 @@ function defineMonacoThemes(monaco) {
       ],
       colors: { 'editor.background': '#282828', 'editor.foreground': '#ebdbb2', 'editor.selectionBackground': '#3c383680' },
     },
-    splec: {
+    conga: {
       base: 'vs-dark', inherit: true,
       rules: [
         // Comments
@@ -529,6 +576,17 @@ function initMonaco() {
         folding: true,
         tabSize: 2,
       });
+      // Add "File History" to editor right-click context menu
+      state.editor.addAction({
+        id: 'conganote.fileHistory',
+        label: 'File History',
+        contextMenuGroupId: '9_cutcopypaste',
+        contextMenuOrder: 99,
+        run: () => {
+          const tab = state.tabs.find(t => t.id === state.activeTabId);
+          if (tab?.filePath) showFileHistoryInPanel(tab.filePath);
+        }
+      });
       state.editor.onDidChangeCursorPosition(updateStatusPosition);
       state.editor.onDidChangeModelContent(() => {
         markTabModified(state.activeTabId, true);
@@ -577,15 +635,32 @@ function activateTab(id) {
   // Save current view state
   const prev = state.tabs.find((t) => t.id === state.activeTabId);
   if (prev && state.editor) prev.viewState = state.editor.saveViewState();
+  // Save rich text HTML when switching away
+  if (prev && prev._richTextMode && dom.richTextEditor) {
+    prev._richTextHtml = dom.richTextEditor.innerHTML;
+  }
+
+window.activateTab = activateTab;
   state.activeTabId = id;
 
   // Handle special tabs (settings, image)
   hideSettingsUI();
   hideImagePreview();
+  // Hide diff editor if switching away from a diff tab
+  hideDiffEditor();
 
   if (tab._isSettings) {
     state.editor.setModel(tab.model);
     renderSettingsUI();
+    renderTabs();
+    updateTitleBar(tab);
+    updateEmptyTabShortcuts();
+    return;
+  }
+
+  // Handle diff tabs
+  if (tab._isDiff) {
+    renderDiffEditor(tab);
     renderTabs();
     updateTitleBar(tab);
     updateEmptyTabShortcuts();
@@ -600,6 +675,19 @@ function activateTab(id) {
     updateTitleBar(tab);
     updateEmptyTabShortcuts();
     return;
+  }
+
+  // Handle rich text mode
+  if (tab._richTextMode) {
+    enterRichTextMode(tab, false); // re-enter without overwriting content
+    renderTabs();
+    updateStatusLanguage(tab);
+    updateTitleBar(tab);
+    updateEmptyTabShortcuts();
+    updateBreadcrumbs();
+    return;
+  } else {
+    hideRichTextEditor();
   }
 
   state.editor.setModel(tab.model);
@@ -633,6 +721,11 @@ function closeTab(id) {
   // Clean up
   hideSettingsUI();
   hideImagePreview();
+  hideDiffEditor();
+  // Dispose diff editor resources
+  if (tab._diffEditor) { tab._diffEditor.dispose(); }
+  if (tab._diffOriginalModel) { tab._diffOriginalModel.dispose(); }
+  if (tab._diffModifiedModel) { tab._diffModifiedModel.dispose(); }
   tab.model.dispose();
   state.tabs.splice(idx, 1);
   clearAutoSave(id);
@@ -696,7 +789,7 @@ function markTabModified(id, modified) {
 
 function updateTitleBar(tab) {
   const mod = tab && tab.modified ? '● ' : '';
-  dom.titlebarTitle.textContent = tab ? `${mod}${tab.title} — SplecNote` : 'SplecNote';
+  dom.titlebarTitle.textContent = tab ? `${mod}${tab.title} — CongaNote` : 'CongaNote';
 }
 
 /* ================================================================
@@ -705,10 +798,10 @@ function updateTitleBar(tab) {
 
 async function openFileDialog() {
   try {
-    const filePaths = await window.splecnote.openFileDialog();
+    const filePaths = await window.conganote.openFileDialog();
     if (!filePaths || filePaths.length === 0) return;
     for (const fp of filePaths) {
-      const content = await window.splecnote.readFile(fp);
+      const content = await window.conganote.readFile(fp);
       if (content != null) await openFile(fp, content);
     }
   } catch (err) {
@@ -725,38 +818,123 @@ async function openFile(filePath, content) {
   // For image files, create a placeholder tab (content will be shown via image preview)
   if (isImageFile(name)) {
     createTab(name, filePath, '', 'plaintext');
-    await window.splecnote.addRecent(filePath);
+    await window.conganote.addRecent(filePath);
     return;
   }
 
   createTab(name, filePath, content);
-  await window.splecnote.addRecent(filePath);
+  await window.conganote.addRecent(filePath);
 }
+window.openFile = openFile;
 
 async function saveFile(tabOrId) {
   const tab = typeof tabOrId === 'object' ? tabOrId : state.tabs.find((t) => t.id === tabOrId);
   if (!tab) return;
-  const content = tab.model.getValue();
+  // Sync rich text content to model before saving
+  if (tab._richTextMode) saveRichTextContent(tab);
+  let content = tab.model.getValue();
+  // Trim trailing whitespace on each line
+  if (state.settings?.trimTrailingWhitespace !== false) {
+    const trimmed = content.split('\n').map(line => line.replace(/\s+$/, '')).join('\n');
+    if (trimmed !== content) {
+      const pos = state.editor?.getPosition();
+      tab.model.setValue(trimmed);
+      if (pos && state.editor && tab.id === state.activeTabId) state.editor.setPosition(pos);
+      content = trimmed;
+    }
+  }
+  // Ensure final newline
+  if (state.settings?.insertFinalNewline !== false && content.length > 0 && !content.endsWith('\n')) {
+    content += '\n';
+  }
   if (!tab.filePath) {
-    // Untitled — auto-save to dedicated dir
+    // Untitled — auto-save to ~/CongaNote/AutoSave/YYYY-MM-DD/
     const today = new Date().toISOString().slice(0, 10);
-    const safeName = tab.title.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const dir = await window.splecnote.getAutoSavePath(today);
-    const filePath = `${dir}/${safeName}`;
-    await window.splecnote.writeFile(filePath, content);
+    const dir = await window.conganote.getAutoSavePath(today);
+    // Use tab title, sanitize it, and add .txt extension
+    const safeName = (tab.title || 'Untitled').replace(/[^a-zA-Z0-9._\- ]/g, '_').trim() || 'Untitled';
+    const baseName = safeName.includes('.') ? safeName : `${safeName}.txt`;
+    let filePath = `${dir}/${baseName}`;
+    // Avoid collisions: append -1, -2, etc.
+    const ext = baseName.substring(baseName.lastIndexOf('.'));
+    const stem = baseName.substring(0, baseName.lastIndexOf('.'));
+    let i = 1;
+    while (await window.conganote.stat(filePath)) {
+      filePath = `${dir}/${stem}-${i}${ext}`;
+      i++;
+    }
+    await window.conganote.writeFile(filePath, content);
     tab.filePath = filePath;
+    tab.title = filePath.split('/').pop();
+    renderTabs();
+    updateTitleBar(tab);
+    updateBreadcrumbs();
+    // Add to recent files so it appears on the welcome page
+    await window.conganote.addRecent(filePath);
   } else {
-    await window.splecnote.writeFile(tab.filePath, content);
+    await window.conganote.writeFile(tab.filePath, content);
   }
   markTabModified(tab.id, false);
   showAutoSaved();
 }
 
 async function saveAsFile() {
-  // Use the existing writeFile after getting a new path via dialog
   const tab = state.tabs.find((t) => t.id === state.activeTabId);
   if (!tab) return;
-  await saveFile(tab);
+
+  // If in rich text mode, get content from the rich text editor
+  let content;
+  if (tab._richTextMode && dom.richTextEditor) {
+    content = dom.richTextEditor.innerText;
+  } else {
+    content = tab.model.getValue();
+  }
+
+  const defaultName = tab.filePath || tab.title;
+  const newPath = await window.conganote.saveFileDialog(defaultName);
+  if (!newPath) return;
+
+  // Trim trailing whitespace if applicable
+  if (state.settings?.trimTrailingWhitespace !== false) {
+    content = content.split('\n').map(line => line.replace(/\s+$/, '')).join('\n');
+  }
+  if (state.settings?.insertFinalNewline !== false && content.length > 0 && !content.endsWith('\n')) {
+    content += '\n';
+  }
+
+  await window.conganote.writeFile(newPath, content);
+
+  const newName = newPath.split('/').pop();
+  const oldWasRichText = tab._richTextMode;
+  tab.filePath = newPath;
+  tab.title = newName;
+
+  // Update Monaco model with new URI and language
+  const lang = guessLanguage(newName);
+  const oldContent = tab.model.getValue();
+  tab.model.dispose();
+  const newUri = monaco.Uri.file(newPath);
+  tab.model = monaco.editor.createModel(content, lang, newUri);
+
+  // If extension changed from .txt to code file, exit rich text mode
+  if (oldWasRichText && lang !== 'plaintext') {
+    exitRichTextMode(tab);
+  }
+  // If changed to .txt and not in rich text mode, optionally enter
+  // (user can toggle manually)
+
+  if (state.activeTabId === tab.id && state.editor) {
+    state.editor.setModel(tab.model);
+  }
+
+  markTabModified(tab.id, false);
+  renderTabs();
+  updateTitleBar(tab);
+  updateBreadcrumbs();
+  updateStatusLanguage(tab);
+  if (state.folderPath) await refreshTree();
+  showToast(`Saved as ${newName}`, 'success', 2000);
+  await window.conganote.addRecent(newPath);
 }
 
 function showAutoSaved() {
@@ -792,7 +970,7 @@ async function saveSession() {
       filePath: t.filePath,
       content: t.filePath ? null : t.model.getValue(),
     }));
-    await window.splecnote.saveSession({
+    await window.conganote.saveSession({
       tabs,
       activeIndex: state.tabs.findIndex((t) => t.id === state.activeTabId),
       folderPath: state.folderPath,
@@ -813,22 +991,22 @@ async function restoreSession() {
   if (params.get('new') === '1') {
     // Still restore theme preference
     try {
-      const session = await window.splecnote.loadSession();
+      const session = await window.conganote.loadSession();
       if (session?.theme) { state.theme = session.theme; applyTheme(state.theme); }
     } catch {}
-    // Ensure sidebar is visible in new windows
-    state.sidebarVisible = true;
+    // Sidebar stays hidden until a folder is opened
+    state.sidebarVisible = false;
     applySidebarState();
     return;
   }
   try {
-    const session = await window.splecnote.loadSession();
+    const session = await window.conganote.loadSession();
     if (!session) return;
     // Restore user preferences only — theme, sidebar
     if (session.theme) { state.theme = session.theme; applyTheme(state.theme); }
-    if (session.sidebarVisible !== undefined) {
-      state.sidebarVisible = session.sidebarVisible;
-    }
+    // Sidebar only shows when a folder is opened (handled by openFolder)
+    // Start hidden; openFolder will set it visible
+    state.sidebarVisible = false;
     if (session.sidebarWidth) {
       state.sidebarWidth = session.sidebarWidth;
     }
@@ -861,8 +1039,14 @@ async function openFolder(dirPath) {
     await startWatching(dirPath);
     // Refresh git status
     refreshGitStatus();
+    // Update terminal CWD if terminal is open
+    if (state.terminalVisible && !state.terminalCwd) {
+      state.terminalCwd = dirPath;
+      window.conganote.terminalSetCwd(dirPath);
+      updateTerminalCwd();
+    }
     // Add folder to recent list
-    await window.splecnote.addRecent(dirPath);
+    await window.conganote.addRecent(dirPath);
     dom.fileTreeEmpty.classList.add('hidden');
     dom.fileTree.innerHTML = '';
     dom.rootFolderBar.classList.remove('hidden');
@@ -885,7 +1069,7 @@ async function openFolder(dirPath) {
 
 async function openFolderDialog() {
   try {
-    const dirPath = await window.splecnote.openFolderDialog();
+    const dirPath = await window.conganote.openFolderDialog();
     if (!dirPath) return;
     hideWelcome();
     await openFolder(dirPath);
@@ -897,7 +1081,7 @@ async function openFolderDialog() {
 async function renderTreeDir(dirPath, parentEl, depth) {
   let entries;
   try {
-    entries = await window.splecnote.readDir(dirPath);
+    entries = await window.conganote.readDir(dirPath);
   } catch (err) {
     console.error('readDir error:', err);
     return;
@@ -939,7 +1123,15 @@ async function renderTreeDir(dirPath, parentEl, depth) {
       if (badge) {
         const badgeEl = document.createElement('span');
         badgeEl.innerHTML = badge;
-        item.appendChild(badgeEl.firstChild);
+        const badgeNode = badgeEl.firstChild;
+        badgeNode.style.cursor = 'pointer';
+        badgeNode.title = 'Click to view diff';
+        badgeNode.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const relPath = entry.path.replace(state.folderPath + '/', '');
+          showDiffView(relPath, entry.path);
+        });
+        item.appendChild(badgeNode);
       }
     }
 
@@ -968,7 +1160,7 @@ async function renderTreeDir(dirPath, parentEl, depth) {
         dom.fileTree.querySelectorAll('.tree-item.active').forEach((el) => el.classList.remove('active'));
         item.classList.add('active');
         try {
-          const content = await window.splecnote.readFile(entry.path);
+          const content = await window.conganote.readFile(entry.path);
           await openFile(entry.path, content);
         } catch (err) {
           console.error('Failed to open file:', err);
@@ -993,6 +1185,14 @@ let contextTarget = { path: '', isDir: false };
 
 function showContextMenu(x, y, targetPath, isDir) {
   contextTarget = { path: targetPath, isDir };
+  // Hide "File History" for directories
+  const historyItem = dom.contextMenu.querySelector('[data-action="file-history"]');
+  if (historyItem) {
+    historyItem.style.display = isDir ? 'none' : '';
+    // Also hide the separator before it
+    const prevSep = historyItem.previousElementSibling;
+    if (prevSep && prevSep.classList.contains('ctx-separator')) prevSep.style.display = isDir ? 'none' : '';
+  }
   dom.contextMenu.classList.remove('hidden');
   dom.contextMenu.style.left = Math.min(x, window.innerWidth - 200) + 'px';
   dom.contextMenu.style.top = Math.min(y, window.innerHeight - 250) + 'px';
@@ -1020,14 +1220,14 @@ function initContextMenu() {
         const name = prompt('New file name:');
         if (!name) return;
         const fp = `${parentDir}/${name}`;
-        await window.splecnote.writeFile(fp, '');
+        await window.conganote.writeFile(fp, '');
         await refreshTree();
         break;
       }
       case 'new-folder': {
         const name = prompt('New folder name:');
         if (!name) return;
-        await window.splecnote.createDir(`${parentDir}/${name}`);
+        await window.conganote.createDir(`${parentDir}/${name}`);
         await refreshTree();
         break;
       }
@@ -1036,13 +1236,13 @@ function initContextMenu() {
         const newName = prompt('Rename to:', oldName);
         if (!newName || newName === oldName) return;
         const newPath = tp.substring(0, tp.lastIndexOf('/')) + '/' + newName;
-        await window.splecnote.rename(tp, newPath);
+        await window.conganote.rename(tp, newPath);
         await refreshTree();
         break;
       }
       case 'delete': {
         if (!confirm(`Delete "${tp.split('/').pop()}"?`)) return;
-        await window.splecnote.deleteFile(tp);
+        await window.conganote.deleteFile(tp);
         await refreshTree();
         break;
       }
@@ -1051,11 +1251,17 @@ function initContextMenu() {
         break;
       }
       case 'reveal-finder': {
-        try { await window.splecnote.revealInFinder(tp); } catch (err) { console.error('reveal error:', err); }
+        try { await window.conganote.revealInFinder(tp); } catch (err) { console.error('reveal error:', err); }
+        break;
+      }
+      case 'file-history': {
+        if (!contextTarget.isDir) {
+          showFileHistoryInPanel(tp);
+        }
         break;
       }
       case 'open-terminal': {
-        try { await window.splecnote.openInTerminal(parentDir); } catch (err) { console.error('open terminal error:', err); }
+        try { await window.conganote.openInTerminal(parentDir); } catch (err) { console.error('open terminal error:', err); }
         break;
       }
     }
@@ -1077,12 +1283,12 @@ function showTabContextMenu(x, y, tabId) {
   const tab = state.tabs.find(t => t.id === tabId);
 
   // Hide path-related options for untitled tabs
-  menu.querySelectorAll('[data-action="tab-copy-path"], [data-action="tab-reveal-finder"], [data-action="tab-open-terminal"]').forEach(el => {
+  menu.querySelectorAll('[data-action="tab-rename"], [data-action="tab-copy-path"], [data-action="tab-reveal-finder"], [data-action="tab-open-terminal"], [data-action="tab-delete"], [data-action="tab-file-history"]').forEach(el => {
     el.style.display = tab?.filePath ? '' : 'none';
   });
-  // Also hide separator before path actions if no file
+  // Also hide separators for path actions / delete if no file
   const seps = menu.querySelectorAll('.ctx-separator');
-  if (seps.length >= 2) seps[1].style.display = tab?.filePath ? '' : 'none';
+  seps.forEach((sep, i) => { if (i >= 1) sep.style.display = tab?.filePath ? '' : 'none'; });
 
   menu.classList.remove('hidden');
   menu.style.left = Math.min(x, window.innerWidth - 200) + 'px';
@@ -1116,18 +1322,48 @@ function initTabContextMenu() {
         const allIds = state.tabs.map(t => t.id);
         allIds.forEach(id => closeTab(id));
         break;
+      case 'tab-rename': {
+        if (tab.filePath) {
+          startInlineTabRename(tab);
+        }
+        break;
+      }
       case 'tab-copy-path':
         if (tab.filePath) await navigator.clipboard.writeText(tab.filePath);
         break;
       case 'tab-reveal-finder':
         if (tab.filePath) {
-          try { await window.splecnote.revealInFinder(tab.filePath); } catch (err) { console.error(err); }
+          try { await window.conganote.revealInFinder(tab.filePath); } catch (err) { console.error(err); }
+        }
+        break;
+      case 'tab-file-history':
+        if (tab.filePath) {
+          showFileHistoryInPanel(tab.filePath);
         }
         break;
       case 'tab-open-terminal': {
         if (tab.filePath) {
           const dir = tab.filePath.substring(0, tab.filePath.lastIndexOf('/'));
-          try { await window.splecnote.openInTerminal(dir); } catch (err) { console.error(err); }
+          try { await window.conganote.openInTerminal(dir); } catch (err) { console.error(err); }
+        }
+        break;
+      }
+      case 'tab-delete': {
+        if (tab.filePath) {
+          const confirmed = confirm(`Are you sure you want to permanently delete "${tab.title}"?\n\nThis action cannot be undone.`);
+          if (!confirmed) break;
+          try {
+            const ok = await window.conganote.deleteFile(tab.filePath);
+            if (ok) {
+              closeTab(tab.id);
+              if (state.folderPath) await refreshTree();
+              showToast(`Deleted ${tab.title}`, 'success', 2000);
+            } else {
+              showToast('Delete failed', 'error', 3000);
+            }
+          } catch (err) {
+            showToast(`Delete failed: ${err.message}`, 'error', 3000);
+          }
         }
         break;
       }
@@ -1138,6 +1374,81 @@ function initTabContextMenu() {
 /* ================================================================
    8. SEARCH & REPLACE (In-File)
    ================================================================ */
+
+/* ---- Inline Tab Rename ---- */
+function startInlineTabRename(tab) {
+  if (!tab || !tab.filePath) return;
+  const tabEl = dom.tabsContainer.querySelector(`.tab[data-tab-id="${tab.id}"]`);
+  if (!tabEl) return;
+
+  const titleSpan = tabEl.querySelector('.tab-title');
+  if (!titleSpan) return;
+
+  const oldName = tab.title;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'tab-rename-input';
+  input.value = oldName;
+
+  // Select the filename without extension
+  const dotIdx = oldName.lastIndexOf('.');
+  titleSpan.replaceWith(input);
+  input.focus();
+  if (dotIdx > 0) {
+    input.setSelectionRange(0, dotIdx);
+  } else {
+    input.select();
+  }
+
+  let committed = false;
+
+  async function commitRename() {
+    if (committed) return;
+    committed = true;
+    const newName = input.value.trim();
+    if (!newName || newName === oldName) {
+      renderTabs();
+      return;
+    }
+    const dir = tab.filePath.substring(0, tab.filePath.lastIndexOf('/'));
+    const newPath = dir + '/' + newName;
+    try {
+      const ok = await window.conganote.rename(tab.filePath, newPath);
+      if (!ok) { showToast('Rename failed', 'error', 3000); renderTabs(); return; }
+      tab.filePath = newPath;
+      tab.title = newName;
+      if (tab.model) {
+        const content = tab.model.getValue();
+        tab.model.dispose();
+        const lang = guessLanguage(newName);
+        const newUri = monaco.Uri.file(newPath);
+        tab.model = monaco.editor.createModel(content, lang, newUri);
+        if (state.activeTabId === tab.id && state.editor) {
+          state.editor.setModel(tab.model);
+        }
+      }
+      renderTabs();
+      updateTitleBar(tab);
+      updateBreadcrumbs();
+      updateStatusLanguage(tab);
+      if (state.folderPath) await refreshTree();
+      showToast(`Renamed to ${newName}`, 'success', 2000);
+      await window.conganote.addRecent(newPath);
+    } catch (err) {
+      showToast(`Rename failed: ${err.message}`, 'error', 3000);
+      renderTabs();
+    }
+  }
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+    if (e.key === 'Escape') { e.preventDefault(); committed = true; renderTabs(); }
+    e.stopPropagation();
+  });
+  input.addEventListener('blur', () => commitRename());
+  // Prevent click events from bubbling to tab click handler
+  input.addEventListener('click', (e) => e.stopPropagation());
+}
 
 function showSearchBar(withReplace = false) {
   dom.searchBar.classList.remove('hidden');
@@ -1362,7 +1673,7 @@ function hideQuickOpen() {
 async function loadQuickOpenFiles() {
   if (state.folderPath) {
     try {
-      quickOpenFiles = await window.splecnote.getAllFiles(state.folderPath);
+      quickOpenFiles = await window.conganote.getAllFiles(state.folderPath);
     } catch {
       quickOpenFiles = [];
     }
@@ -1392,7 +1703,7 @@ function renderQuickOpenResults(files) {
     item.addEventListener('click', async () => {
       hideQuickOpen();
       try {
-        const content = await window.splecnote.readFile(fp);
+        const content = await window.conganote.readFile(fp);
         await openFile(fp, content);
       } catch (err) { console.error('quick open error:', err); }
     });
@@ -1450,7 +1761,7 @@ function initQuickOpen() {
 
 const COMMANDS = [
   { id: 'new-tab',        label: 'New Tab',            shortcut: '⌘N',    action: () => createTab() },
-  { id: 'new-window',     label: 'New Window',         shortcut: '⇧⌘N',   action: () => window.splecnote.newWindow() },
+  { id: 'new-window',     label: 'New Window',         shortcut: '⇧⌘N',   action: () => window.conganote.newWindow() },
   { id: 'open-file',      label: 'Open File',          shortcut: '⌘O',    action: openFileDialog },
   { id: 'open-folder',    label: 'Open Folder',        shortcut: '⇧⌘O',   action: openFolderDialog },
   { id: 'save',           label: 'Save',               shortcut: '⌘S',    action: () => { const t = state.tabs.find((t) => t.id === state.activeTabId); if (t) saveFile(t); } },
@@ -1491,6 +1802,27 @@ const COMMANDS = [
   { id: 'md-preview',     label: 'Markdown Preview',   shortcut: '⇧⌘V',   action: toggleMarkdownPreview },
   { id: 'settings',       label: 'Open Settings',      shortcut: '⌘,',    action: openSettingsTab },
   { id: 'outline',        label: 'Toggle Outline',     shortcut: '',      action: toggleOutlineSection },
+  { id: 'terminal',       label: 'Toggle Terminal',    shortcut: '⌃`',    action: toggleTerminal },
+  { id: 'change-lang',    label: 'Change Language Mode', shortcut: '',    action: showLanguagePicker },
+  { id: 'git-blame',      label: 'Toggle Git Blame',   shortcut: '',      action: toggleGitBlame },
+  { id: 'show-diff',      label: 'Show Git Diff',      shortcut: '',      action: showDiffForCurrentFile },
+  { id: 'trim-ws',        label: 'Trim Trailing Whitespace', shortcut: '', action: trimTrailingWhitespaceNow },
+  { id: 'git-info',       label: 'Show Git Info',  shortcut: '',      action: toggleGitInfoPopup },
+  { id: 'richtext-mode',  label: 'Toggle Rich Text Mode', shortcut: '', action: toggleRichTextMode },
+  { id: 'save-as-type',   label: 'Save As (Change File Type)...', shortcut: '⇧⌘S', action: saveAsFile },
+  { id: 'recent-files',   label: 'Show Recent Files',  shortcut: '',      action: showRecentPanel },
+  { id: 'system-search',  label: 'Spotlight Search',  shortcut: '⇧⌘Space',  action: focusSystemSearch },
+  { id: 'api-client',     label: 'API Client',        shortcut: '⌃⇧A',      action: () => toggleToolPanel('api-client-panel') },
+  { id: 'regex-tester',    label: 'Regex Tester',       shortcut: '⌃⇧R',      action: () => toggleToolPanel('regex-panel') },
+  { id: 'json-viewer',     label: 'JSON / Data Viewer', shortcut: '⌃⇧J',      action: () => openJsonViewer() },
+  { id: 'bookmarks',       label: 'Toggle Bookmarks',   shortcut: '⌃⇧B',      action: () => toggleToolPanel('bookmarks-panel') },
+  { id: 'screenshot',      label: 'Code Screenshot',    shortcut: '⌃⇧S',      action: () => openScreenshotPanel() },
+  { id: 'db-client',       label: 'Database Client',    shortcut: '⌃⇧D',      action: () => toggleToolPanel('db-panel') },
+  { id: 'snippets',         label: 'Snippet Manager',    shortcut: '⌃⇧E',      action: () => toggleToolPanel('snippet-panel') },
+  { id: 'color-picker',     label: 'Color Picker',       shortcut: '⌃⇧K',      action: () => toggleToolPanel('color-panel') },
+  { id: 'todo-tracker',     label: 'TODO Tracker',       shortcut: '⌃⇧G',      action: () => toggleToolPanel('todo-panel') },
+  { id: 'pomodoro',         label: 'Pomodoro Timer',     shortcut: '⌃⇧Y',      action: () => toggleToolPanel('pomo-panel') },
+  { id: 'diff-checker',      label: 'Diff Checker',       shortcut: '⌃⇧I',      action: () => toggleToolPanel('diff-panel') },
 ];
 
 function showCommandPalette() {
@@ -1572,10 +1904,12 @@ function showGlobalSearch() {
     return;
   }
   dom.globalSearchOverlay.classList.remove('hidden');
-  dom.globalSearchInput.value = '';
+  // Preserve previous search query & results — only show placeholder if empty
+  if (!dom.globalSearchInput.value.trim()) {
+    dom.globalSearchStatus.textContent = state.folderPath ? 'Type to search across files…' : 'Open a folder first to search across files';
+  }
   dom.globalSearchInput.focus();
-  dom.globalSearchResults.innerHTML = '';
-  dom.globalSearchStatus.textContent = state.folderPath ? 'Type to search across files…' : 'Open a folder first to search across files';
+  dom.globalSearchInput.select();
 }
 
 function hideGlobalSearch() {
@@ -1606,7 +1940,7 @@ async function doGlobalSearch() {
   try {
     const caseSensitive = dom.globalSearchCase.checked;
     const isRegex = dom.globalSearchRegex.checked;
-    const results = await window.splecnote.searchInFiles(state.folderPath, query, { caseSensitive, isRegex });
+    const results = await window.conganote.searchInFiles(state.folderPath, query, { caseSensitive, isRegex });
 
     // Check if this search was aborted
     if (controller.signal.aborted) return;
@@ -1642,9 +1976,10 @@ async function doGlobalSearch() {
         const highlighted = highlightMatch(lineText, escHtml(query), caseSensitive);
         matchEl.innerHTML = `<span class="gs-line-num">${match.line || match.lineNumber}</span><span class="gs-match-text">${highlighted}</span>`;
         matchEl.addEventListener('click', async () => {
-          // Don't hide — keep search persistent so user can click multiple results
+          // Hide overlay so user can see the file, results stay for when they come back
+          dom.globalSearchOverlay.classList.add('hidden');
           try {
-            const content = await window.splecnote.readFile(file.filePath);
+            const content = await window.conganote.readFile(file.filePath);
             await openFile(file.filePath, content);
             // Jump to the line
             const ln = match.line || match.lineNumber;
@@ -1791,6 +2126,8 @@ function renderThemeList(themes) {
 function applyTheme(themeId) {
   state.theme = themeId;
   document.documentElement.setAttribute('data-theme', themeId);
+  // Persist theme to localStorage for instant load on next startup
+  try { localStorage.setItem('conganote-theme', themeId); } catch(e) {}
   if (state.editor) {
     monaco.editor.setTheme(monacoThemeId(themeId));
   }
@@ -1909,7 +2246,7 @@ function toggleRecentSection() {
 
 async function loadRecentFiles() {
   try {
-    const recentFiles = await window.splecnote.getRecent();
+    const recentFiles = await window.conganote.getRecent();
     renderRecentList(recentFiles || []);
     renderWelcomeRecent(recentFiles || []);
   } catch {
@@ -1924,25 +2261,50 @@ function renderRecentList(files) {
     dom.recentList.innerHTML = '<div style="padding:8px 12px;color:var(--text-muted);font-size:12px;">No recent files</div>';
     return;
   }
-  for (const fp of files.slice(0, 20)) {
-    const name = fp.split('/').pop();
-    const dir = fp.substring(0, fp.lastIndexOf('/'));
-    const item = document.createElement('div');
-    item.className = 'recent-item';
-    item.innerHTML = `<span class="recent-item-name">${escHtml(name)}</span><span class="recent-item-path">${escHtml(dir)}</span>`;
-    item.addEventListener('click', async () => {
-      try {
-        // Check if it's a directory (folder) or a file
-        const stat = await window.splecnote.stat(fp);
-        if (stat && stat.isDirectory) {
-          await openFolder(fp);
-        } else {
-          const content = await window.splecnote.readFile(fp);
-          await openFile(fp, content);
-        }
-      } catch (err) { console.error('open recent error:', err); }
-    });
-    dom.recentList.appendChild(item);
+  const grouped = groupRecentFiles(files);
+  let count = 0;
+  for (const entry of grouped) {
+    if (count >= 20) break;
+    if (entry.type === 'folder-group') {
+      // Show folder group
+      const item = document.createElement('div');
+      item.className = 'recent-item recent-item-folder';
+      item.innerHTML = `<span class="recent-item-name">📁 ${escHtml(entry.name)}</span><span class="recent-item-path">${escHtml(entry.shortDir)}</span>`;
+      item.addEventListener('click', async () => {
+        try { await openFolder(entry.dir); } catch (err) { console.error('open recent error:', err); }
+      });
+      dom.recentList.appendChild(item);
+      count++;
+    } else if (entry.type === 'directory') {
+      const item = document.createElement('div');
+      item.className = 'recent-item recent-item-folder';
+      item.innerHTML = `<span class="recent-item-name">📁 ${escHtml(entry.name)}</span><span class="recent-item-path">${escHtml(entry.shortDir)}</span>`;
+      item.addEventListener('click', async () => {
+        try { await openFolder(entry.path); } catch (err) { console.error('open recent error:', err); }
+      });
+      dom.recentList.appendChild(item);
+      count++;
+    } else {
+      const item = document.createElement('div');
+      item.className = 'recent-item';
+      item.innerHTML = `<span class="recent-item-name">${escHtml(entry.name)}</span><span class="recent-item-path">${escHtml(entry.shortDir)}</span>`;
+      item.addEventListener('click', async () => {
+        try {
+          const content = await window.conganote.readFile(entry.path);
+          await openFile(entry.path, content);
+        } catch (err) { console.error('open recent error:', err); }
+      });
+      dom.recentList.appendChild(item);
+      count++;
+    }
+  }
+  // Add "More..." link at bottom
+  if (files.length > 8) {
+    const more = document.createElement('div');
+    more.className = 'recent-item recent-item-more';
+    more.innerHTML = '<span class="recent-item-name" style="color:var(--accent);font-size:12px;">More...</span>';
+    more.addEventListener('click', () => showRecentPanel());
+    dom.recentList.appendChild(more);
   }
 }
 
@@ -1954,27 +2316,620 @@ function renderWelcomeRecent(files) {
     container.innerHTML = '<div class="welcome-recent-empty">No recent files yet</div>';
     return;
   }
-  for (const fp of files.slice(0, 8)) {
-    const name = fp.split('/').pop();
-    const dir = fp.substring(0, fp.lastIndexOf('/'));
-    const shortDir = dir.replace(/^\/Users\/[^/]+/, '~');
-    const item = document.createElement('div');
-    item.className = 'welcome-recent-item';
-    item.innerHTML = `<span class="recent-name">${escHtml(name)}</span><span class="recent-dir">${escHtml(shortDir)}</span>`;
-    item.title = fp;
-    item.addEventListener('click', async () => {
-      try {
-        const stat = await window.splecnote.stat(fp);
-        if (stat && stat.isDirectory) {
-          await openFolder(fp);
-        } else {
-          const content = await window.splecnote.readFile(fp);
-          await openFile(fp, content);
-        }
-      } catch (err) { console.error('open welcome recent error:', err); }
-    });
-    container.appendChild(item);
+
+  // Smart grouping: group files by parent folder
+  const grouped = groupRecentFiles(files);
+  let count = 0;
+  for (const entry of grouped) {
+    if (count >= 8) break;
+    if (entry.type === 'folder-group') {
+      // Multiple files from same folder → show folder
+      const item = document.createElement('div');
+      item.className = 'welcome-recent-item welcome-recent-folder';
+      item.innerHTML = `<span class="recent-icon">📁</span><span class="recent-name">${escHtml(entry.name)}</span><span class="recent-dir">${escHtml(entry.shortDir)}</span><span class="recent-badge">${entry.files.length} files</span>`;
+      item.title = entry.dir;
+      item.addEventListener('click', async () => {
+        try { await openFolder(entry.dir); } catch (err) { console.error('open folder error:', err); }
+      });
+      container.appendChild(item);
+      count++;
+    } else if (entry.type === 'directory') {
+      // A project folder that was opened directly
+      const item = document.createElement('div');
+      item.className = 'welcome-recent-item welcome-recent-folder';
+      item.innerHTML = `<span class="recent-icon">📁</span><span class="recent-name">${escHtml(entry.name)}</span><span class="recent-dir">${escHtml(entry.shortDir)}</span>`;
+      item.title = entry.path;
+      item.addEventListener('click', async () => {
+        try { await openFolder(entry.path); } catch (err) { console.error('open folder error:', err); }
+      });
+      container.appendChild(item);
+      count++;
+    } else {
+      // Single standalone file
+      const item = document.createElement('div');
+      item.className = 'welcome-recent-item';
+      item.innerHTML = `<span class="recent-name">${escHtml(entry.name)}</span><span class="recent-dir">${escHtml(entry.shortDir)}</span>`;
+      item.title = entry.path;
+      item.addEventListener('click', async () => {
+        try {
+          const content = await window.conganote.readFile(entry.path);
+          await openFile(entry.path, content);
+        } catch (err) { console.error('open recent error:', err); }
+      });
+      container.appendChild(item);
+      count++;
+    }
   }
+}
+
+/**
+ * Group recent files intelligently:
+ * - Directories (opened folders) → show as-is (unless already covered by a folder group)
+ * - Multiple files from the same project root → group into one folder entry
+ * - Single standalone files → show as-is
+ *
+ * Project root = first directory level after home (e.g. ~/cpq-admin).
+ * For well-known containers (Documents, Desktop, Downloads…), go one level deeper.
+ */
+function groupRecentFiles(files) {
+  const home = '/Users/' + (files[0] || '').split('/')[2]; // approximate home dir
+  const shorten = (p) => p.replace(new RegExp('^' + home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '~');
+
+  // Common containers — not meaningful project roots on their own
+  const containers = new Set([
+    'Documents', 'Desktop', 'Downloads', 'Library',
+    'Applications', 'Pictures', 'Music', 'Movies', 'Public',
+  ]);
+
+  const directoryPaths = [];
+  const fileItems = [];
+
+  for (const fp of files) {
+    const name = fp.split('/').pop();
+    if (!name.includes('.')) {
+      directoryPaths.push(fp);
+    } else {
+      fileItems.push(fp);
+    }
+  }
+
+  // Determine project root for each file
+  const projectMap = new Map(); // projectRoot → [filepath, …]
+  const projectOrder = [];
+
+  for (const fp of fileItems) {
+    const rel = fp.substring(home.length + 1); // e.g. "cpq-admin/resources/file.js"
+    const segments = rel.split('/');
+
+    let projectRoot;
+    if (segments.length <= 1) {
+      projectRoot = home; // file directly in home
+    } else if (containers.has(segments[0]) && segments.length >= 3) {
+      projectRoot = home + '/' + segments[0] + '/' + segments[1];
+    } else {
+      projectRoot = home + '/' + segments[0];
+    }
+
+    if (!projectMap.has(projectRoot)) {
+      projectMap.set(projectRoot, []);
+      projectOrder.push(projectRoot);
+    }
+    projectMap.get(projectRoot).push(fp);
+  }
+
+  const entries = [];
+  const coveredRoots = new Set(projectOrder);
+
+  // Output directory entries that aren't already represented by a file group
+  for (const fp of directoryPaths) {
+    if (coveredRoots.has(fp)) continue; // folder group already covers this
+    entries.push({
+      type: 'directory',
+      path: fp,
+      name: fp.split('/').pop(),
+      shortDir: shorten(fp.substring(0, fp.lastIndexOf('/'))),
+    });
+  }
+
+  // Output file groups
+  for (const root of projectOrder) {
+    const fps = projectMap.get(root);
+    const name = root.split('/').pop();
+    const shortDir = shorten(root.substring(0, root.lastIndexOf('/')));
+
+    if (fps.length > 1) {
+      entries.push({
+        type: 'folder-group',
+        dir: root,
+        name: name,
+        shortDir: shortDir,
+        files: fps,
+      });
+    } else {
+      const fp = fps[0];
+      entries.push({
+        type: 'file',
+        path: fp,
+        name: fp.split('/').pop(),
+        shortDir: shorten(fp.substring(0, fp.lastIndexOf('/'))),
+      });
+    }
+  }
+
+  return entries;
+}
+
+/**
+ * Show the full recent files panel with all entries
+ */
+async function showRecentPanel() {
+  const panel = $('#recent-panel');
+  if (!panel) return;
+  panel.classList.remove('hidden');
+
+  const list = $('#recent-panel-list');
+  list.innerHTML = '<div style="padding:16px;color:var(--text-muted);">Loading...</div>';
+
+  const files = await window.conganote.getRecent() || [];
+  list.innerHTML = '';
+
+  if (files.length === 0) {
+    list.innerHTML = '<div class="recent-panel-empty">No recent files</div>';
+    return;
+  }
+
+  // Use stat to accurately determine directory vs file
+  const grouped = await groupRecentFilesWithStat(files);
+
+  for (const entry of grouped) {
+    if (entry.type === 'folder-group') {
+      // Folder group header
+      const group = document.createElement('div');
+      group.className = 'recent-panel-group';
+      const header = document.createElement('div');
+      header.className = 'recent-panel-group-header';
+      header.innerHTML = `<span class="recent-icon">📁</span><span class="recent-panel-name">${escHtml(entry.name)}</span><span class="recent-panel-dir">${escHtml(entry.shortDir)}</span><span class="recent-badge">${entry.files.length} files</span>`;
+      header.addEventListener('click', async () => {
+        try { await openFolder(entry.dir); hideRecentPanel(); } catch {}
+      });
+      group.appendChild(header);
+
+      // Individual files in this group
+      for (const fp of entry.files) {
+        const item = document.createElement('div');
+        item.className = 'recent-panel-item recent-panel-subitem';
+        item.innerHTML = `<span class="recent-panel-name">${escHtml(fp.split('/').pop())}</span>`;
+        item.title = fp;
+        item.addEventListener('click', async () => {
+          try {
+            const content = await window.conganote.readFile(fp);
+            await openFile(fp, content);
+            hideRecentPanel();
+          } catch (err) { console.error('open recent error:', err); }
+        });
+        group.appendChild(item);
+      }
+      list.appendChild(group);
+    } else if (entry.type === 'directory') {
+      const item = document.createElement('div');
+      item.className = 'recent-panel-item recent-panel-folder';
+      item.innerHTML = `<span class="recent-icon">📁</span><span class="recent-panel-name">${escHtml(entry.name)}</span><span class="recent-panel-dir">${escHtml(entry.shortDir)}</span>`;
+      item.title = entry.path;
+      item.addEventListener('click', async () => {
+        try { await openFolder(entry.path); hideRecentPanel(); } catch {}
+      });
+      list.appendChild(item);
+    } else {
+      const item = document.createElement('div');
+      item.className = 'recent-panel-item';
+      item.innerHTML = `<span class="recent-panel-name">${escHtml(entry.name)}</span><span class="recent-panel-dir">${escHtml(entry.shortDir)}</span>`;
+      item.title = entry.path;
+      item.addEventListener('click', async () => {
+        try {
+          const content = await window.conganote.readFile(entry.path);
+          await openFile(entry.path, content);
+          hideRecentPanel();
+        } catch (err) { console.error('open recent error:', err); }
+      });
+      list.appendChild(item);
+    }
+  }
+}
+
+/**
+ * Group recent files using stat to accurately detect directories.
+ * Uses project-root grouping (first dir level after home) instead of
+ * immediate-parent grouping, so files scattered across subdirectories
+ * of the same project are merged into one folder entry.
+ */
+async function groupRecentFilesWithStat(files) {
+  const home = files[0] ? '/Users/' + files[0].split('/')[2] : '~';
+  const shorten = (p) => p.replace(new RegExp('^' + home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '~');
+
+  const containers = new Set([
+    'Documents', 'Desktop', 'Downloads', 'Library',
+    'Applications', 'Pictures', 'Music', 'Movies', 'Public',
+  ]);
+
+  const directoryPaths = [];
+  const fileItems = [];
+
+  for (const fp of files) {
+    try {
+      const stat = await window.conganote.stat(fp);
+      if (stat && stat.isDirectory) {
+        directoryPaths.push(fp);
+        continue;
+      }
+    } catch {
+      continue; // file may not exist anymore
+    }
+    fileItems.push(fp);
+  }
+
+  // Determine project root for each file
+  const projectMap = new Map();
+  const projectOrder = [];
+
+  for (const fp of fileItems) {
+    const rel = fp.substring(home.length + 1);
+    const segments = rel.split('/');
+
+    let projectRoot;
+    if (segments.length <= 1) {
+      projectRoot = home;
+    } else if (containers.has(segments[0]) && segments.length >= 3) {
+      projectRoot = home + '/' + segments[0] + '/' + segments[1];
+    } else {
+      projectRoot = home + '/' + segments[0];
+    }
+
+    if (!projectMap.has(projectRoot)) {
+      projectMap.set(projectRoot, []);
+      projectOrder.push(projectRoot);
+    }
+    projectMap.get(projectRoot).push(fp);
+  }
+
+  const entries = [];
+  const coveredRoots = new Set(projectOrder);
+
+  // Output directory entries not already covered by a file group
+  for (const fp of directoryPaths) {
+    if (coveredRoots.has(fp)) continue;
+    entries.push({
+      type: 'directory',
+      path: fp,
+      name: fp.split('/').pop(),
+      shortDir: shorten(fp.substring(0, fp.lastIndexOf('/'))),
+    });
+  }
+
+  // Output file groups
+  for (const root of projectOrder) {
+    const fps = projectMap.get(root);
+    const name = root.split('/').pop();
+    const shortDir = shorten(root.substring(0, root.lastIndexOf('/')));
+
+    if (fps.length > 1) {
+      entries.push({
+        type: 'folder-group',
+        dir: root,
+        name: name,
+        shortDir: shortDir,
+        files: fps,
+      });
+    } else {
+      const fp = fps[0];
+      entries.push({
+        type: 'file',
+        path: fp,
+        name: fp.split('/').pop(),
+        shortDir: shorten(fp.substring(0, fp.lastIndexOf('/'))),
+      });
+    }
+  }
+
+  return entries;
+}
+
+function hideRecentPanel() {
+  const panel = $('#recent-panel');
+  if (panel) panel.classList.add('hidden');
+}
+
+/* ================================================================
+   15b. SYSTEM-WIDE FILE SEARCH (title bar)
+   ================================================================ */
+let _sysSearchTimer = null;
+let _sysSearchActive = -1;
+let _sysSearchResults = [];
+
+function initSystemSearch() {
+  const input = $('#titlebar-search-input');
+  const dropdown = $('#titlebar-search-results');
+  if (!input || !dropdown) return;
+
+  input.addEventListener('input', () => {
+    clearTimeout(_sysSearchTimer);
+    const q = input.value.trim();
+    if (q.length < 2) {
+      hideSystemSearch();
+      return;
+    }
+    // Show loading state
+    dropdown.classList.remove('hidden');
+    dropdown.innerHTML = '<div class="sys-search-loading">Searching...</div>';
+    _sysSearchTimer = setTimeout(() => runSystemSearch(q), 250);
+  });
+
+  input.addEventListener('focus', () => {
+    const q = input.value.trim();
+    if (q.length >= 2 && _sysSearchResults.length > 0) {
+      dropdown.classList.remove('hidden');
+    }
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (!dropdown || dropdown.classList.contains('hidden')) {
+      if (e.key === 'Escape') { input.blur(); return; }
+      return;
+    }
+    const items = dropdown.querySelectorAll('.sys-search-item');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      _sysSearchActive = Math.min(_sysSearchActive + 1, items.length - 1);
+      updateSysSearchActive(items);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      _sysSearchActive = Math.max(_sysSearchActive - 1, 0);
+      updateSysSearchActive(items);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (_sysSearchActive >= 0 && _sysSearchActive < _sysSearchResults.length) {
+        openSystemSearchResult(_sysSearchResults[_sysSearchActive]);
+      }
+    } else if (e.key === 'Escape') {
+      hideSystemSearch();
+      input.blur();
+    }
+  });
+
+  // Close dropdown when clicking outside
+  document.addEventListener('mousedown', (e) => {
+    if (!e.target.closest('#titlebar-search')) {
+      hideSystemSearch();
+    }
+  });
+}
+
+async function runSystemSearch(query) {
+  const dropdown = $('#titlebar-search-results');
+  if (!dropdown) return;
+
+  try {
+    const results = await window.conganote.systemSearch(query);
+    _sysSearchResults = results;
+    _sysSearchActive = -1;
+
+    if (results.length === 0) {
+      dropdown.innerHTML = '<div class="sys-search-empty">No files found</div>';
+      return;
+    }
+
+    // Highlight matching parts in the file name
+    const lowerQ = query.toLowerCase();
+    let html = '';
+    for (const r of results) {
+      const icon = r.isDirectory ? '📁' : getFileIcon(r.name);
+      const nameHtml = highlightMatch(r.name, lowerQ);
+      html += `<div class="sys-search-item" data-path="${escHtml(r.path)}">
+        <span class="sys-search-icon">${icon}</span>
+        <span class="sys-search-name">${nameHtml}</span>
+        <span class="sys-search-dir">${escHtml(r.dir)}</span>
+      </div>`;
+    }
+    html += '<div class="sys-search-hint"><span><kbd>↑↓</kbd> Navigate <kbd>↵</kbd> Open</span><span><kbd>esc</kbd> Close</span></div>';
+    dropdown.innerHTML = html;
+
+    // Click handlers
+    dropdown.querySelectorAll('.sys-search-item').forEach((el, i) => {
+      el.addEventListener('click', () => openSystemSearchResult(results[i]));
+      el.addEventListener('mouseenter', () => {
+        _sysSearchActive = i;
+        updateSysSearchActive(dropdown.querySelectorAll('.sys-search-item'));
+      });
+    });
+  } catch (err) {
+    console.error('System search error:', err);
+    dropdown.innerHTML = '<div class="sys-search-empty">Search error</div>';
+  }
+}
+
+function highlightMatch(text, query) {
+  const lower = text.toLowerCase();
+  const idx = lower.indexOf(query);
+  if (idx === -1) return escHtml(text);
+  const before = text.substring(0, idx);
+  const match = text.substring(idx, idx + query.length);
+  const after = text.substring(idx + query.length);
+  return escHtml(before) + '<em>' + escHtml(match) + '</em>' + escHtml(after);
+}
+
+function updateSysSearchActive(items) {
+  items.forEach((el, i) => el.classList.toggle('active', i === _sysSearchActive));
+  if (_sysSearchActive >= 0 && items[_sysSearchActive]) {
+    items[_sysSearchActive].scrollIntoView({ block: 'nearest' });
+  }
+}
+
+async function openSystemSearchResult(result) {
+  hideSystemSearch();
+  $('#titlebar-search-input').value = '';
+  $('#titlebar-search-input').blur();
+
+  if (result.isDirectory) {
+    await openFolder(result.path);
+  } else {
+    try {
+      const content = await window.conganote.readFile(result.path);
+      await openFile(result.path, content);
+    } catch (err) {
+      console.error('Failed to open search result:', err);
+    }
+  }
+}
+
+function hideSystemSearch() {
+  const dropdown = $('#titlebar-search-results');
+  if (dropdown) dropdown.classList.add('hidden');
+  _sysSearchActive = -1;
+}
+
+function focusSystemSearch() {
+  const input = $('#titlebar-search-input');
+  if (input) { input.focus(); input.select(); }
+}
+
+/* ================================================================
+   15c. WELCOME PANEL SPOTLIGHT SEARCH
+   ================================================================ */
+let _wsSearchTimer = null;
+let _wsSearchActive = -1;
+let _wsSearchResults = [];
+
+function initWelcomeSearch() {
+  const input   = $('#welcome-search-input');
+  const results = $('#welcome-search-results');
+  const shimmer = $('#welcome-search-shimmer');
+  const list    = $('#welcome-search-list');
+  if (!input || !results) return;
+
+  input.addEventListener('input', () => {
+    clearTimeout(_wsSearchTimer);
+    const q = input.value.trim();
+    if (q.length < 2) { hideWelcomeSearch(); return; }
+    // Show shimmer loading
+    results.classList.remove('hidden');
+    if (shimmer) shimmer.classList.remove('hidden');
+    if (list) list.innerHTML = '';
+    _wsSearchTimer = setTimeout(() => runWelcomeSearch(q), 250);
+  });
+
+  input.addEventListener('focus', () => {
+    const q = input.value.trim();
+    if (q.length >= 2 && _wsSearchResults.length > 0) {
+      results.classList.remove('hidden');
+    }
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (results.classList.contains('hidden')) {
+      if (e.key === 'Escape') { input.blur(); return; }
+      return;
+    }
+    const items = results.querySelectorAll('.ws-result-item');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      _wsSearchActive = Math.min(_wsSearchActive + 1, items.length - 1);
+      updateWsSearchActive(items);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      _wsSearchActive = Math.max(_wsSearchActive - 1, 0);
+      updateWsSearchActive(items);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (_wsSearchActive >= 0 && _wsSearchActive < _wsSearchResults.length) {
+        openWelcomeSearchResult(_wsSearchResults[_wsSearchActive]);
+      }
+    } else if (e.key === 'Escape') {
+      hideWelcomeSearch();
+      input.blur();
+    }
+  });
+
+  document.addEventListener('mousedown', (e) => {
+    if (!e.target.closest('.welcome-search-container')) {
+      hideWelcomeSearch();
+    }
+  });
+}
+
+async function runWelcomeSearch(query) {
+  const results = $('#welcome-search-results');
+  const shimmer = $('#welcome-search-shimmer');
+  const list    = $('#welcome-search-list');
+  if (!results || !list) return;
+
+  try {
+    const items = await window.conganote.systemSearch(query);
+    _wsSearchResults = items;
+    _wsSearchActive = -1;
+    if (shimmer) shimmer.classList.add('hidden');
+
+    if (items.length === 0) {
+      list.innerHTML = '<div class="ws-result-empty">No files found</div>';
+      return;
+    }
+
+    const lowerQ = query.toLowerCase();
+    let html = '';
+    items.forEach((r, i) => {
+      const icon = r.isDirectory ? '📁' : getFileIcon(r.name);
+      const nameHtml = highlightMatch(r.name, lowerQ);
+      html += `<div class="ws-result-item" data-path="${escHtml(r.path)}" style="animation-delay:${i * 30}ms">
+        <span class="ws-result-icon">${icon}</span>
+        <span class="ws-result-name">${nameHtml}</span>
+        <span class="ws-result-dir">${escHtml(r.dir)}</span>
+      </div>`;
+    });
+    html += '<div class="ws-result-hint"><span><kbd>↑↓</kbd> Navigate <kbd>↵</kbd> Open</span><span><kbd>esc</kbd> Close</span></div>';
+    list.innerHTML = html;
+
+    list.querySelectorAll('.ws-result-item').forEach((el, i) => {
+      el.addEventListener('click', () => openWelcomeSearchResult(items[i]));
+      el.addEventListener('mouseenter', () => {
+        _wsSearchActive = i;
+        updateWsSearchActive(list.querySelectorAll('.ws-result-item'));
+      });
+    });
+  } catch (err) {
+    console.error('Welcome search error:', err);
+    if (shimmer) shimmer.classList.add('hidden');
+    list.innerHTML = '<div class="ws-result-empty">Search error</div>';
+  }
+}
+
+function updateWsSearchActive(items) {
+  items.forEach((el, i) => el.classList.toggle('active', i === _wsSearchActive));
+  if (_wsSearchActive >= 0 && items[_wsSearchActive]) {
+    items[_wsSearchActive].scrollIntoView({ block: 'nearest' });
+  }
+}
+
+async function openWelcomeSearchResult(result) {
+  hideWelcomeSearch();
+  const input = $('#welcome-search-input');
+  if (input) { input.value = ''; input.blur(); }
+
+  if (result.isDirectory) {
+    await openFolder(result.path);
+  } else {
+    try {
+      const content = await window.conganote.readFile(result.path);
+      await openFile(result.path, content);
+    } catch (err) {
+      console.error('Failed to open welcome search result:', err);
+    }
+  }
+}
+
+function hideWelcomeSearch() {
+  const results = $('#welcome-search-results');
+  const shimmer = $('#welcome-search-shimmer');
+  if (results) results.classList.add('hidden');
+  if (shimmer) shimmer.classList.add('hidden');
+  _wsSearchActive = -1;
 }
 
 /* ================================================================
@@ -2060,6 +3015,7 @@ function updateStatusLanguage(tab) {
   if (!tab) return;
   const lang = tab.model.getLanguageId?.() || tab.model.getModeId?.() || 'plaintext';
   dom.statusLanguage.textContent = lang.charAt(0).toUpperCase() + lang.slice(1);
+  updateRichTextIndicator();
 }
 
 /* ================================================================
@@ -2069,14 +3025,18 @@ function showWelcome() {
   state.welcomeVisible = true;
   dom.welcomeScreen.classList.remove('hidden');
   hideEmptyTabShortcuts();
+  const tbs = $('#titlebar-search');
+  if (tbs) tbs.style.display = 'none';
 }
 
 function hideWelcome() {
   if (state.welcomeVisible) {
     state.welcomeVisible = false;
     dom.welcomeScreen.classList.add('hidden');
-    // Ensure sidebar is visible after dismissing welcome screen
-    if (!state.sidebarVisible) {
+    const tbs = $('#titlebar-search');
+    if (tbs) tbs.style.display = '';
+    // Only show sidebar if a folder is open
+    if (state.folderPath && !state.sidebarVisible) {
       state.sidebarVisible = true;
     }
     applySidebarState();
@@ -2104,7 +3064,20 @@ function initWelcome() {
   $('#btn-welcome-new')?.addEventListener('click', () => createTab());
   $('#btn-welcome-open')?.addEventListener('click', openFileDialog);
   $('#btn-welcome-folder')?.addEventListener('click', openFolderDialog);
-  $('#btn-welcome-new-window')?.addEventListener('click', () => window.splecnote.newWindow());
+  $('#btn-welcome-new-window')?.addEventListener('click', () => window.conganote.newWindow());
+  // "More..." button to show full recent panel
+  $('#btn-welcome-more-recent')?.addEventListener('click', () => showRecentPanel());
+  // Recent panel close & clear
+  $('#btn-recent-close')?.addEventListener('click', () => hideRecentPanel());
+  $('#btn-recent-clear')?.addEventListener('click', async () => {
+    await window.conganote.clearRecent();
+    hideRecentPanel();
+    await loadRecentFiles();
+  });
+  // Click outside recent panel to close
+  $('#recent-panel')?.addEventListener('click', (e) => {
+    if (e.target.id === 'recent-panel') hideRecentPanel();
+  });
   // Wire up "no editor" overlay shortcut clicks
   initNoEditorShortcuts();
 }
@@ -2124,7 +3097,7 @@ function initNoEditorShortcuts() {
       case 'command-palette': showCommandPalette(); break;
       case 'search-files':    showGlobalSearch();   break;
       case 'toggle-terminal': {
-        if (state.folderPath) { window.splecnote.openInTerminal(state.folderPath); }
+        if (state.folderPath) { window.conganote.openInTerminal(state.folderPath); }
         break;
       }
     }
@@ -2144,6 +3117,7 @@ function toggleMinimap() {
   if (!state.editor) return;
   const current = state.editor.getOption(monaco.editor.EditorOption.minimap);
   state.editor.updateOptions({ minimap: { enabled: !current.enabled } });
+  updateMinimapIndicator();
 }
 
 function changeFontSize(delta) {
@@ -2194,6 +3168,18 @@ function initKeyboard() {
     const shift = e.shiftKey;
     const alt = e.altKey;
 
+    // Escape → close recent panel if open
+    if (e.key === 'Escape') {
+      const rp = $('#recent-panel');
+      if (rp && !rp.classList.contains('hidden')) {
+        e.preventDefault(); hideRecentPanel(); return;
+      }
+      const sd = $('#titlebar-search-results');
+      if (sd && !sd.classList.contains('hidden')) {
+        e.preventDefault(); hideSystemSearch(); $('#titlebar-search-input')?.blur(); return;
+      }
+    }
+
     // Ctrl+Tab → Next recent tab (MRU)
     if (e.ctrlKey && !e.metaKey && !alt && e.key === 'Tab') {
       e.preventDefault();
@@ -2212,7 +3198,7 @@ function initKeyboard() {
     // Cmd+N → New tab
     if (cmd && !shift && !alt && e.key === 'n') { e.preventDefault(); createTab(); return; }
     // Cmd+Shift+N → New window
-    if (cmd && shift && !alt && e.key === 'N') { e.preventDefault(); window.splecnote.newWindow(); return; }
+    if (cmd && shift && !alt && e.key === 'N') { e.preventDefault(); window.conganote.newWindow(); return; }
     // Cmd+O → Open file
     if (cmd && !shift && !alt && e.key === 'o') { e.preventDefault(); openFileDialog(); return; }
     // Cmd+Shift+O → Open folder
@@ -2232,6 +3218,28 @@ function initKeyboard() {
     if (cmd && shift && !alt && e.key === 'T') { e.preventDefault(); reopenClosedTab(); return; }
     // Cmd+Shift+W → Close window (let OS handle)
     // Cmd+K Cmd+W → Close all tabs
+    // Cmd+Shift+Space → System-wide file search
+    if (cmd && shift && !alt && e.key === ' ') { e.preventDefault(); focusSystemSearch(); return; }
+    // Ctrl+Shift+A → API Client
+    if (e.ctrlKey && shift && !alt && e.key === 'A') { e.preventDefault(); toggleToolPanel('api-client-panel'); return; }
+    // Ctrl+Shift+R → Regex Tester
+    if (e.ctrlKey && shift && !alt && e.key === 'R') { e.preventDefault(); toggleToolPanel('regex-panel'); return; }
+    // Ctrl+Shift+J → JSON Viewer
+    if (e.ctrlKey && shift && !alt && e.key === 'J') { e.preventDefault(); openJsonViewer(); return; }
+    // Ctrl+Shift+B → Bookmarks
+    if (e.ctrlKey && shift && !alt && (e.key === 'B' || e.key === 'b') && !e.metaKey) { e.preventDefault(); toggleToolPanel('bookmarks-panel'); return; }
+    // Ctrl+Shift+D → Database Client
+    if (e.ctrlKey && shift && !alt && e.key === 'D') { e.preventDefault(); toggleToolPanel('db-panel'); return; }
+    // Ctrl+Shift+E → Snippets
+    if (e.ctrlKey && shift && !alt && e.key === 'E') { e.preventDefault(); toggleToolPanel('snippet-panel'); return; }
+    // Ctrl+Shift+K → Color Picker
+    if (e.ctrlKey && shift && !alt && e.key === 'K') { e.preventDefault(); toggleToolPanel('color-panel'); return; }
+    // Ctrl+Shift+G → TODO Tracker
+    if (e.ctrlKey && shift && !alt && e.key === 'G') { e.preventDefault(); toggleToolPanel('todo-panel'); return; }
+    // Ctrl+Shift+Y → Pomodoro Timer
+    if (e.ctrlKey && shift && !alt && e.key === 'Y') { e.preventDefault(); toggleToolPanel('pomo-panel'); return; }
+    // Ctrl+Shift+I → Diff Checker
+    if (e.ctrlKey && shift && !alt && e.key === 'I') { e.preventDefault(); toggleToolPanel('diff-panel'); return; }
     // Cmd+P → Quick Open
     if (cmd && !shift && !alt && e.key === 'p') { e.preventDefault(); showQuickOpen(); return; }
     // Cmd+Shift+P → Command Palette
@@ -2257,9 +3265,13 @@ function initKeyboard() {
     // Cmd+Shift+T → Reopen recent
     // Escape → Close modals
     if (e.key === 'Escape') {
+      // Close active tool panel if any
+      if (state.activeToolPanel) { toggleToolPanel(state.activeToolPanel); return; }
       if (!dom.quickOpenOverlay.classList.contains('hidden')) { hideQuickOpen(); return; }
       if (!dom.cmdPaletteOverlay.classList.contains('hidden')) { hideCommandPalette(); return; }
       if (!dom.themePickerOverlay.classList.contains('hidden')) { hideThemePicker(); return; }
+      if (!dom.languagePickerOverlay.classList.contains('hidden')) { hideLanguagePicker(); return; }
+      if (dom.gitInfoPopup && !dom.gitInfoPopup.classList.contains('hidden')) { hideGitInfoPopup(); return; }
       if (!dom.globalSearchOverlay.classList.contains('hidden')) { hideGlobalSearch(); return; }
       if (!dom.searchBar.classList.contains('hidden')) { hideSearchBar(); return; }
       if (!dom.gotoBar.classList.contains('hidden')) { hideGotoBar(); return; }
@@ -2418,6 +3430,12 @@ function initKeyboard() {
       toggleMarkdownPreview();
       return;
     }
+    // Ctrl+` → Toggle Terminal
+    if (e.ctrlKey && !e.metaKey && !shift && !alt && e.key === '`') {
+      e.preventDefault();
+      toggleTerminal();
+      return;
+    }
     // Cmd+, → Settings
     if (cmd && !shift && !alt && e.key === ',') {
       e.preventDefault();
@@ -2436,7 +3454,7 @@ function initKeyboard() {
    21. IPC HANDLERS (from main process)
    ================================================================ */
 function initIpcHandlers() {
-  const api = window.splecnote;
+  const api = window.conganote;
   // File menu
   api.on('file:new', () => createTab());
   api.on('file:open-dialog', () => openFileDialog());
@@ -2471,6 +3489,26 @@ function initIpcHandlers() {
   api.on('view:zen-mode', () => toggleZenMode());
   api.on('view:split-editor', () => toggleSplitEditor());
   api.on('view:markdown-preview', () => toggleMarkdownPreview());
+  api.on('view:toggle-terminal', () => toggleTerminal());
+  // Tool panels
+  api.on('view:api-client', () => toggleToolPanel('api-client-panel'));
+  api.on('view:regex-tester', () => toggleToolPanel('regex-panel'));
+  api.on('view:json-viewer', () => openJsonViewer());
+  api.on('view:bookmarks', () => toggleToolPanel('bookmarks-panel'));
+  api.on('view:screenshot', () => openScreenshotPanel());
+  api.on('view:db-client', () => toggleToolPanel('db-panel'));
+  api.on('view:snippets', () => toggleToolPanel('snippet-panel'));
+  api.on('view:color-picker', () => toggleToolPanel('color-panel'));
+  api.on('view:todo-tracker', () => toggleToolPanel('todo-panel'));
+  api.on('view:pomodoro', () => toggleToolPanel('pomo-panel'));
+  api.on('view:diff-checker', () => toggleToolPanel('diff-panel'));
+  // Terminal output streaming
+  api.on('terminal:output', (text) => {
+    if (dom.terminalOutput) appendTerminalText(text);
+  });
+  api.on('terminal:exit', () => {
+    appendTerminalLine('Terminal session ended.', 'term-info');
+  });
 }
 
 /* ================================================================
@@ -2483,12 +3521,12 @@ function initDragDrop() {
     e.stopPropagation();
     for (const file of e.dataTransfer.files) {
       try {
-        const stats = await window.splecnote.stat(file.path);
+        const stats = await window.conganote.stat(file.path);
         if (stats && stats.isDirectory) {
           await openFolder(file.path);
           return; // open first dropped folder and stop
         } else {
-          const content = await window.splecnote.readFile(file.path);
+          const content = await window.conganote.readFile(file.path);
           await openFile(file.path, content);
         }
       } catch (err) { console.error('drag drop error:', err); }
@@ -2583,24 +3621,100 @@ function updateBreadcrumbs() {
   dom.breadcrumbsBar.classList.remove('hidden');
   dom.breadcrumbs.innerHTML = '';
 
-  let relPath = tab.filePath;
-  if (state.folderPath && relPath.startsWith(state.folderPath)) {
-    relPath = relPath.replace(state.folderPath + '/', '');
+  const fullPath = tab.filePath;
+  const pathParts = fullPath.split('/');
+
+  // Determine display parts (relative if folder is open)
+  let displayStart = 0;
+  if (state.folderPath) {
+    const folderParts = state.folderPath.split('/');
+    if (fullPath.startsWith(state.folderPath + '/')) {
+      displayStart = folderParts.length;
+    }
   }
-  const parts = relPath.split('/');
-  for (let i = 0; i < parts.length; i++) {
-    if (i > 0) {
+
+  // If no folder open, show from root (skip empty first element from leading /)
+  if (displayStart === 0 && pathParts[0] === '') displayStart = 1;
+
+  for (let i = displayStart; i < pathParts.length; i++) {
+    if (i > displayStart) {
       const sep = document.createElement('span');
       sep.className = 'breadcrumb-sep';
       sep.textContent = '›';
       dom.breadcrumbs.appendChild(sep);
     }
+    const isLast = i === pathParts.length - 1;
     const crumb = document.createElement('span');
-    crumb.className = 'breadcrumb-item' + (i === parts.length - 1 ? ' active' : '');
-    crumb.textContent = parts[i];
-    // Click on breadcrumb folder to reveal in tree (future enhancement)
+    crumb.className = 'breadcrumb-item' + (isLast ? ' active' : '');
+    crumb.textContent = pathParts[i];
+
+    // Store the full absolute path up to this segment
+    const segmentPath = pathParts.slice(0, i + 1).join('/');
+    crumb.dataset.fullPath = segmentPath;
+    crumb.dataset.isFile = isLast ? '1' : '0';
+
+    // Right-click context menu
+    crumb.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showBreadcrumbContextMenu(e.clientX, e.clientY, segmentPath, isLast);
+    });
+
+    // Left-click: reveal folder in Finder / open file
+    crumb.addEventListener('click', () => {
+      if (!isLast) {
+        window.conganote.revealInFinder(segmentPath);
+      }
+    });
+
     dom.breadcrumbs.appendChild(crumb);
   }
+}
+
+/* ---- Breadcrumb Context Menu ---- */
+let bcContextPath = null;
+let bcContextIsFile = false;
+
+function showBreadcrumbContextMenu(x, y, fullPath, isFile) {
+  bcContextPath = fullPath;
+  bcContextIsFile = isFile;
+  const menu = $('#breadcrumb-context-menu');
+  menu.classList.remove('hidden');
+  menu.style.left = Math.min(x, window.innerWidth - 200) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - 150) + 'px';
+}
+
+function hideBreadcrumbContextMenu() {
+  $('#breadcrumb-context-menu').classList.add('hidden');
+}
+
+function initBreadcrumbContextMenu() {
+  document.addEventListener('click', hideBreadcrumbContextMenu);
+
+  $('#breadcrumb-context-menu').addEventListener('click', async (e) => {
+    const action = e.target.closest('.ctx-item')?.dataset.action;
+    if (!action) return;
+    hideBreadcrumbContextMenu();
+    if (!bcContextPath) return;
+
+    // For file items, get the parent directory for terminal/finder operations
+    const dirPath = bcContextIsFile
+      ? bcContextPath.substring(0, bcContextPath.lastIndexOf('/'))
+      : bcContextPath;
+
+    switch (action) {
+      case 'bc-reveal-finder':
+        try { await window.conganote.revealInFinder(bcContextPath); } catch (err) { console.error(err); }
+        break;
+      case 'bc-open-terminal':
+        try { await window.conganote.openInTerminal(dirPath); } catch (err) { console.error(err); }
+        break;
+      case 'bc-copy-path':
+        await navigator.clipboard.writeText(bcContextPath);
+        showToast('Path copied', 'success', 1500);
+        break;
+    }
+  });
 }
 
 /* ================================================================
@@ -2615,10 +3729,10 @@ async function showImagePreview(filePath) {
   const ext = filePath.split('.').pop().toLowerCase();
   if (ext === 'svg') {
     // SVG can be loaded directly
-    const content = await window.splecnote.readFile(filePath);
+    const content = await window.conganote.readFile(filePath);
     dom.imagePreviewImg.src = 'data:image/svg+xml;base64,' + btoa(content);
   } else {
-    const base64 = await window.splecnote.readBinary(filePath);
+    const base64 = await window.conganote.readBinary(filePath);
     if (base64) {
       const mime = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', bmp: 'image/bmp', webp: 'image/webp', ico: 'image/x-icon', tiff: 'image/tiff', tif: 'image/tiff' };
       dom.imagePreviewImg.src = `data:${mime[ext] || 'image/png'};base64,${base64}`;
@@ -2627,7 +3741,7 @@ async function showImagePreview(filePath) {
 
   // Show file info
   try {
-    const stat = await window.splecnote.stat(filePath);
+    const stat = await window.conganote.stat(filePath);
     const size = stat?.size || 0;
     const sizeStr = size > 1024*1024 ? (size/1024/1024).toFixed(1) + ' MB' : size > 1024 ? (size/1024).toFixed(1) + ' KB' : size + ' B';
     dom.imagePreviewInfo.textContent = `${filePath.split('/').pop()} — ${sizeStr}`;
@@ -2671,7 +3785,7 @@ async function updateMarkdownPreview() {
   }
   const content = tab.model.getValue();
   try {
-    const html = await window.splecnote.renderMarkdown(content);
+    const html = await window.conganote.renderMarkdown(content);
     dom.markdownContent.innerHTML = html || '';
   } catch {
     dom.markdownContent.innerHTML = '<div class="outline-empty">Error rendering markdown</div>';
@@ -2788,6 +3902,141 @@ function extractSymbols(content, lang) {
     }
   }
   return symbols;
+}
+
+/* ================================================================
+   29b. FILE HISTORY (Git Commit History)
+   ================================================================ */
+
+function toggleHistorySection() {
+  state.historySectionOpen = !state.historySectionOpen;
+  dom.historyToggleIcon.textContent = state.historySectionOpen ? '▼' : '▶';
+  dom.historyList.classList.toggle('collapsed', !state.historySectionOpen);
+  if (state.historySectionOpen) {
+    // Auto-show history for current file
+    const tab = state.tabs.find(t => t.id === state.activeTabId);
+    if (tab?.filePath) {
+      showFileHistoryInPanel(tab.filePath);
+    } else {
+      dom.historyList.innerHTML = '<div class="history-empty">Open a file to see its git history</div>';
+    }
+  }
+}
+
+async function showFileHistoryInPanel(filePath) {
+  // Open history section if not already open
+  if (!state.historySectionOpen) {
+    state.historySectionOpen = true;
+    dom.historyToggleIcon.textContent = '▼';
+    dom.historyList.classList.remove('collapsed');
+  }
+  // Make sure sidebar is visible
+  if (!state.sidebarVisible) {
+    state.sidebarVisible = true;
+    applySidebarState();
+  }
+
+  if (!filePath || !state.folderPath) {
+    dom.historyList.innerHTML = '<div class="history-empty">No git repository open</div>';
+    return;
+  }
+
+  const name = filePath.split('/').pop();
+  const relPath = filePath.replace(state.folderPath + '/', '');
+
+  // Show loading state
+  dom.historyList.innerHTML = `<div class="history-empty">Loading git history for ${escHtml(name)}…</div>`;
+
+  try {
+    const commits = await window.conganote.gitFileLog(state.folderPath, relPath, 50);
+    if (!commits || commits.length === 0) {
+      dom.historyList.innerHTML = `<div class="history-empty">No git history for ${escHtml(name)}</div>`;
+      return;
+    }
+
+    dom.historyList.innerHTML = '';
+
+    // File header
+    const fileHeader = document.createElement('div');
+    fileHeader.className = 'history-day-header';
+    fileHeader.style.display = 'flex';
+    fileHeader.style.justifyContent = 'space-between';
+    fileHeader.style.alignItems = 'center';
+    fileHeader.innerHTML = `<span>📄 ${escHtml(name)}</span><span class="history-commit-count">${commits.length} commit${commits.length > 1 ? 's' : ''}</span>`;
+    dom.historyList.appendChild(fileHeader);
+
+    // Group commits by date
+    const groups = {};
+    for (const commit of commits) {
+      const d = new Date(commit.date);
+      const key = d.toDateString();
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(commit);
+    }
+
+    const today = new Date().toDateString();
+    const yesterday = new Date(Date.now() - 86400000).toDateString();
+
+    for (const [day, dayCommits] of Object.entries(groups)) {
+      const label = day === today ? 'Today' : day === yesterday ? 'Yesterday' : day;
+      const dayHeader = document.createElement('div');
+      dayHeader.className = 'history-day-header';
+      dayHeader.textContent = label;
+      dom.historyList.appendChild(dayHeader);
+
+      for (const commit of dayCommits) {
+        const item = document.createElement('div');
+        item.className = 'history-commit-item';
+        const timeStr = new Date(commit.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const shortMsg = commit.message.length > 60 ? commit.message.slice(0, 57) + '…' : commit.message;
+        item.innerHTML = `
+          <div class="history-commit-row">
+            <span class="history-commit-hash">${commit.hash}</span>
+            <span class="history-commit-time">${timeStr}</span>
+          </div>
+          <div class="history-commit-msg">${escHtml(shortMsg)}</div>
+          <div class="history-commit-author">${escHtml(commit.author)}</div>
+        `;
+        item.title = `${commit.hash} — ${commit.message}\nby ${commit.author}`;
+        item.addEventListener('click', () => {
+          showCommitDiff(filePath, relPath, commit);
+        });
+        dom.historyList.appendChild(item);
+      }
+    }
+  } catch (err) {
+    dom.historyList.innerHTML = `<div class="history-empty">Error loading history: ${escHtml(err.message)}</div>`;
+  }
+}
+
+async function showCommitDiff(absPath, relPath, commit) {
+  try {
+    // Get file at this commit and its parent
+    const atCommit = await window.conganote.gitShowAt(state.folderPath, commit.fullHash, relPath);
+    const parentHash = commit.fullHash + '~1';
+    let atParent = await window.conganote.gitShowAt(state.folderPath, parentHash, relPath);
+    if (atParent == null) atParent = ''; // file didn't exist in parent (initial commit)
+    if (atCommit == null) {
+      showToast('Cannot load file at this commit', 'error', 3000);
+      return;
+    }
+
+    const diffTitle = `${commit.hash} ↔ ${relPath.split('/').pop()}`;
+    const existingDiff = state.tabs.find(t => t.title === diffTitle);
+    if (existingDiff) { activateTab(existingDiff.id); return; }
+
+    const lang = guessLanguage(relPath);
+    const tab = createTab(diffTitle, null, '', lang);
+    tab._isDiff = true;
+    tab._diffOriginal = atParent;
+    tab._diffModified = atCommit;
+    tab._diffLang = lang;
+    renderDiffEditor(tab);
+
+    showToast(`Showing changes in ${commit.hash}: ${commit.message.slice(0, 50)}`, 'info', 3000);
+  } catch (err) {
+    showToast(`Diff error: ${err.message}`, 'error', 3000);
+  }
 }
 
 /* ================================================================
@@ -2959,7 +4208,7 @@ function makeTabDraggable(el, tab) {
 let fileWatchDebounce = null;
 
 function initFileWatcher() {
-  window.splecnote.on('watch:change', (data) => {
+  window.conganote.on('watch:change', (data) => {
     // Debounce tree refresh to avoid excessive updates
     clearTimeout(fileWatchDebounce);
     fileWatchDebounce = setTimeout(async () => {
@@ -2969,7 +4218,7 @@ function initFileWatcher() {
         const tab = state.tabs.find(t => t.filePath === data.path);
         if (tab && data.event === 'change') {
           try {
-            const content = await window.splecnote.readFile(data.path);
+            const content = await window.conganote.readFile(data.path);
             if (content !== null && content !== tab.model.getValue()) {
               // File changed externally — update if not modified by user
               if (!tab.modified) {
@@ -2986,7 +4235,7 @@ function initFileWatcher() {
 
 async function startWatching(dirPath) {
   try {
-    await window.splecnote.watchFolder(dirPath);
+    await window.conganote.watchFolder(dirPath);
   } catch (err) {
     console.error('startWatching error:', err);
   }
@@ -2994,7 +4243,7 @@ async function startWatching(dirPath) {
 
 async function stopWatching(dirPath) {
   try {
-    await window.splecnote.unwatchFolder(dirPath);
+    await window.conganote.unwatchFolder(dirPath);
   } catch {}
 }
 
@@ -3010,7 +4259,7 @@ async function refreshGitStatus() {
     return;
   }
   try {
-    const status = await window.splecnote.gitStatus(state.folderPath);
+    const status = await window.conganote.gitStatus(state.folderPath);
     state.gitStatus = status;
     if (status) {
       dom.statusGit.classList.remove('hidden');
@@ -3053,7 +4302,7 @@ function getGitBadge(filePath) {
    ================================================================ */
 async function loadSettings() {
   try {
-    state.settings = await window.splecnote.readSettings();
+    state.settings = await window.conganote.readSettings();
   } catch {
     state.settings = {};
   }
@@ -3062,7 +4311,7 @@ async function loadSettings() {
 
 async function saveSettings(newSettings) {
   state.settings = { ...state.settings, ...newSettings };
-  await window.splecnote.writeSettings(state.settings);
+  await window.conganote.writeSettings(state.settings);
 }
 
 function openSettingsTab() {
@@ -3151,6 +4400,14 @@ function renderSettingsUI() {
         <div><div class="setting-label">Auto Save Delay</div><div class="setting-desc">Delay in ms before auto saving</div></div>
         <div class="setting-control"><input type="number" id="set-autoSaveDelay" value="${s.autoSaveDelay || 3000}" min="500" max="30000" step="500" /></div>
       </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Trim Trailing Whitespace</div><div class="setting-desc">Remove trailing whitespace on save</div></div>
+        <div class="setting-control"><input type="checkbox" id="set-trimWhitespace" ${s.trimTrailingWhitespace !== false ? 'checked' : ''} /></div>
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Insert Final Newline</div><div class="setting-desc">Ensure file ends with a newline on save</div></div>
+        <div class="setting-control"><input type="checkbox" id="set-finalNewline" ${s.insertFinalNewline !== false ? 'checked' : ''} /></div>
+      </div>
     </div>
     <div class="settings-group">
       <div class="settings-group-title">Appearance</div>
@@ -3200,6 +4457,8 @@ function renderSettingsUI() {
       smoothScrolling: $('#set-smoothScroll').checked,
       autoSave: $('#set-autoSave').checked,
       autoSaveDelay: parseInt($('#set-autoSaveDelay').value) || 3000,
+      trimTrailingWhitespace: $('#set-trimWhitespace').checked,
+      insertFinalNewline: $('#set-finalNewline').checked,
       theme: $('#set-theme').value,
       cursorBlinking: $('#set-cursorBlinking').value,
       renderWhitespace: $('#set-renderWhitespace').value,
@@ -3297,7 +4556,2257 @@ function registerColorProvider() {
 }
 
 /* ================================================================
-   24. INIT
+   37. TERMINAL PANEL
+   ================================================================ */
+let terminalRunning = false;
+
+function toggleTerminal() {
+  state.terminalVisible = !state.terminalVisible;
+  if (state.terminalVisible) {
+    showTerminal();
+  } else {
+    hideTerminal();
+  }
+}
+
+function showTerminal() {
+  state.terminalVisible = true;
+  dom.terminalPanel.classList.remove('hidden');
+  dom.terminalResizer.classList.remove('hidden');
+  if (!state.terminalCwd) {
+    state.terminalCwd = state.folderPath || '';
+    if (state.terminalCwd) window.conganote.terminalSetCwd(state.terminalCwd);
+  }
+  updateTerminalCwd();
+  dom.terminalInput.focus();
+  if (state.editor) state.editor.layout();
+  if (state.splitEditor) state.splitEditor.layout();
+}
+
+function hideTerminal() {
+  state.terminalVisible = false;
+  dom.terminalPanel.classList.add('hidden');
+  dom.terminalResizer.classList.add('hidden');
+  if (state.editor) state.editor.layout();
+  if (state.splitEditor) state.splitEditor.layout();
+  state.editor?.focus();
+}
+
+function updateTerminalCwd() {
+  const cwd = state.terminalCwd || '~';
+  const short = cwd.replace(/^\/Users\/[^/]+/, '~');
+  dom.terminalCwd.textContent = short;
+  dom.terminalCwd.title = cwd;
+}
+
+async function runTerminalCommand(cmd) {
+  if (!cmd.trim() || terminalRunning) return;
+  terminalRunning = true;
+  state.terminalHistory.push(cmd);
+  state.terminalHistoryIdx = state.terminalHistory.length;
+  const cwd = state.terminalCwd || '~';
+  const shortCwd = cwd.replace(/^\/Users\/[^/]+/, '~');
+  appendTerminalLine(`${shortCwd} $ ${cmd}`, 'term-cmd');
+  dom.terminalInput.value = '';
+  dom.terminalInput.disabled = true;
+  try {
+    const result = await window.conganote.terminalRun(cmd);
+    if (result.clear) dom.terminalOutput.innerHTML = '';
+    if (result.error) appendTerminalLine(result.error, 'term-error');
+    if (result.cwd) {
+      state.terminalCwd = result.cwd;
+      updateTerminalCwd();
+    }
+    if (result.code && result.code !== 0) appendTerminalLine(`exit ${result.code}`, 'term-exit');
+  } catch (err) {
+    appendTerminalLine(`Error: ${err.message}`, 'term-error');
+  }
+  terminalRunning = false;
+  dom.terminalInput.disabled = false;
+  dom.terminalInput.focus();
+}
+
+function appendTerminalLine(text, className) {
+  const line = document.createElement('div');
+  if (className) line.className = className;
+  line.textContent = text;
+  dom.terminalOutput.appendChild(line);
+  dom.terminalOutput.scrollTop = dom.terminalOutput.scrollHeight;
+}
+
+function appendTerminalText(text) {
+  const stripped = text.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+  if (!stripped) return;
+  const span = document.createElement('span');
+  span.textContent = stripped;
+  dom.terminalOutput.appendChild(span);
+  dom.terminalOutput.scrollTop = dom.terminalOutput.scrollHeight;
+}
+
+function initTerminal() {
+  dom.terminalInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      runTerminalCommand(dom.terminalInput.value);
+      return;
+    }
+    if (e.ctrlKey && e.key === 'c') {
+      if (terminalRunning) {
+        window.conganote.terminalKill();
+        appendTerminalLine('^C', 'term-error');
+      }
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (state.terminalHistoryIdx > 0) {
+        state.terminalHistoryIdx--;
+        dom.terminalInput.value = state.terminalHistory[state.terminalHistoryIdx] || '';
+      }
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (state.terminalHistoryIdx < state.terminalHistory.length - 1) {
+        state.terminalHistoryIdx++;
+        dom.terminalInput.value = state.terminalHistory[state.terminalHistoryIdx] || '';
+      } else {
+        state.terminalHistoryIdx = state.terminalHistory.length;
+        dom.terminalInput.value = '';
+      }
+      return;
+    }
+  });
+  $('#btn-terminal-close').addEventListener('click', hideTerminal);
+  $('#btn-terminal-clear').addEventListener('click', () => { dom.terminalOutput.innerHTML = ''; });
+  $('#btn-terminal-kill').addEventListener('click', () => {
+    window.conganote.terminalKill();
+    appendTerminalLine('^C (killed)', 'term-error');
+  });
+  // Terminal resizer
+  let isResizing = false, startY = 0, startHeight = 0;
+  dom.terminalResizer.addEventListener('mousedown', (e) => {
+    isResizing = true;
+    startY = e.clientY;
+    startHeight = dom.terminalPanel.getBoundingClientRect().height;
+    dom.terminalResizer.classList.add('active');
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!isResizing) return;
+    const delta = startY - e.clientY;
+    const newH = Math.max(100, Math.min(600, startHeight + delta));
+    dom.terminalPanel.style.height = newH + 'px';
+    if (state.editor) state.editor.layout();
+    if (state.splitEditor) state.splitEditor.layout();
+  });
+  document.addEventListener('mouseup', () => {
+    if (isResizing) {
+      isResizing = false;
+      dom.terminalResizer.classList.remove('active');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+  });
+}
+
+/* ================================================================
+   38. LANGUAGE MODE SELECTOR
+   ================================================================ */
+let langPickerSelectedIndex = -1;
+let langPickerAllLangs = [];
+
+function showLanguagePicker() {
+  dom.languagePickerOverlay.classList.remove('hidden');
+  dom.languagePickerInput.value = '';
+  dom.languagePickerInput.focus();
+  langPickerAllLangs = monaco.languages.getLanguages()
+    .map(l => ({ id: l.id, label: l.aliases?.[0] || l.id }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  renderLanguageList(langPickerAllLangs);
+}
+
+function hideLanguagePicker() {
+  dom.languagePickerOverlay.classList.add('hidden');
+}
+
+function renderLanguageList(langs) {
+  dom.languagePickerResults.innerHTML = '';
+  langPickerSelectedIndex = langs.length > 0 ? 0 : -1;
+  const currentLang = state.editor?.getModel()?.getLanguageId?.() || 'plaintext';
+  for (let i = 0; i < langs.length; i++) {
+    const l = langs[i];
+    const item = document.createElement('div');
+    item.className = 'cp-item' + (i === 0 ? ' selected' : '');
+    const check = l.id === currentLang ? '\u2713 ' : '';
+    item.innerHTML = `<span>${check}${escHtml(l.label)}</span><span class="shortcut">${l.id}</span>`;
+    item.addEventListener('click', () => { changeLanguage(l.id, l.label); hideLanguagePicker(); });
+    item.addEventListener('mouseenter', () => langPickerUpdateSelected(i));
+    dom.languagePickerResults.appendChild(item);
+  }
+}
+
+function langPickerUpdateSelected(idx) {
+  const items = dom.languagePickerResults.querySelectorAll('.cp-item');
+  if (items.length === 0) return;
+  items.forEach(el => el.classList.remove('selected'));
+  langPickerSelectedIndex = Math.max(0, Math.min(idx, items.length - 1));
+  items[langPickerSelectedIndex].classList.add('selected');
+  items[langPickerSelectedIndex].scrollIntoView({ block: 'nearest' });
+}
+
+function changeLanguage(langId, label) {
+  const model = state.editor?.getModel();
+  if (!model) return;
+  monaco.editor.setModelLanguage(model, langId);
+  dom.statusLanguage.textContent = label || langId;
+  showToast(`Language mode: ${label || langId}`, 'info', 2000);
+}
+
+function initLanguagePicker() {
+  dom.languagePickerInput.addEventListener('input', () => {
+    const q = dom.languagePickerInput.value.toLowerCase();
+    const filtered = q
+      ? langPickerAllLangs.filter(l => l.label.toLowerCase().includes(q) || l.id.toLowerCase().includes(q))
+      : langPickerAllLangs;
+    renderLanguageList(filtered);
+  });
+  dom.languagePickerInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { hideLanguagePicker(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); langPickerUpdateSelected(langPickerSelectedIndex + 1); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); langPickerUpdateSelected(langPickerSelectedIndex - 1); return; }
+    if (e.key === 'Enter') {
+      const items = dom.languagePickerResults.querySelectorAll('.cp-item');
+      const target = langPickerSelectedIndex >= 0 && items[langPickerSelectedIndex] ? items[langPickerSelectedIndex] : items[0];
+      if (target) target.click();
+    }
+  });
+  dom.languagePickerOverlay.addEventListener('click', (e) => {
+    if (e.target === dom.languagePickerOverlay) hideLanguagePicker();
+  });
+  dom.statusLanguage.addEventListener('click', showLanguagePicker);
+}
+
+/* ================================================================
+   39. DIFF VIEWER
+   ================================================================ */
+async function showDiffForCurrentFile() {
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (!tab || !tab.filePath || !state.folderPath) {
+    showToast('Open a file in a git repository first', 'warning', 3000);
+    return;
+  }
+  const relPath = tab.filePath.replace(state.folderPath + '/', '');
+  await showDiffView(relPath, tab.filePath);
+}
+
+async function showDiffView(relPath, absPath) {
+  try {
+    const original = await window.conganote.gitShow(state.folderPath, relPath);
+    if (original == null) {
+      showToast('No previous version found (new file or not in git)', 'info', 3000);
+      return;
+    }
+    const current = await window.conganote.readFile(absPath);
+    if (current == null) return;
+    const diffTitle = `\u2194 ${relPath.split('/').pop()}`;
+    const existingDiff = state.tabs.find(t => t.title === diffTitle);
+    if (existingDiff) { activateTab(existingDiff.id); return; }
+    const tab = createTab(diffTitle, null, '', guessLanguage(relPath));
+    tab._isDiff = true;
+    tab._diffOriginal = original;
+    tab._diffModified = current;
+    tab._diffLang = guessLanguage(relPath);
+    renderDiffEditor(tab);
+  } catch (err) {
+    showToast(`Diff error: ${err.message}`, 'error', 3000);
+  }
+}
+
+function renderDiffEditor(tab) {
+  dom.editorContainer.style.display = 'none';
+  hideSettingsUI();
+  hideImagePreview();
+  let diffContainer = $('#diff-container');
+  if (!diffContainer) {
+    diffContainer = document.createElement('div');
+    diffContainer.id = 'diff-container';
+    diffContainer.style.cssText = 'flex:1;overflow:hidden;';
+    dom.editorSplitContainer.appendChild(diffContainer);
+  }
+  diffContainer.style.display = '';
+  if (tab._diffEditor) { try { tab._diffEditor.dispose(); } catch {} tab._diffEditor = null; }
+  diffContainer.innerHTML = '';
+  if (!tab._diffOriginalModel) tab._diffOriginalModel = monaco.editor.createModel(tab._diffOriginal, tab._diffLang);
+  if (!tab._diffModifiedModel) tab._diffModifiedModel = monaco.editor.createModel(tab._diffModified, tab._diffLang);
+  const diffEditor = monaco.editor.createDiffEditor(diffContainer, {
+    theme: monacoThemeId(state.theme),
+    automaticLayout: true,
+    readOnly: true,
+    renderSideBySide: true,
+    fontSize: state.editor.getOption(monaco.editor.EditorOption.fontSize),
+    fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
+    scrollBeyondLastLine: false,
+  });
+  diffEditor.setModel({ original: tab._diffOriginalModel, modified: tab._diffModifiedModel });
+  tab._diffEditor = diffEditor;
+}
+
+function hideDiffEditor() {
+  for (const t of state.tabs) {
+    if (t._diffEditor) { try { t._diffEditor.dispose(); } catch {} t._diffEditor = null; }
+  }
+  const diffContainer = $('#diff-container');
+  if (diffContainer) diffContainer.style.display = 'none';
+  dom.editorContainer.style.display = '';
+}
+
+/* ================================================================
+   40. GIT BLAME (Current Line)
+   ================================================================ */
+let blameDisposable = null;
+
+async function toggleGitBlame() {
+  state.blameVisible = !state.blameVisible;
+  if (state.blameVisible) {
+    await loadBlameData();
+    if (!state.blameData) {
+      showToast('Git blame not available for this file', 'warning', 3000);
+      state.blameVisible = false;
+      return;
+    }
+    updateCurrentLineBlame();
+    blameDisposable = state.editor.onDidChangeCursorPosition(() => updateCurrentLineBlame());
+    showToast('Git blame enabled', 'info', 2000);
+  } else {
+    if (blameDisposable) { blameDisposable.dispose(); blameDisposable = null; }
+    clearBlameDecorations();
+    showToast('Git blame disabled', 'info', 2000);
+  }
+}
+
+async function loadBlameData() {
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (!tab || !tab.filePath || !state.folderPath) { state.blameData = null; return; }
+  try {
+    state.blameData = await window.conganote.gitBlame(state.folderPath, tab.filePath);
+  } catch { state.blameData = null; }
+}
+
+function updateCurrentLineBlame() {
+  if (!state.blameVisible || !state.blameData || !state.editor) { clearBlameDecorations(); return; }
+  const pos = state.editor.getPosition();
+  if (!pos) return;
+  const lineBlame = state.blameData.find(b => b.line === pos.lineNumber);
+  const decorations = [];
+  if (lineBlame && lineBlame.hash !== '0000000') {
+    decorations.push({
+      range: new monaco.Range(pos.lineNumber, 1, pos.lineNumber, 1),
+      options: {
+        after: {
+          content: `    ${lineBlame.author || 'Unknown'}, ${lineBlame.date || ''} \u2022 ${(lineBlame.summary || '').slice(0, 60)}`,
+          inlineClassName: 'blame-annotation',
+        },
+        isWholeLine: true,
+      },
+    });
+  }
+  state.blameDecorations = state.editor.deltaDecorations(state.blameDecorations || [], decorations);
+}
+
+function clearBlameDecorations() {
+  if (state.editor && state.blameDecorations?.length) {
+    state.blameDecorations = state.editor.deltaDecorations(state.blameDecorations, []);
+  }
+}
+
+/* ================================================================
+   41. TRIM WHITESPACE (Manual command)
+   ================================================================ */
+function trimTrailingWhitespaceNow() {
+  if (!state.editor) return;
+  const model = state.editor.getModel();
+  if (!model) return;
+  const content = model.getValue();
+  const trimmed = content.split('\n').map(line => line.replace(/\s+$/, '')).join('\n');
+  if (trimmed !== content) {
+    model.setValue(trimmed);
+    showToast('Trimmed trailing whitespace', 'success', 2000);
+  } else {
+    showToast('No trailing whitespace found', 'info', 2000);
+  }
+}
+
+/* ================================================================
+   42. MINIMAP STATUS BAR
+   ================================================================ */
+function updateMinimapIndicator() {
+  if (!state.editor || !dom.statusMinimap) return;
+  const minimapEnabled = state.editor.getOption(monaco.editor.EditorOption.minimap).enabled;
+  dom.statusMinimap.classList.toggle('minimap-off', !minimapEnabled);
+}
+
+function initMinimapToggle() {
+  if (dom.statusMinimap) {
+    dom.statusMinimap.addEventListener('click', () => {
+      toggleMinimap();
+    });
+  }
+}
+
+/* ================================================================
+   43. GIT INFO POPUP
+   ================================================================ */
+let gitInfoVisible = false;
+
+function toggleGitInfoPopup() {
+  if (gitInfoVisible) {
+    hideGitInfoPopup();
+  } else {
+    showGitInfoPopup();
+  }
+}
+
+function hideGitInfoPopup() {
+  gitInfoVisible = false;
+  if (dom.gitInfoPopup) dom.gitInfoPopup.classList.add('hidden');
+}
+
+async function showGitInfoPopup() {
+  if (!state.folderPath) {
+    showToast('Open a folder first', 'warning', 2000);
+    return;
+  }
+  gitInfoVisible = true;
+  dom.gitInfoPopup.classList.remove('hidden');
+
+  // Show loading state
+  dom.gitInfoBranch.textContent = 'Loading…';
+  dom.gitInfoTracking.textContent = '';
+  dom.gitInfoSync.innerHTML = '';
+  dom.gitInfoRemote.textContent = '';
+  dom.gitInfoStash.classList.add('hidden');
+  dom.gitInfoFiles.innerHTML = '<div class="git-info-empty">Loading…</div>';
+  dom.gitInfoCommits.innerHTML = '<div class="git-info-empty">Loading…</div>';
+
+  // Fetch info & log in parallel
+  const [info, commits] = await Promise.all([
+    window.conganote.gitInfo(state.folderPath).catch(() => null),
+    window.conganote.gitLog(state.folderPath, 10).catch(() => null),
+  ]);
+
+  if (!info) {
+    dom.gitInfoBranch.textContent = 'Not a git repository';
+    dom.gitInfoFiles.innerHTML = '';
+    dom.gitInfoCommits.innerHTML = '';
+    return;
+  }
+
+  // Branch
+  dom.gitInfoBranch.textContent = `⎇ ${info.branch || 'HEAD (detached)'}`;
+
+  // Tracking
+  if (info.tracking) {
+    dom.gitInfoTracking.textContent = `→ ${info.tracking}`;
+  } else {
+    dom.gitInfoTracking.textContent = '(no upstream)';
+  }
+
+  // Sync status
+  const syncParts = [];
+  if (info.ahead > 0) syncParts.push(`<span class="git-sync-ahead">↑ ${info.ahead} ahead</span>`);
+  if (info.behind > 0) syncParts.push(`<span class="git-sync-behind">↓ ${info.behind} behind</span>`);
+  if (info.ahead === 0 && info.behind === 0 && info.tracking) {
+    syncParts.push('<span class="git-sync-ok">✓ Up to date</span>');
+  }
+  dom.gitInfoSync.innerHTML = syncParts.join(' · ');
+
+  // Remote URL
+  if (info.remoteUrl) {
+    dom.gitInfoRemote.textContent = `Remote: ${info.remoteUrl}`;
+  } else {
+    dom.gitInfoRemote.textContent = '';
+  }
+
+  // Stash
+  if (info.stashCount > 0) {
+    dom.gitInfoStash.classList.remove('hidden');
+    dom.gitInfoStash.textContent = `📦 ${info.stashCount} stash${info.stashCount > 1 ? 'es' : ''}`;
+  } else {
+    dom.gitInfoStash.classList.add('hidden');
+  }
+
+  // Changed files
+  const fileEntries = Object.entries(info.files);
+  if (fileEntries.length === 0) {
+    dom.gitInfoFiles.innerHTML = '<div class="git-info-empty">Working tree clean</div>';
+  } else {
+    const statusLabels = { modified: 'M', added: 'A', deleted: 'D', untracked: 'U', renamed: 'R', conflicted: 'C' };
+    const statusClass  = { modified: 'M', added: 'A', deleted: 'D', untracked: 'U', renamed: 'R', conflicted: 'C' };
+    dom.gitInfoFiles.innerHTML = fileEntries.map(([filePath, status]) => {
+      const fileName = filePath.split('/').pop();
+      const dirPath = filePath.includes('/') ? filePath.substring(0, filePath.lastIndexOf('/')) : '';
+      const label = statusLabels[status] || '?';
+      const cls = statusClass[status] || 'M';
+      return `<div class="git-info-file-item" data-rel-path="${filePath}" data-abs-path="${state.folderPath}/${filePath}" title="${filePath}">
+        <span class="git-file-status git-file-status-${cls}">${label}</span>
+        <span class="git-file-name">${fileName}</span>
+        ${dirPath ? `<span class="git-file-path">${dirPath}</span>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  // Recent commits
+  if (!commits || commits.length === 0) {
+    dom.gitInfoCommits.innerHTML = '<div class="git-info-empty">No commits found</div>';
+  } else {
+    dom.gitInfoCommits.innerHTML = commits.map(c => {
+      const relTime = formatRelativeTime(c.date);
+      const shortMsg = c.message.length > 50 ? c.message.slice(0, 47) + '…' : c.message;
+      return `<div class="git-info-commit-item" title="${escHtml(c.message)}\n${c.author} · ${c.date}">
+        <span class="git-commit-hash">${c.hash}</span>
+        <span class="git-commit-msg">${escHtml(shortMsg)}</span>
+        <span class="git-commit-meta">${relTime}</span>
+      </div>`;
+    }).join('');
+  }
+}
+
+function formatRelativeTime(dateStr) {
+  try {
+    const d = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now - d;
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return 'just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffH = Math.floor(diffMin / 60);
+    if (diffH < 24) return `${diffH}h ago`;
+    const diffD = Math.floor(diffH / 24);
+    if (diffD < 30) return `${diffD}d ago`;
+    const diffM = Math.floor(diffD / 30);
+    if (diffM < 12) return `${diffM}mo ago`;
+    return `${Math.floor(diffM / 12)}y ago`;
+  } catch {
+    return dateStr;
+  }
+}
+
+function escHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function initGitInfoPopup() {
+  if (!dom.gitInfoPopup) return;
+
+  // Click on branch in status bar opens the popup
+  dom.statusGit.addEventListener('click', toggleGitInfoPopup);
+
+  // Close button
+  $('#btn-git-info-close').addEventListener('click', hideGitInfoPopup);
+
+  // Click outside popup to close
+  document.addEventListener('mousedown', (e) => {
+    if (gitInfoVisible && dom.gitInfoPopup && !dom.gitInfoPopup.contains(e.target) && !dom.statusGit.contains(e.target)) {
+      hideGitInfoPopup();
+    }
+  });
+
+  // File item click → open diff
+  dom.gitInfoFiles.addEventListener('click', (e) => {
+    const item = e.target.closest('.git-info-file-item');
+    if (!item) return;
+    const relPath = item.dataset.relPath;
+    const absPath = item.dataset.absPath;
+    if (relPath && absPath) {
+      hideGitInfoPopup();
+      showDiffView(relPath, absPath);
+    }
+  });
+
+  // Quick action buttons (run via terminal)
+  $('#btn-git-pull').addEventListener('click', () => {
+    hideGitInfoPopup();
+    showTerminal();
+    runTerminalCommand('git pull');
+  });
+  $('#btn-git-push').addEventListener('click', () => {
+    hideGitInfoPopup();
+    showTerminal();
+    runTerminalCommand('git push');
+  });
+  $('#btn-git-fetch').addEventListener('click', () => {
+    hideGitInfoPopup();
+    showTerminal();
+    runTerminalCommand('git fetch');
+  });
+}
+
+/* ================================================================
+   44. RICH TEXT EDITOR
+   ================================================================ */
+
+function isPlainTextFile(filename) {
+  if (!filename) return false;
+  const ext = filename.split('.').pop().toLowerCase();
+  return ext === 'txt' || ext === filename.toLowerCase(); // no extension = treat as plain
+}
+
+function toggleRichTextMode() {
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (!tab) return;
+  if (tab._richTextMode) {
+    exitRichTextMode(tab);
+  } else {
+    enterRichTextMode(tab, true);
+  }
+}
+
+function enterRichTextMode(tab, loadFromModel = true) {
+  tab._richTextMode = true;
+
+  // Hide Monaco, show Rich Text
+  dom.editorSplitContainer.style.display = 'none';
+  dom.richTextContainer.classList.remove('hidden');
+
+  if (loadFromModel) {
+    // Convert plain text to HTML paragraphs
+    const text = tab.model.getValue();
+    if (tab._richTextHtml) {
+      dom.richTextEditor.innerHTML = tab._richTextHtml;
+    } else {
+      dom.richTextEditor.innerHTML = text
+        .split('\n')
+        .map(line => `<div>${line || '<br>'}</div>`)
+        .join('');
+    }
+  } else if (tab._richTextHtml) {
+    // Re-entering from tab switch — restore saved HTML
+    dom.richTextEditor.innerHTML = tab._richTextHtml;
+  }
+
+  dom.richTextEditor.focus();
+
+  // Update status bar
+  if (dom.statusRichText) {
+    dom.statusRichText.classList.remove('hidden');
+    dom.statusRichText.textContent = '✎ Rich Text';
+  }
+
+  // Track changes
+  dom.richTextEditor.oninput = () => {
+    tab._richTextHtml = dom.richTextEditor.innerHTML;
+    markTabModified(tab.id, true);
+    scheduleAutoSave(tab.id);
+  };
+}
+
+function exitRichTextMode(tab) {
+  if (!tab) tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (!tab) return;
+
+  // Save the plain text back to Monaco model
+  const plainText = dom.richTextEditor.innerText;
+  tab.model.setValue(plainText);
+  tab._richTextMode = false;
+  tab._richTextHtml = null;
+
+  hideRichTextEditor();
+
+  // Show Monaco
+  dom.editorSplitContainer.style.display = '';
+  if (state.editor && state.activeTabId === tab.id) {
+    state.editor.setModel(tab.model);
+    state.editor.focus();
+  }
+
+  // Re-show the status bar indicator so user can toggle back
+  updateRichTextIndicator();
+}
+
+function hideRichTextEditor() {
+  if (dom.richTextContainer) dom.richTextContainer.classList.add('hidden');
+  if (dom.statusRichText) dom.statusRichText.classList.add('hidden');
+  if (dom.richTextEditor) dom.richTextEditor.oninput = null;
+}
+
+function saveRichTextContent(tab) {
+  // When saving from rich text mode, save plain text to file
+  if (tab._richTextMode && dom.richTextEditor) {
+    tab._richTextHtml = dom.richTextEditor.innerHTML;
+    const plainText = dom.richTextEditor.innerText;
+    tab.model.setValue(plainText);
+  }
+}
+
+function initRichTextEditor() {
+  if (!dom.richTextToolbar || !dom.richTextEditor) return;
+
+  // Toolbar button commands
+  dom.richTextToolbar.addEventListener('click', (e) => {
+    const btn = e.target.closest('.rt-btn');
+    if (!btn) return;
+    const cmd = btn.dataset.cmd;
+    if (!cmd) return;
+    e.preventDefault();
+    document.execCommand(cmd, false, null);
+    dom.richTextEditor.focus();
+  });
+
+  // Heading select
+  const headingSelect = $('#rt-heading');
+  if (headingSelect) {
+    headingSelect.addEventListener('change', (e) => {
+      const val = e.target.value;
+      if (val) {
+        document.execCommand('formatBlock', false, `<${val}>`);
+      } else {
+        document.execCommand('formatBlock', false, '<div>');
+      }
+      dom.richTextEditor.focus();
+    });
+  }
+
+  // Font size select
+  const fontSizeSelect = $('#rt-fontsize');
+  if (fontSizeSelect) {
+    fontSizeSelect.addEventListener('change', (e) => {
+      document.execCommand('fontSize', false, e.target.value);
+      dom.richTextEditor.focus();
+    });
+  }
+
+  // Text color
+  const foreColor = $('#rt-forecolor');
+  if (foreColor) {
+    foreColor.addEventListener('input', (e) => {
+      document.execCommand('foreColor', false, e.target.value);
+      dom.richTextEditor.focus();
+    });
+  }
+
+  // Background/highlight color
+  const backColor = $('#rt-backcolor');
+  if (backColor) {
+    backColor.addEventListener('input', (e) => {
+      document.execCommand('hiliteColor', false, e.target.value);
+      dom.richTextEditor.focus();
+    });
+  }
+
+  // Exit button
+  const exitBtn = $('#btn-exit-richtext');
+  if (exitBtn) {
+    exitBtn.addEventListener('click', () => {
+      const tab = state.tabs.find(t => t.id === state.activeTabId);
+      if (tab) exitRichTextMode(tab);
+    });
+  }
+
+  // Status bar toggle
+  if (dom.statusRichText) {
+    dom.statusRichText.addEventListener('click', toggleRichTextMode);
+  }
+
+  // Show Rich Text indicator for plain text files
+  updateRichTextIndicator();
+}
+
+function updateRichTextIndicator() {
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (!dom.statusRichText) return;
+  if (tab && (isPlainTextFile(tab.title) || tab._richTextMode)) {
+    dom.statusRichText.classList.remove('hidden');
+    dom.statusRichText.textContent = tab._richTextMode ? '✎ Rich Text' : '✎ Plain';
+  } else {
+    dom.statusRichText.classList.add('hidden');
+  }
+}
+
+
+/* ================================================================
+   24. TOOL PANELS — API Client, Regex Tester, JSON Viewer,
+       Bookmarks, Code Screenshot, Database Client
+   ================================================================ */
+
+// ---- Generic Tool Panel Toggle ----
+const toolBtnMap = {
+  'api-client-panel': 'tbtn-api',
+  'regex-panel': 'tbtn-regex',
+  'json-viewer-panel': 'tbtn-json',
+  'bookmarks-panel': 'tbtn-bookmarks',
+  'screenshot-panel': 'tbtn-screenshot',
+  'db-panel': 'tbtn-db',
+  'snippet-panel': 'tbtn-snippets',
+  'color-panel': 'tbtn-color',
+  'todo-panel': 'tbtn-todo',
+  'pomo-panel': 'tbtn-pomo',
+  'diff-panel': 'tbtn-diff',
+};
+
+function toggleToolPanel(panelId) {
+  const panels = ['api-client-panel', 'regex-panel', 'json-viewer-panel', 'bookmarks-panel', 'screenshot-panel', 'db-panel', 'snippet-panel', 'color-panel', 'todo-panel', 'pomo-panel', 'diff-panel'];
+  const target = $('#' + panelId);
+  const isVisible = target && !target.classList.contains('hidden');
+
+  // Animate-close visible panels, then hide
+  panels.forEach(id => {
+    const p = $('#' + id);
+    if (p && !p.classList.contains('hidden')) {
+      p.classList.add('panel-closing');
+      p.addEventListener('animationend', function onEnd() {
+        p.classList.remove('panel-closing');
+        p.classList.add('hidden');
+        p.removeEventListener('animationend', onEnd);
+      }, { once: true });
+    }
+    const btn = $('#' + toolBtnMap[id]);
+    if (btn) btn.classList.remove('active');
+  });
+  state.activeToolPanel = null;
+
+  // If it was hidden, show it (after clearing the closing animation)
+  if (!isVisible && target) {
+    // Cancel any pending close animation and show immediately
+    target.classList.remove('panel-closing', 'hidden');
+    // Re-trigger open animation
+    target.style.animation = 'none';
+    target.offsetHeight; // force reflow
+    target.style.animation = '';
+    state.activeToolPanel = panelId;
+    const btn = $('#' + toolBtnMap[panelId]);
+    if (btn) btn.classList.add('active');
+
+    // Auto-scan hook for TODO Tracker
+    if (panelId === 'todo-panel' && typeof window.todoTrackerOnOpen === 'function') {
+      window.todoTrackerOnOpen();
+    }
+  }
+}
+
+// ================================================================
+// 24a. API CLIENT
+// ================================================================
+function initToolbarButtons() {
+  $('#tbtn-api')?.addEventListener('click', () => toggleToolPanel('api-client-panel'));
+  $('#tbtn-regex')?.addEventListener('click', () => toggleToolPanel('regex-panel'));
+  $('#tbtn-json')?.addEventListener('click', () => openJsonViewer());
+  $('#tbtn-bookmarks')?.addEventListener('click', () => toggleToolPanel('bookmarks-panel'));
+  $('#tbtn-screenshot')?.addEventListener('click', () => openScreenshotPanel());
+  $('#tbtn-db')?.addEventListener('click', () => toggleToolPanel('db-panel'));
+  $('#tbtn-snippets')?.addEventListener('click', () => toggleToolPanel('snippet-panel'));
+  $('#tbtn-color')?.addEventListener('click', () => toggleToolPanel('color-panel'));
+  $('#tbtn-todo')?.addEventListener('click', () => toggleToolPanel('todo-panel'));
+  $('#tbtn-pomo')?.addEventListener('click', () => toggleToolPanel('pomo-panel'));
+  $('#tbtn-diff')?.addEventListener('click', () => toggleToolPanel('diff-panel'));
+}
+
+function initApiClient() {
+  const methodEl    = $('#api-method');
+  const urlEl       = $('#api-url');
+  const sendBtn     = $('#btn-api-send');
+  const saveBtn     = $('#btn-api-save');
+  const closeBtn    = $('#btn-api-close');
+  const historyBtn  = $('#btn-api-history');
+  const collectBtn  = $('#btn-api-collections');
+  if (!sendBtn) return;
+
+  // Close
+  closeBtn?.addEventListener('click', () => toggleToolPanel('api-client-panel'));
+
+  // Send request
+  sendBtn.addEventListener('click', sendApiRequest);
+  urlEl?.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendApiRequest(); });
+
+  // Save to collection
+  saveBtn?.addEventListener('click', saveApiToCollection);
+
+  // Request tabs
+  $$('.api-client-body .api-tabs .api-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      $$('.api-client-body .api-tabs .api-tab').forEach(t => t.classList.remove('active'));
+      $$('.api-tab-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      const panel = $('#api-panel-' + tab.dataset.panel);
+      if (panel) panel.classList.add('active');
+    });
+  });
+
+  // Response tabs
+  $$('.api-response-tabs .api-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      $$('.api-response-tabs .api-tab').forEach(t => t.classList.remove('active'));
+      $$('.api-response-body').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      const panel = $('#api-resp-' + tab.dataset.rpanel);
+      if (panel) panel.classList.add('active');
+    });
+  });
+
+  // Auth type change
+  $('#api-auth-type')?.addEventListener('change', updateAuthFields);
+  updateAuthFields();
+
+  // Add row buttons
+  $$('.api-add-row-btn').forEach(btn => {
+    btn.addEventListener('click', () => addKvRow(btn.dataset.target));
+  });
+
+  // Add initial empty rows
+  addKvRow('api-params-table');
+  addKvRow('api-headers-table');
+
+  // History toggle
+  historyBtn?.addEventListener('click', () => {
+    const panel = $('#api-history-panel');
+    panel?.classList.toggle('hidden');
+    $('#api-collections-panel')?.classList.add('hidden');
+    renderApiHistory();
+  });
+
+  // Collections toggle
+  collectBtn?.addEventListener('click', () => {
+    const panel = $('#api-collections-panel');
+    panel?.classList.toggle('hidden');
+    $('#api-history-panel')?.classList.add('hidden');
+    renderApiCollections();
+  });
+
+  // Clear history
+  $('#btn-api-clear-history')?.addEventListener('click', () => {
+    state.apiHistory = [];
+    renderApiHistory();
+  });
+
+  // New collection
+  $('#btn-api-new-collection')?.addEventListener('click', () => {
+    const name = prompt('Collection name:');
+    if (name) {
+      state.apiCollections.push({ name, requests: [] });
+      renderApiCollections();
+    }
+  });
+
+  // Import collection (Postman JSON)
+  $('#btn-api-import')?.addEventListener('click', importApiCollection);
+
+  // Export collection (Postman JSON)
+  $('#btn-api-export')?.addEventListener('click', exportApiCollection);
+
+  // Close collections/history panels on click outside the API client panel
+  document.addEventListener('mousedown', (e) => {
+    const apiPanel = $('#api-client-panel');
+    if (!apiPanel || apiPanel.classList.contains('hidden')) return;
+    const colPanel = $('#api-collections-panel');
+    const histPanel = $('#api-history-panel');
+    // If click is outside the entire API client panel, close sidebars
+    if (!apiPanel.contains(e.target)) {
+      if (colPanel && !colPanel.classList.contains('hidden')) colPanel.classList.add('hidden');
+      if (histPanel && !histPanel.classList.contains('hidden')) histPanel.classList.add('hidden');
+    }
+    // If click is inside the main API area but outside the sidebar panels themselves, also close them
+    else {
+      if (colPanel && !colPanel.classList.contains('hidden') && !colPanel.contains(e.target) && e.target !== collectBtn && !collectBtn?.contains(e.target)) {
+        colPanel.classList.add('hidden');
+      }
+      if (histPanel && !histPanel.classList.contains('hidden') && !histPanel.contains(e.target) && e.target !== historyBtn && !historyBtn?.contains(e.target)) {
+        histPanel.classList.add('hidden');
+      }
+    }
+  });
+}
+
+function addKvRow(tableId) {
+  const table = $('#' + tableId);
+  if (!table) return;
+  const row = document.createElement('div');
+  row.className = 'api-kv-row';
+  row.innerHTML = `
+    <input type="text" class="api-kv-key" placeholder="Key" spellcheck="false" />
+    <input type="text" class="api-kv-value" placeholder="Value" spellcheck="false" />
+    <button class="api-kv-del" title="Remove">✕</button>
+  `;
+  row.querySelector('.api-kv-del').addEventListener('click', () => row.remove());
+  table.appendChild(row);
+}
+
+function getKvPairs(tableId) {
+  const rows = $$(`#${tableId} .api-kv-row`);
+  const result = {};
+  rows.forEach(row => {
+    const k = row.querySelector('.api-kv-key')?.value.trim();
+    const v = row.querySelector('.api-kv-value')?.value.trim();
+    if (k) result[k] = v;
+  });
+  return result;
+}
+
+function updateAuthFields() {
+  const type = $('#api-auth-type')?.value || 'none';
+  const container = $('#api-auth-fields');
+  if (!container) return;
+  container.innerHTML = '';
+  if (type === 'bearer') {
+    container.innerHTML = '<input id="api-auth-token" class="api-auth-input" placeholder="Bearer Token" spellcheck="false" />';
+  } else if (type === 'basic') {
+    container.innerHTML = '<input id="api-auth-user" class="api-auth-input" placeholder="Username" spellcheck="false" /><input id="api-auth-pass" class="api-auth-input" placeholder="Password" type="password" spellcheck="false" />';
+  } else if (type === 'apikey') {
+    container.innerHTML = '<input id="api-auth-key-name" class="api-auth-input" placeholder="Header Name (e.g. X-API-Key)" spellcheck="false" /><input id="api-auth-key-val" class="api-auth-input" placeholder="API Key Value" spellcheck="false" />';
+  }
+}
+
+async function sendApiRequest() {
+  const method = $('#api-method')?.value || 'GET';
+  const url    = $('#api-url')?.value.trim();
+  if (!url) { showToast('Please enter a URL', 'warning'); return; }
+
+  const sendBtn = $('#btn-api-send');
+  sendBtn.textContent = '...';
+  sendBtn.disabled = true;
+
+  // Gather headers
+  const headers = getKvPairs('api-headers-table');
+  const params  = getKvPairs('api-params-table');
+
+  // Add auth
+  const authType = $('#api-auth-type')?.value;
+  if (authType === 'bearer') {
+    const token = $('#api-auth-token')?.value;
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+  } else if (authType === 'basic') {
+    const user = $('#api-auth-user')?.value || '';
+    const pass = $('#api-auth-pass')?.value || '';
+    headers['Authorization'] = `Basic ${btoa(user + ':' + pass)}`;
+  } else if (authType === 'apikey') {
+    const keyName = $('#api-auth-key-name')?.value;
+    const keyVal  = $('#api-auth-key-val')?.value;
+    if (keyName && keyVal) headers[keyName] = keyVal;
+  }
+
+  // Add query params to URL
+  let fullUrl = url;
+  const paramStr = new URLSearchParams(params).toString();
+  if (paramStr) fullUrl += (url.includes('?') ? '&' : '?') + paramStr;
+
+  // Body
+  const bodyType    = $('#api-body-type')?.value || 'none';
+  let body = null;
+  if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    if (bodyType === 'json') {
+      body = $('#api-body-content')?.value || '';
+      if (!headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    } else if (bodyType === 'text') {
+      body = $('#api-body-content')?.value || '';
+      if (!headers['Content-Type']) headers['Content-Type'] = 'text/plain';
+    } else if (bodyType === 'form') {
+      body = $('#api-body-content')?.value || '';
+      if (!headers['Content-Type']) headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    }
+  }
+
+  try {
+    const res = await window.conganote.sendApiRequest({ method, url: fullUrl, headers, body });
+
+    // Status
+    const statusEl = $('#api-response-status');
+    if (statusEl) {
+      statusEl.textContent = `${res.status} ${res.statusText || ''}`;
+      statusEl.className = 'api-response-status ' + (res.status >= 200 && res.status < 300 ? 'status-ok' : res.status >= 400 ? 'status-err' : 'status-warn');
+    }
+
+    // Time & size
+    const timeEl = $('#api-response-time');
+    if (timeEl) timeEl.textContent = `${res.time}ms`;
+    const sizeEl = $('#api-response-size');
+    if (sizeEl) sizeEl.textContent = formatBytes(res.size);
+
+    // Response body — try to prettify JSON
+    const bodyEl = $('#api-response-content');
+    if (bodyEl) {
+      try {
+        const parsed = JSON.parse(res.body);
+        bodyEl.textContent = JSON.stringify(parsed, null, 2);
+      } catch {
+        bodyEl.textContent = res.body;
+      }
+    }
+
+    // Response headers
+    const headersEl = $('#api-response-headers-content');
+    if (headersEl) {
+      headersEl.textContent = Object.entries(res.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n');
+    }
+
+    // Add to history
+    state.apiHistory.unshift({
+      method, url: fullUrl, status: res.status, time: res.time,
+      timestamp: new Date().toLocaleTimeString(),
+    });
+    if (state.apiHistory.length > 50) state.apiHistory.pop();
+
+  } catch (err) {
+    $('#api-response-content').textContent = 'Error: ' + err.message;
+    $('#api-response-status').textContent = 'Error';
+    $('#api-response-status').className = 'api-response-status status-err';
+  }
+
+  sendBtn.textContent = 'Send';
+  sendBtn.disabled = false;
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
+}
+
+function renderApiHistory() {
+  const list = $('#api-history-list');
+  if (!list) return;
+  if (state.apiHistory.length === 0) {
+    list.innerHTML = '<div class="api-history-empty">No requests yet</div>';
+    return;
+  }
+  list.innerHTML = state.apiHistory.map((h, i) => `
+    <div class="api-history-item" data-idx="${i}">
+      <span class="api-hist-method method-${h.method.toLowerCase()}">${h.method}</span>
+      <span class="api-hist-url">${escHtml(h.url)}</span>
+      <span class="api-hist-status ${h.status >= 200 && h.status < 300 ? 'status-ok' : 'status-err'}">${h.status}</span>
+      <span class="api-hist-time">${h.time}ms</span>
+    </div>
+  `).join('');
+  list.querySelectorAll('.api-history-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const h = state.apiHistory[+el.dataset.idx];
+      if (h) {
+        const u = new URL(h.url);
+        $('#api-method').value = h.method;
+        $('#api-url').value = u.origin + u.pathname;
+      }
+    });
+  });
+}
+
+function saveApiToCollection() {
+  if (state.apiCollections.length === 0) {
+    const name = prompt('Create a collection first. Name:');
+    if (!name) return;
+    state.apiCollections.push({ name, requests: [] });
+  }
+  const method  = $('#api-method')?.value || 'GET';
+  const url     = $('#api-url')?.value?.trim() || '';
+  const headers = getKvPairs('api-headers-table');
+  const params  = getKvPairs('api-params-table');
+  const bodyType = $('#api-body-type')?.value || 'none';
+  const bodyContent = $('#api-body-content')?.value || '';
+  const authType = $('#api-auth-type')?.value || 'none';
+  let auth = { type: authType };
+  if (authType === 'bearer') auth.token = $('#api-auth-token')?.value || '';
+  else if (authType === 'basic') { auth.username = $('#api-auth-user')?.value || ''; auth.password = $('#api-auth-pass')?.value || ''; }
+  else if (authType === 'apikey') { auth.keyName = $('#api-auth-key-name')?.value || ''; auth.keyValue = $('#api-auth-key-val')?.value || ''; }
+
+  const colIdx = state.apiCollections.length === 1 ? 0 : parseInt(prompt(`Collection index (0-${state.apiCollections.length - 1}):`), 10);
+  if (isNaN(colIdx) || !state.apiCollections[colIdx]) return;
+  const reqName = prompt('Request name:', url.split('/').pop() || url) || url;
+  state.apiCollections[colIdx].requests.push({ method, url, name: reqName, headers, params, bodyType, body: bodyContent, auth });
+  showToast(`Saved to "${state.apiCollections[colIdx].name}"`, 'info');
+  renderApiCollections();
+}
+
+function renderApiCollections() {
+  const list = $('#api-collections-list');
+  if (!list) return;
+  if (state.apiCollections.length === 0) {
+    list.innerHTML = '<div class="api-history-empty">No collections</div>';
+    return;
+  }
+  list.innerHTML = state.apiCollections.map((col, ci) => `
+    <div class="api-collection-group">
+      <div class="api-collection-name">📁 ${escHtml(col.name)} (${col.requests.length})</div>
+      ${col.requests.map((r, ri) => `
+        <div class="api-collection-item" data-ci="${ci}" data-ri="${ri}">
+          <span class="api-hist-method method-${r.method.toLowerCase()}">${r.method}</span>
+          <span class="api-hist-url">${escHtml(r.name || r.url)}</span>
+        </div>
+      `).join('')}
+    </div>
+  `).join('');
+  list.querySelectorAll('.api-collection-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const r = state.apiCollections[+el.dataset.ci]?.requests[+el.dataset.ri];
+      if (!r) return;
+      $('#api-method').value = r.method;
+      $('#api-url').value = r.url;
+      // Restore headers
+      const hTable = $('#api-headers-table');
+      if (hTable) { hTable.innerHTML = ''; Object.entries(r.headers || {}).forEach(([k, v]) => { addKvRow('api-headers-table'); const rows = hTable.querySelectorAll('.api-kv-row'); const last = rows[rows.length - 1]; if (last) { last.querySelector('.api-kv-key').value = k; last.querySelector('.api-kv-value').value = v; } }); if (Object.keys(r.headers || {}).length === 0) addKvRow('api-headers-table'); }
+      // Restore params
+      const pTable = $('#api-params-table');
+      if (pTable) { pTable.innerHTML = ''; Object.entries(r.params || {}).forEach(([k, v]) => { addKvRow('api-params-table'); const rows = pTable.querySelectorAll('.api-kv-row'); const last = rows[rows.length - 1]; if (last) { last.querySelector('.api-kv-key').value = k; last.querySelector('.api-kv-value').value = v; } }); if (Object.keys(r.params || {}).length === 0) addKvRow('api-params-table'); }
+      // Restore body
+      if (r.bodyType && $('#api-body-type')) { $('#api-body-type').value = r.bodyType; }
+      if (r.body && $('#api-body-content')) { $('#api-body-content').value = r.body; }
+      // Restore auth
+      if (r.auth && r.auth.type && $('#api-auth-type')) {
+        $('#api-auth-type').value = r.auth.type;
+        updateAuthFields();
+        if (r.auth.type === 'bearer' && $('#api-auth-token')) $('#api-auth-token').value = r.auth.token || '';
+        else if (r.auth.type === 'basic') { if ($('#api-auth-user')) $('#api-auth-user').value = r.auth.username || ''; if ($('#api-auth-pass')) $('#api-auth-pass').value = r.auth.password || ''; }
+        else if (r.auth.type === 'apikey') { if ($('#api-auth-key-name')) $('#api-auth-key-name').value = r.auth.keyName || ''; if ($('#api-auth-key-val')) $('#api-auth-key-val').value = r.auth.keyValue || ''; }
+      }
+    });
+  });
+}
+
+// ----------------------------------------------------------------
+// Postman Import / Export
+// ----------------------------------------------------------------
+
+/** Parse a Postman v2.0/v2.1 item (possibly nested folders) into flat request list */
+function flattenPostmanItems(items, folderPrefix = '') {
+  const result = [];
+  if (!Array.isArray(items)) return result;
+  for (const item of items) {
+    if (item.item && Array.isArray(item.item)) {
+      // It's a folder — recurse
+      const prefix = folderPrefix ? `${folderPrefix}/${item.name || 'Folder'}` : (item.name || 'Folder');
+      result.push(...flattenPostmanItems(item.item, prefix));
+    } else if (item.request) {
+      const req = item.request;
+      // Method
+      const method = (typeof req === 'string' ? 'GET' : (req.method || 'GET')).toUpperCase();
+      // URL
+      let url = '';
+      if (typeof req.url === 'string') url = req.url;
+      else if (req.url?.raw) url = req.url.raw;
+      // Name
+      const name = item.name || url.split('/').pop() || url;
+      // Headers
+      const headers = {};
+      if (Array.isArray(req.header)) {
+        req.header.forEach(h => { if (h.key) headers[h.key] = h.value || ''; });
+      }
+      // Params from URL query
+      const params = {};
+      if (req.url?.query && Array.isArray(req.url.query)) {
+        req.url.query.forEach(q => { if (q.key) params[q.key] = q.value || ''; });
+      }
+      // Body
+      let bodyType = 'none', body = '';
+      if (req.body) {
+        if (req.body.mode === 'raw') {
+          body = req.body.raw || '';
+          const lang = req.body.options?.raw?.language || '';
+          bodyType = lang === 'json' ? 'json' : (lang === 'text' ? 'text' : 'json');
+        } else if (req.body.mode === 'urlencoded') {
+          bodyType = 'form';
+          body = (req.body.urlencoded || []).map(p => `${encodeURIComponent(p.key)}=${encodeURIComponent(p.value || '')}`).join('&');
+        } else if (req.body.mode === 'formdata') {
+          bodyType = 'form';
+          body = (req.body.formdata || []).map(p => `${p.key}=${p.value || ''}`).join('&');
+        }
+      }
+      // Auth
+      let auth = { type: 'none' };
+      const a = req.auth;
+      if (a) {
+        if (a.type === 'bearer') {
+          const tokenArr = a.bearer || [];
+          const tokenObj = tokenArr.find(b => b.key === 'token');
+          auth = { type: 'bearer', token: tokenObj?.value || '' };
+        } else if (a.type === 'basic') {
+          const ba = a.basic || [];
+          auth = { type: 'basic', username: (ba.find(b => b.key === 'username')?.value || ''), password: (ba.find(b => b.key === 'password')?.value || '') };
+        } else if (a.type === 'apikey') {
+          const ak = a.apikey || [];
+          auth = { type: 'apikey', keyName: (ak.find(b => b.key === 'key')?.value || ''), keyValue: (ak.find(b => b.key === 'value')?.value || '') };
+        }
+      }
+      // Strip query params from URL for clean display (params are separate)
+      let cleanUrl = url;
+      if (Object.keys(params).length > 0) {
+        try { const u = new URL(url); cleanUrl = u.origin + u.pathname; } catch { /* keep raw */ }
+      }
+      result.push({ method, url: cleanUrl, name: (folderPrefix ? `${folderPrefix}/${name}` : name), headers, params, bodyType, body, auth });
+    }
+  }
+  return result;
+}
+
+async function importApiCollection() {
+  try {
+    const paths = await window.conganote.openFileDialog();
+    if (!paths || paths.length === 0) return;
+    // Only pick .json files
+    const jsonPaths = paths.filter(p => p.endsWith('.json'));
+    if (jsonPaths.length === 0) { showToast('Please select a JSON file', 'warning'); return; }
+
+    let imported = 0;
+    for (const fp of jsonPaths) {
+      const raw = await window.conganote.readFile(fp);
+      if (!raw) { showToast(`Could not read ${fp}`, 'error'); continue; }
+      let data;
+      try { data = JSON.parse(raw); } catch { showToast(`Invalid JSON: ${fp}`, 'error'); continue; }
+
+      // Detect format: Postman Collection v2.x
+      if (data.info && data.item) {
+        const name = data.info.name || 'Imported Collection';
+        const requests = flattenPostmanItems(data.item);
+        state.apiCollections.push({ name, requests });
+        imported += requests.length;
+      }
+      // Detect format: CongaNote native export
+      else if (data._conganote && Array.isArray(data.collections)) {
+        data.collections.forEach(col => {
+          state.apiCollections.push({ name: col.name || 'Imported', requests: col.requests || [] });
+          imported += (col.requests || []).length;
+        });
+      }
+      // Detect format: Array of Postman collections
+      else if (Array.isArray(data)) {
+        data.forEach(col => {
+          if (col.info && col.item) {
+            const name = col.info.name || 'Imported';
+            state.apiCollections.push({ name, requests: flattenPostmanItems(col.item) });
+            imported++;
+          }
+        });
+      }
+      // Try as a bare array of items
+      else if (data.item && !data.info) {
+        const requests = flattenPostmanItems(data.item);
+        state.apiCollections.push({ name: 'Imported Collection', requests });
+        imported += requests.length;
+      }
+      else {
+        showToast('Unrecognized collection format', 'warning');
+        continue;
+      }
+    }
+    if (imported > 0) {
+      renderApiCollections();
+      showToast(`Imported ${imported} request(s) successfully`, 'info');
+    }
+  } catch (err) {
+    showToast('Import failed: ' + err.message, 'error');
+  }
+}
+
+async function exportApiCollection() {
+  if (state.apiCollections.length === 0) {
+    showToast('No collections to export', 'warning');
+    return;
+  }
+
+  // If multiple collections, let user choose or export all
+  let colIdx = 0;
+  if (state.apiCollections.length > 1) {
+    const choice = prompt(`Export which collection? (0-${state.apiCollections.length - 1}, or "all" for all):`);
+    if (choice === null) return;
+    if (choice.toLowerCase() === 'all') {
+      colIdx = -1; // export all
+    } else {
+      colIdx = parseInt(choice, 10);
+      if (isNaN(colIdx) || !state.apiCollections[colIdx]) { showToast('Invalid selection', 'warning'); return; }
+    }
+  }
+
+  const collectionsToExport = colIdx === -1 ? state.apiCollections : [state.apiCollections[colIdx]];
+
+  // Build Postman v2.1 format for each collection
+  for (const col of collectionsToExport) {
+    const postmanCollection = buildPostmanExport(col);
+    const json = JSON.stringify(postmanCollection, null, 2);
+    const defaultName = col.name.replace(/[^a-zA-Z0-9_-]/g, '_') + '.postman_collection.json';
+    const savePath = await window.conganote.saveFileDialog(defaultName);
+    if (!savePath) continue;
+    const ok = await window.conganote.writeFile(savePath, json);
+    if (ok) showToast(`Exported "${col.name}" successfully`, 'info');
+    else showToast('Export failed', 'error');
+  }
+}
+
+function buildPostmanExport(collection) {
+  const genId = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16); });
+
+  const items = (collection.requests || []).map(r => {
+    // Build URL object
+    let urlObj;
+    try {
+      const u = new URL(r.url);
+      const query = Object.entries(r.params || {}).map(([k, v]) => ({ key: k, value: v }));
+      // Also include query params from the URL itself
+      for (const [k, v] of u.searchParams) {
+        if (!query.find(q => q.key === k)) query.push({ key: k, value: v });
+      }
+      urlObj = {
+        raw: r.url + (query.length ? '?' + query.map(q => `${q.key}=${q.value}`).join('&') : ''),
+        protocol: u.protocol.replace(':', ''),
+        host: u.hostname.split('.'),
+        port: u.port || undefined,
+        path: u.pathname.split('/').filter(Boolean),
+        query: query.length ? query : undefined,
+      };
+    } catch {
+      urlObj = { raw: r.url };
+    }
+
+    // Headers
+    const header = Object.entries(r.headers || {}).map(([k, v]) => ({ key: k, value: v, type: 'text' }));
+
+    // Body
+    let body = undefined;
+    if (r.bodyType && r.bodyType !== 'none' && r.body) {
+      if (r.bodyType === 'json') {
+        body = { mode: 'raw', raw: r.body, options: { raw: { language: 'json' } } };
+      } else if (r.bodyType === 'text') {
+        body = { mode: 'raw', raw: r.body, options: { raw: { language: 'text' } } };
+      } else if (r.bodyType === 'form') {
+        const pairs = (r.body || '').split('&').map(p => { const [k, ...v] = p.split('='); return { key: decodeURIComponent(k || ''), value: decodeURIComponent(v.join('=') || ''), type: 'text' }; });
+        body = { mode: 'urlencoded', urlencoded: pairs };
+      }
+    }
+
+    // Auth
+    let auth = undefined;
+    if (r.auth && r.auth.type && r.auth.type !== 'none') {
+      if (r.auth.type === 'bearer') {
+        auth = { type: 'bearer', bearer: [{ key: 'token', value: r.auth.token || '', type: 'string' }] };
+      } else if (r.auth.type === 'basic') {
+        auth = { type: 'basic', basic: [{ key: 'username', value: r.auth.username || '', type: 'string' }, { key: 'password', value: r.auth.password || '', type: 'string' }] };
+      } else if (r.auth.type === 'apikey') {
+        auth = { type: 'apikey', apikey: [{ key: 'key', value: r.auth.keyName || '', type: 'string' }, { key: 'value', value: r.auth.keyValue || '', type: 'string' }] };
+      }
+    }
+
+    return {
+      name: r.name || r.url,
+      request: {
+        method: r.method || 'GET',
+        header,
+        url: urlObj,
+        body,
+        auth,
+      },
+      response: [],
+    };
+  });
+
+  return {
+    info: {
+      _postman_id: genId(),
+      name: collection.name,
+      schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',
+    },
+    item: items,
+  };
+}
+
+// ================================================================
+// 24b. REGEX TESTER
+// ================================================================
+function initRegexTester() {
+  const patternEl = $('#regex-pattern');
+  const flagsEl   = $('#regex-flags');
+  const testEl    = $('#regex-test-string');
+  const closeBtn  = $('#btn-regex-close');
+  if (!patternEl) return;
+
+  closeBtn?.addEventListener('click', () => toggleToolPanel('regex-panel'));
+
+  const update = debounce(() => runRegex(), 150);
+  patternEl.addEventListener('input', update);
+  flagsEl?.addEventListener('input', update);
+  testEl?.addEventListener('input', update);
+}
+
+function runRegex() {
+  const pattern    = $('#regex-pattern')?.value || '';
+  const flags      = $('#regex-flags')?.value || 'g';
+  const testStr    = $('#regex-test-string')?.value || '';
+  const resultsEl  = $('#regex-results');
+  const infoEl     = $('#regex-match-info');
+  const explainEl  = $('#regex-explanation');
+
+  if (!pattern) {
+    if (infoEl) infoEl.textContent = '0 matches';
+    if (resultsEl) resultsEl.innerHTML = '';
+    if (explainEl) explainEl.innerHTML = '<span class="text-muted">Enter a pattern to see explanation</span>';
+    return;
+  }
+
+  let regex;
+  try {
+    regex = new RegExp(pattern, flags);
+  } catch (err) {
+    if (infoEl) infoEl.textContent = 'Invalid regex';
+    if (infoEl) infoEl.style.color = 'var(--accent)';
+    if (explainEl) explainEl.innerHTML = `<span style="color:var(--accent)">${escHtml(err.message)}</span>`;
+    return;
+  }
+  if (infoEl) infoEl.style.color = '';
+
+  // Find all matches
+  const matches = [];
+  let m;
+  const safeRegex = new RegExp(regex.source, regex.flags.includes('g') ? regex.flags : regex.flags + 'g');
+  while ((m = safeRegex.exec(testStr)) !== null) {
+    matches.push({ match: m[0], index: m.index, groups: m.slice(1) });
+    if (matches.length > 200) break;
+    if (m.index === safeRegex.lastIndex) safeRegex.lastIndex++;
+  }
+
+  if (infoEl) infoEl.textContent = `${matches.length} match${matches.length !== 1 ? 'es' : ''}`;
+
+  // Render results with highlighting
+  if (resultsEl) {
+    if (matches.length === 0) {
+      resultsEl.innerHTML = '<div class="regex-no-match">No matches</div>';
+    } else {
+      resultsEl.innerHTML = matches.map((m, i) => `
+        <div class="regex-match-item">
+          <span class="regex-match-idx">${i + 1}</span>
+          <span class="regex-match-text">"${escHtml(m.match)}"</span>
+          <span class="regex-match-pos">at ${m.index}</span>
+          ${m.groups.length > 0 ? `<span class="regex-match-groups">Groups: ${m.groups.map((g, j) => `<span class="regex-group">$${j + 1}="${escHtml(g || '')}"</span>`).join(' ')}</span>` : ''}
+        </div>
+      `).join('');
+    }
+  }
+
+  // Explanation
+  if (explainEl) {
+    explainEl.innerHTML = explainRegex(pattern);
+  }
+}
+
+function explainRegex(pattern) {
+  const explanations = [];
+  const tokens = {
+    '^': 'Start of string',
+    '$': 'End of string',
+    '.': 'Any character (except newline)',
+    '*': 'Zero or more of previous',
+    '+': 'One or more of previous',
+    '?': 'Zero or one of previous (optional)',
+    '\\d': 'Digit (0-9)',
+    '\\D': 'Non-digit',
+    '\\w': 'Word character (a-z, A-Z, 0-9, _)',
+    '\\W': 'Non-word character',
+    '\\s': 'Whitespace',
+    '\\S': 'Non-whitespace',
+    '\\b': 'Word boundary',
+    '\\B': 'Non-word boundary',
+    '\\n': 'Newline',
+    '\\t': 'Tab',
+  };
+  for (const [tok, desc] of Object.entries(tokens)) {
+    if (pattern.includes(tok)) {
+      explanations.push(`<div class="regex-explain-item"><code>${escHtml(tok)}</code> — ${desc}</div>`);
+    }
+  }
+  // Character classes
+  const classMatch = pattern.match(/\[([^\]]+)\]/g);
+  if (classMatch) {
+    classMatch.forEach(c => explanations.push(`<div class="regex-explain-item"><code>${escHtml(c)}</code> — Character class: one of ${escHtml(c.slice(1, -1))}</div>`));
+  }
+  // Groups
+  const groupMatch = pattern.match(/\(([^)]+)\)/g);
+  if (groupMatch) {
+    groupMatch.forEach((g, i) => explanations.push(`<div class="regex-explain-item"><code>${escHtml(g)}</code> — Capture group ${i + 1}</div>`));
+  }
+  // Quantifiers
+  const quantMatch = pattern.match(/\{(\d+(?:,\d*)?)\}/g);
+  if (quantMatch) {
+    quantMatch.forEach(q => explanations.push(`<div class="regex-explain-item"><code>${escHtml(q)}</code> — Repeat ${q.slice(1, -1)} times</div>`));
+  }
+  // Alternation
+  if (pattern.includes('|')) {
+    explanations.push(`<div class="regex-explain-item"><code>|</code> — OR (alternation)</div>`);
+  }
+  return explanations.length > 0 ? explanations.join('') : '<span class="text-muted">Basic literal text match</span>';
+}
+
+// ================================================================
+// 24c. JSON / YAML TREE VIEWER
+// ================================================================
+function initJsonViewer() {
+  const closeBtn  = $('#btn-json-close');
+  const formatBtn = $('#btn-json-format');
+  const minifyBtn = $('#btn-json-minify');
+  const convertBtn = $('#btn-json-to-yaml');
+  const copyBtn   = $('#btn-json-copy');
+  const searchEl  = $('#json-viewer-search');
+  if (!closeBtn) return;
+
+  closeBtn.addEventListener('click', () => toggleToolPanel('json-viewer-panel'));
+
+  formatBtn?.addEventListener('click', () => {
+    const tab = state.tabs.find(t => t.id === state.activeTabId);
+    if (!tab) return;
+    try {
+      const val = tab.model.getValue();
+      const parsed = JSON.parse(val);
+      const formatted = JSON.stringify(parsed, null, 2);
+      tab.model.setValue(formatted);
+      showToast('JSON formatted', 'info');
+    } catch {
+      showToast('Not valid JSON', 'warning');
+    }
+  });
+
+  minifyBtn?.addEventListener('click', () => {
+    const tab = state.tabs.find(t => t.id === state.activeTabId);
+    if (!tab) return;
+    try {
+      const val = tab.model.getValue();
+      const parsed = JSON.parse(val);
+      tab.model.setValue(JSON.stringify(parsed));
+      showToast('JSON minified', 'info');
+    } catch {
+      showToast('Not valid JSON', 'warning');
+    }
+  });
+
+  convertBtn?.addEventListener('click', () => {
+    const tab = state.tabs.find(t => t.id === state.activeTabId);
+    if (!tab) return;
+    const val = tab.model.getValue().trim();
+    // Detect if YAML or JSON
+    try {
+      const parsed = JSON.parse(val);
+      // Convert JSON -> simple YAML
+      const yaml = jsonToYaml(parsed);
+      tab.model.setValue(yaml);
+      monaco.editor.setModelLanguage(tab.model, 'yaml');
+      showToast('Converted to YAML', 'info');
+    } catch {
+      // Try YAML -> JSON (basic)
+      try {
+        const obj = basicYamlParse(val);
+        tab.model.setValue(JSON.stringify(obj, null, 2));
+        monaco.editor.setModelLanguage(tab.model, 'json');
+        showToast('Converted to JSON', 'info');
+      } catch {
+        showToast('Cannot convert — invalid format', 'warning');
+      }
+    }
+  });
+
+  copyBtn?.addEventListener('click', () => {
+    const tab = state.tabs.find(t => t.id === state.activeTabId);
+    if (tab) {
+      navigator.clipboard.writeText(tab.model.getValue());
+      showToast('Copied to clipboard', 'info');
+    }
+  });
+
+  searchEl?.addEventListener('input', debounce(() => {
+    const q = searchEl.value.trim().toLowerCase();
+    $$('.json-tree-item').forEach(el => {
+      const text = el.textContent.toLowerCase();
+      el.style.display = !q || text.includes(q) ? '' : 'none';
+    });
+  }, 200));
+}
+
+function openJsonViewer() {
+  toggleToolPanel('json-viewer-panel');
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (!tab) return;
+  const val = tab.model.getValue().trim();
+  const treeEl = $('#json-tree');
+  if (!treeEl) return;
+  try {
+    const parsed = JSON.parse(val);
+    treeEl.innerHTML = '';
+    treeEl.appendChild(renderJsonNode(parsed, 'root'));
+  } catch {
+    try {
+      const obj = basicYamlParse(val);
+      treeEl.innerHTML = '';
+      treeEl.appendChild(renderJsonNode(obj, 'root'));
+    } catch {
+      treeEl.innerHTML = '<div class="json-error">Cannot parse as JSON or YAML</div>';
+    }
+  }
+}
+
+function renderJsonNode(value, key, depth = 0) {
+  const container = document.createElement('div');
+  container.className = 'json-tree-item';
+  container.style.paddingLeft = (depth * 16) + 'px';
+
+  if (value === null) {
+    container.innerHTML = `<span class="json-key">${escHtml(key)}</span>: <span class="json-null">null</span>`;
+  } else if (typeof value === 'boolean') {
+    container.innerHTML = `<span class="json-key">${escHtml(key)}</span>: <span class="json-bool">${value}</span>`;
+  } else if (typeof value === 'number') {
+    container.innerHTML = `<span class="json-key">${escHtml(key)}</span>: <span class="json-number">${value}</span>`;
+  } else if (typeof value === 'string') {
+    container.innerHTML = `<span class="json-key">${escHtml(key)}</span>: <span class="json-string">"${escHtml(value)}"</span>`;
+  } else if (Array.isArray(value)) {
+    const toggle = document.createElement('span');
+    toggle.className = 'json-toggle';
+    toggle.textContent = '▾';
+    const keySpan = document.createElement('span');
+    keySpan.className = 'json-key';
+    keySpan.textContent = `${key} `;
+    const info = document.createElement('span');
+    info.className = 'json-info';
+    info.textContent = `Array(${value.length})`;
+    container.appendChild(toggle);
+    container.appendChild(keySpan);
+    container.appendChild(info);
+    const children = document.createElement('div');
+    children.className = 'json-children';
+    value.forEach((v, i) => children.appendChild(renderJsonNode(v, String(i), depth + 1)));
+    container.appendChild(children);
+    toggle.addEventListener('click', () => {
+      children.classList.toggle('collapsed');
+      toggle.textContent = children.classList.contains('collapsed') ? '▸' : '▾';
+    });
+  } else if (typeof value === 'object') {
+    const keys = Object.keys(value);
+    const toggle = document.createElement('span');
+    toggle.className = 'json-toggle';
+    toggle.textContent = '▾';
+    const keySpan = document.createElement('span');
+    keySpan.className = 'json-key';
+    keySpan.textContent = `${key} `;
+    const info = document.createElement('span');
+    info.className = 'json-info';
+    info.textContent = `{${keys.length}}`;
+    container.appendChild(toggle);
+    container.appendChild(keySpan);
+    container.appendChild(info);
+    const children = document.createElement('div');
+    children.className = 'json-children';
+    keys.forEach(k => children.appendChild(renderJsonNode(value[k], k, depth + 1)));
+    container.appendChild(children);
+    toggle.addEventListener('click', () => {
+      children.classList.toggle('collapsed');
+      toggle.textContent = children.classList.contains('collapsed') ? '▸' : '▾';
+    });
+  }
+  return container;
+}
+
+function jsonToYaml(obj, indent = 0) {
+  const pad = '  '.repeat(indent);
+  if (obj === null) return 'null';
+  if (typeof obj !== 'object') return typeof obj === 'string' ? `"${obj}"` : String(obj);
+  if (Array.isArray(obj)) {
+    if (obj.length === 0) return '[]';
+    return obj.map(v => pad + '- ' + jsonToYaml(v, indent + 1).trimStart()).join('\n');
+  }
+  const entries = Object.entries(obj);
+  if (entries.length === 0) return '{}';
+  return entries.map(([k, v]) => {
+    if (typeof v === 'object' && v !== null) {
+      return pad + k + ':\n' + jsonToYaml(v, indent + 1);
+    }
+    return pad + k + ': ' + jsonToYaml(v, indent + 1);
+  }).join('\n');
+}
+
+function basicYamlParse(text) {
+  const result = {};
+  const lines = text.split('\n');
+  let currentKey = null;
+  let currentArr = null;
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, '');
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+    const indent = line.length - line.trimStart().length;
+    const trimmed = line.trim();
+    if (trimmed.startsWith('- ')) {
+      if (currentArr) currentArr.push(parseYamlValue(trimmed.slice(2)));
+      continue;
+    }
+    const colonIdx = trimmed.indexOf(':');
+    if (colonIdx > 0) {
+      const key = trimmed.slice(0, colonIdx).trim();
+      const val = trimmed.slice(colonIdx + 1).trim();
+      if (val === '' || val === '|' || val === '>') {
+        result[key] = [];
+        currentKey = key;
+        currentArr = result[key];
+      } else {
+        result[key] = parseYamlValue(val);
+        currentArr = null;
+      }
+    }
+  }
+  return result;
+}
+
+function parseYamlValue(v) {
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  if (v === 'null' || v === '~') return null;
+  if (/^-?\d+$/.test(v)) return parseInt(v, 10);
+  if (/^-?\d+\.\d+$/.test(v)) return parseFloat(v);
+  return v.replace(/^["']|["']$/g, '');
+}
+
+// ================================================================
+// 24d. SMART BOOKMARKS
+// ================================================================
+function initBookmarks() {
+  const addBtn   = $('#btn-bookmark-add');
+  const clearBtn = $('#btn-bookmark-clear');
+  const closeBtn = $('#btn-bookmark-close');
+  const input    = $('#bookmark-input');
+  if (!closeBtn) return;
+
+  closeBtn.addEventListener('click', () => toggleToolPanel('bookmarks-panel'));
+
+  // "📌 Line" button — bookmarks the current cursor position
+  addBtn?.addEventListener('click', addLineBookmark);
+
+  // Text input — press Enter to add a free-form bookmark
+  input?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      addFreeBookmark(text);
+      input.value = '';
+    }
+  });
+
+  clearBtn?.addEventListener('click', async () => {
+    state.bookmarks = [];
+    await window.conganote.saveBookmarks([]);
+    renderBookmarks();
+    showToast('All bookmarks cleared', 'info');
+  });
+
+  // Load saved bookmarks
+  loadBookmarks();
+}
+
+async function loadBookmarks() {
+  try {
+    state.bookmarks = await window.conganote.loadBookmarks() || [];
+  } catch { state.bookmarks = []; }
+}
+
+// Bookmark the current cursor line in the active file
+function addLineBookmark() {
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (!tab || !state.editor) { showToast('Open a file and place your cursor on a line first', 'warning'); return; }
+
+  const pos = state.editor.getPosition();
+  const line = pos.lineNumber;
+  const lineContent = tab.model.getLineContent(line).trim();
+
+  const existing = state.bookmarks.find(b => b.filePath === (tab.filePath || tab.title) && b.line === line);
+  if (existing) { showToast(`Line ${line} already bookmarked`, 'info'); return; }
+
+  const bookmark = {
+    id: Date.now(),
+    type: 'line',
+    filePath: tab.filePath || tab.title,
+    fileName: tab.title,
+    line,
+    column: pos.column,
+    preview: lineContent.substring(0, 80),
+    note: '',
+    created: new Date().toISOString(),
+  };
+
+  state.bookmarks.push(bookmark);
+  window.conganote.saveBookmarks(state.bookmarks);
+  renderBookmarks();
+  showToast(`Bookmarked line ${line} in ${tab.title}`, 'info');
+}
+
+// Add a free-form text bookmark (no file required)
+function addFreeBookmark(text) {
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  const bookmark = {
+    id: Date.now(),
+    type: 'note',
+    filePath: tab?.filePath || '',
+    fileName: tab?.title || '',
+    line: tab && state.editor ? state.editor.getPosition().lineNumber : 0,
+    column: 0,
+    preview: '',
+    note: text,
+    created: new Date().toISOString(),
+  };
+
+  state.bookmarks.push(bookmark);
+  window.conganote.saveBookmarks(state.bookmarks);
+  renderBookmarks();
+  showToast('Bookmark added', 'info');
+}
+
+function renderBookmarks() {
+  const list = $('#bookmarks-list');
+  if (!list) return;
+
+  if (state.bookmarks.length === 0) {
+    list.innerHTML = '<div class="bookmarks-empty">No bookmarks yet.<br>Type above or click 📌 Line to bookmark your cursor position.</div>';
+    return;
+  }
+
+  list.innerHTML = state.bookmarks.map((b, i) => {
+    const isNote = b.type === 'note';
+    const fileInfo = b.fileName ? `${getFileIcon(b.fileName)} ${escHtml(b.fileName)}` : '';
+    const lineInfo = b.line > 0 ? `L${b.line}` : '';
+    return `
+    <div class="bookmark-item ${isNote ? 'bookmark-note-type' : ''}" data-idx="${i}">
+      <div class="bookmark-header">
+        ${isNote
+          ? `<span class="bookmark-note-icon">📝</span><span class="bookmark-note-text">${escHtml(b.note)}</span>`
+          : `<span class="bookmark-file">${fileInfo}</span><span class="bookmark-line">${lineInfo}</span>`
+        }
+        <button class="bookmark-del" data-idx="${i}" title="Remove">✕</button>
+      </div>
+      ${!isNote && b.preview ? `<div class="bookmark-preview">${escHtml(b.preview)}</div>` : ''}
+      ${!isNote && b.note ? `<div class="bookmark-note">📝 ${escHtml(b.note)}</div>` : ''}
+      ${isNote && b.fileName ? `<div class="bookmark-context">${fileInfo} ${lineInfo}</div>` : ''}
+    </div>`;
+  }).join('');
+
+  // Jump to bookmark on click
+  list.querySelectorAll('.bookmark-item').forEach(el => {
+    el.addEventListener('click', async (e) => {
+      if (e.target.classList.contains('bookmark-del')) return;
+      const b = state.bookmarks[+el.dataset.idx];
+      if (!b) return;
+      // Open the file if not already open
+      const tab = state.tabs.find(t => t.filePath === b.filePath);
+      if (tab) {
+        activateTab(tab.id);
+      } else if (b.filePath && !b.filePath.startsWith('Untitled')) {
+        try {
+          const content = await window.conganote.readFile(b.filePath);
+          if (content != null) await openFile(b.filePath, content);
+        } catch {}
+      }
+      // Go to line
+      setTimeout(() => {
+        if (state.editor) {
+          state.editor.revealLineInCenter(b.line);
+          state.editor.setPosition({ lineNumber: b.line, column: b.column || 1 });
+          state.editor.focus();
+        }
+      }, 100);
+    });
+  });
+
+  // Delete buttons
+  list.querySelectorAll('.bookmark-del').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      state.bookmarks.splice(+btn.dataset.idx, 1);
+      window.conganote.saveBookmarks(state.bookmarks);
+      renderBookmarks();
+    });
+  });
+}
+
+// ================================================================
+// 24e. CODE SCREENSHOT
+// ================================================================
+function initScreenshot() {
+  const closeBtn  = $('#btn-screenshot-close');
+  const exportBtn = $('#btn-screenshot-export');
+  const copyBtn   = $('#btn-screenshot-copy');
+  if (!closeBtn) return;
+
+  closeBtn.addEventListener('click', () => toggleToolPanel('screenshot-panel'));
+
+  // Live preview update
+  ['screenshot-bg', 'screenshot-padding', 'screenshot-radius', 'screenshot-watermark', 'screenshot-linenums'].forEach(id => {
+    $('#' + id)?.addEventListener('input', updateScreenshotPreview);
+    $('#' + id)?.addEventListener('change', updateScreenshotPreview);
+  });
+
+  exportBtn?.addEventListener('click', exportScreenshot);
+  copyBtn?.addEventListener('click', copyScreenshot);
+}
+
+function openScreenshotPanel() {
+  toggleToolPanel('screenshot-panel');
+  updateScreenshotPreview();
+}
+
+function updateScreenshotPreview() {
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (!tab) return;
+
+  const codeEl = $('#screenshot-code');
+  const previewEl = $('#screenshot-preview');
+  const watermarkEl = $('#screenshot-watermark-text');
+  if (!codeEl || !previewEl) return;
+
+  // Get selected text or visible lines
+  let code = '';
+  if (state.editor) {
+    const sel = state.editor.getSelection();
+    if (sel && !sel.isEmpty()) {
+      code = state.editor.getModel().getValueInRange(sel);
+    } else {
+      // Use first 30 visible lines
+      const lines = tab.model.getLinesContent().slice(0, 30);
+      code = lines.join('\n');
+    }
+  }
+
+  const showLineNums = $('#screenshot-linenums')?.checked;
+  if (showLineNums) {
+    const lines = code.split('\n');
+    code = lines.map((l, i) => `${String(i + 1).padStart(3)} │ ${l}`).join('\n');
+  }
+
+  codeEl.textContent = code;
+
+  // Apply styles
+  const bg = $('#screenshot-bg')?.value || '#1e1e2e';
+  const padding = ($('#screenshot-padding')?.value || 40) + 'px';
+  const radius = ($('#screenshot-radius')?.value || 12) + 'px';
+  const showWatermark = $('#screenshot-watermark')?.checked;
+
+  previewEl.style.background = bg;
+  previewEl.style.padding = padding;
+  previewEl.style.borderRadius = radius;
+  if (watermarkEl) watermarkEl.style.display = showWatermark ? '' : 'none';
+}
+
+async function exportScreenshot() {
+  const canvas = await renderScreenshotCanvas();
+  if (!canvas) return;
+  const dataUrl = canvas.toDataURL('image/png');
+  const saved = await window.conganote.saveScreenshot(dataUrl);
+  if (saved) showToast('Screenshot saved to ' + saved, 'info');
+}
+
+async function copyScreenshot() {
+  const canvas = await renderScreenshotCanvas();
+  if (!canvas) return;
+  canvas.toBlob(async (blob) => {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      showToast('Screenshot copied to clipboard', 'info');
+    } catch (err) {
+      showToast('Failed to copy: ' + err.message, 'warning');
+    }
+  });
+}
+
+function renderScreenshotCanvas() {
+  return new Promise(resolve => {
+    const previewEl = $('#screenshot-preview');
+    if (!previewEl) { resolve(null); return; }
+
+    const bg      = $('#screenshot-bg')?.value || '#1e1e2e';
+    const padding = parseInt($('#screenshot-padding')?.value || 40);
+    const radius  = parseInt($('#screenshot-radius')?.value || 12);
+    const codeEl  = $('#screenshot-code');
+    const code    = codeEl?.textContent || '';
+    const lines   = code.split('\n');
+
+    const canvas = document.createElement('canvas');
+    const ctx    = canvas.getContext('2d');
+
+    const fontSize = 14;
+    const lineHeight = 20;
+    const font = '14px "SF Mono", Menlo, Monaco, monospace';
+    ctx.font = font;
+
+    const maxLineWidth = Math.max(...lines.map(l => ctx.measureText(l).width), 300);
+    const codeWidth = maxLineWidth + 40;
+    const codeHeight = lines.length * lineHeight + 20;
+    const dotBarHeight = 32;
+
+    canvas.width  = codeWidth + padding * 2;
+    canvas.height = codeHeight + dotBarHeight + padding * 2;
+
+    // Background
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    roundRect(ctx, 0, 0, canvas.width, canvas.height, radius);
+    ctx.fill();
+
+    // Window dots
+    const dotY = padding + 14;
+    [[12, '#ff5f56'], [28, '#ffbd2e'], [44, '#27c93f']].forEach(([x, color]) => {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(padding + x, dotY, 5, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // Code text
+    ctx.fillStyle = '#cdd6f4';
+    ctx.font = font;
+    ctx.textBaseline = 'top';
+    lines.forEach((line, i) => {
+      ctx.fillText(line, padding + 16, padding + dotBarHeight + i * lineHeight + 8);
+    });
+
+    // Watermark
+    if ($('#screenshot-watermark')?.checked) {
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.font = '11px -apple-system, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText('CongaNote', canvas.width - padding - 8, canvas.height - padding - 8);
+    }
+
+    resolve(canvas);
+  });
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+}
+
+// ================================================================
+// 24f. DATABASE CLIENT
+// ================================================================
+function initDbClient() {
+  const closeBtn   = $('#btn-db-close');
+  const connectBtn = $('#btn-db-connect');
+  const browseBtn  = $('#btn-db-browse');
+  const openBtn    = $('#btn-db-open');
+  const runBtn     = $('#btn-db-run');
+  if (!closeBtn) return;
+
+  closeBtn.addEventListener('click', () => toggleToolPanel('db-panel'));
+
+  connectBtn?.addEventListener('click', () => {
+    const connectForm = $('#db-connect-form');
+    const queryArea   = $('#db-query-area');
+    if (connectForm && queryArea) {
+      connectForm.classList.toggle('hidden');
+      queryArea.classList.add('hidden');
+    }
+    state.dbFilePath = null;
+    state.dbTables = [];
+    $('#db-filepath').textContent = 'No file selected';
+  });
+
+  browseBtn?.addEventListener('click', async () => {
+    const files = await window.conganote.openFileDialog();
+    if (files && files[0]) {
+      state.dbFilePath = files[0];
+      $('#db-filepath').textContent = files[0].split('/').pop();
+    }
+  });
+
+  openBtn?.addEventListener('click', async () => {
+    if (!state.dbFilePath) { showToast('Select a file first', 'warning'); return; }
+    try {
+      const result = await window.conganote.dbOpen(state.dbFilePath);
+      if (!result.ok) { showToast(result.error, 'warning'); return; }
+      state.dbType = result.type;
+      state.dbTables = result.tables || [];
+      // Show query area
+      $('#db-connect-form')?.classList.add('hidden');
+      $('#db-query-area')?.classList.remove('hidden');
+      renderDbTables();
+      showToast(`Opened ${result.type} database (${state.dbTables.length} tables)`, 'info');
+    } catch (err) {
+      showToast('Error: ' + err.message, 'warning');
+    }
+  });
+
+  runBtn?.addEventListener('click', runDbQuery);
+
+  // Ctrl+Enter to run query
+  $('#db-query-input')?.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      runDbQuery();
+    }
+  });
+}
+
+function renderDbTables() {
+  const list = $('#db-tables-list');
+  if (!list) return;
+  list.innerHTML = state.dbTables.map(t => `<div class="db-table-item" data-table="${escHtml(t)}">📋 ${escHtml(t)}</div>`).join('');
+  list.querySelectorAll('.db-table-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const table = el.dataset.table;
+      const input = $('#db-query-input');
+      if (state.dbType === 'sqlite') {
+        input.value = `SELECT * FROM ${table} LIMIT 100;`;
+      } else if (state.dbType === 'json') {
+        input.value = table;
+      } else {
+        input.value = '';
+      }
+      runDbQuery(table);
+    });
+  });
+}
+
+async function runDbQuery(tableName) {
+  const query = $('#db-query-input')?.value.trim();
+  const statusEl = $('#db-query-status');
+  if (!state.dbFilePath) return;
+
+  if (statusEl) statusEl.textContent = 'Running...';
+  try {
+    const start = Date.now();
+    const result = await window.conganote.dbQuery(state.dbFilePath, query, tableName || query);
+    const elapsed = Date.now() - start;
+    if (!result.ok) {
+      if (statusEl) statusEl.textContent = 'Error: ' + result.error;
+      return;
+    }
+    if (statusEl) statusEl.textContent = `${result.rows.length} rows (${elapsed}ms)`;
+    renderDbResults(result.columns, result.rows);
+  } catch (err) {
+    if (statusEl) statusEl.textContent = 'Error: ' + err.message;
+  }
+}
+
+function renderDbResults(columns, rows) {
+  const container = $('#db-results');
+  if (!container) return;
+
+  if (rows.length === 0) {
+    container.innerHTML = '<div class="db-results-empty">No results</div>';
+    return;
+  }
+
+  let html = '<table class="db-table"><thead><tr>';
+  columns.forEach(c => html += `<th>${escHtml(c)}</th>`);
+  html += '</tr></thead><tbody>';
+  rows.forEach(row => {
+    html += '<tr>';
+    columns.forEach(c => {
+      const val = row[c];
+      html += `<td>${val === null ? '<span class="json-null">null</span>' : escHtml(String(val))}</td>`;
+    });
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+
+/* ================================================================
+   25. INIT
    ================================================================ */
 async function init() {
   cacheDom();
@@ -3321,18 +6830,42 @@ async function init() {
   initThemePicker();
   initContextMenu();
   initTabContextMenu();
+  initBreadcrumbContextMenu();
   initResizer();
   initRecentResizer();
   initKeyboard();
   initIpcHandlers();
   initDragDrop();
   initWelcome();
+  initSystemSearch();
+  initWelcomeSearch();
   initMarkdownPreview();
   initFileWatcher();
+  initTerminal();
+  initLanguagePicker();
+  initMinimapToggle();
+  updateMinimapIndicator();
+  initGitInfoPopup();
+  initRichTextEditor();
+  initApiClient();
+  initRegexTester();
+  initJsonViewer();
+  initBookmarks();
+  initScreenshot();
+  initDbClient();
+  initToolbarButtons();
+
+  // Module-based features
+  if (window.initSnippets)    initSnippets();
+  if (window.initColorPicker) initColorPicker();
+  if (window.initTodoTracker) initTodoTracker();
+  if (window.initPomodoro)    initPomodoro();
+  if (window.initDiffChecker) initDiffChecker();
 
   // Sidebar section toggles
   dom.recentSectionHeader.addEventListener('click', toggleRecentSection);
   dom.outlineSectionHeader.addEventListener('click', toggleOutlineSection);
+  dom.historySectionHeader.addEventListener('click', toggleHistorySection);
 
   // Right-click on root folder bar => context menu for root folder
   dom.rootFolderBar.addEventListener('contextmenu', (e) => {

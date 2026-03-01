@@ -1,11 +1,11 @@
-# SplecNote
+# CongaNote
 
 A modern, Sublime Text–inspired notepad application for macOS with **auto-save**, **session persistence**, and powerful editing features.
 
 ## Features
 
 - **Monaco Editor** — the same editor engine that powers VS Code
-- **Auto-save** — every tab is automatically saved to `~/SplecNote/AutoSave/YYYY-MM-DD/` with date-based folders
+- **Auto-save** — every tab is automatically saved to `~/CongaNote/AutoSave/YYYY-MM-DD/` with date-based folders
 - **Session persistence** — all tabs, cursor positions, and settings survive app restarts
 - **Tabs** — open multiple files, rename tabs with double-click, close with middle-click
 - **Search & Replace** — regex, case-sensitive, whole-word matching (⌘F / ⌘H)
@@ -37,10 +37,10 @@ npm run build:all   # macOS + Windows
 All unsaved tabs are persisted to:
 
 ```
-~/SplecNote/AutoSave/2026-02-25/Untitled-1.txt
+~/CongaNote/AutoSave/2026-02-25/Untitled-1.txt
 ```
 
-Session data is stored in `~/SplecNote/.session.json`.
+Session data is stored in `~/CongaNote/.session.json`.
 
 ## Keyboard Shortcuts
 

@@ -1,11 +1,18 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: file:; script-src 'self' 'unsafe-inline';" />
-  <title>SplecNote</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: file: blob:; script-src 'self' 'unsafe-inline'; connect-src *;" />
+  <title>CongaNote</title>
   <link rel="stylesheet" href="styles.css" />
+  <script>
+    // Apply saved theme before first paint to prevent flash
+    try {
+      const t = localStorage.getItem('conganote-theme');
+      if (t) document.documentElement.setAttribute('data-theme', t);
+    } catch(e) {}
+  </script>
 </head>
 <body>
   <!-- Title bar -->
@@ -17,7 +24,53 @@
         <line x1="5.5" y1="2" x2="5.5" y2="14" stroke="currentColor" stroke-width="1.2"/>
       </svg>
     </button>
-    <span id="titlebar-title">SplecNote</span>
+    <span id="titlebar-title">CongaNote</span>
+    <div id="titlebar-tools" class="titlebar-tools">
+      <button class="titlebar-tool-btn" id="tbtn-api" title="API Client (⌃⇧A)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      </button>
+      <button class="titlebar-tool-btn" id="tbtn-regex" title="Regex Tester (⌃⇧R)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><text x="3" y="18" font-size="16" font-weight="700" font-family="monospace" fill="currentColor" stroke="none">.*</text></svg>
+      </button>
+      <button class="titlebar-tool-btn" id="tbtn-json" title="JSON / YAML Viewer (⌃⇧J)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h10"/><circle cx="20" cy="17" r="2" fill="currentColor" stroke="none"/></svg>
+      </button>
+      <button class="titlebar-tool-btn" id="tbtn-bookmarks" title="Bookmarks (⌃⇧B)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+      </button>
+      <button class="titlebar-tool-btn" id="tbtn-screenshot" title="Screenshot (⌃⇧S)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+      </button>
+      <button class="titlebar-tool-btn" id="tbtn-db" title="Database (⌃⇧D)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+      </button>
+      <span class="titlebar-tools-sep"></span>
+      <button class="titlebar-tool-btn" id="tbtn-snippets" title="Snippets (⌃⇧E)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 18l6-6-6-6"/><path d="M8 6l-6 6 6 6"/></svg>
+      </button>
+      <button class="titlebar-tool-btn" id="tbtn-color" title="Color Picker (⌃⇧K)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="8" r="2.5" fill="#e74c3c" stroke="none"/><circle cx="8" cy="14" r="2.5" fill="#3498db" stroke="none"/><circle cx="16" cy="14" r="2.5" fill="#2ecc71" stroke="none"/></svg>
+      </button>
+      <button class="titlebar-tool-btn" id="tbtn-todo" title="TODO Tracker (⌃⇧G)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+      </button>
+      <button class="titlebar-tool-btn" id="tbtn-pomo" title="Pomodoro Timer (⌃⇧Y)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="9"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg>
+      </button>
+      <button class="titlebar-tool-btn" id="tbtn-diff" title="Diff Checker (⌃⇧I)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18"/><path d="M5 7H2v10h3"/><path d="M19 7h3v10h-3"/><path d="M8 7l-3 5 3 5"/><path d="M16 7l3 5-3 5"/></svg>
+      </button>
+    </div>
+    <div id="pomo-titlebar" class="pomo-titlebar hidden">
+      <span class="pomo-tb-icon">🍅</span>
+      <span id="pomo-tb-time" class="pomo-tb-time">25:00</span>
+      <span id="pomo-tb-mode" class="pomo-tb-mode">Focus</span>
+    </div>
+    <div id="titlebar-search" class="titlebar-search">
+      <svg class="titlebar-search-icon" width="13" height="13" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" stroke-width="1.5"/></svg>
+      <input id="titlebar-search-input" type="text" placeholder="Spotlight Search..." spellcheck="false" autocomplete="off" />
+      <div id="titlebar-search-results" class="titlebar-search-results hidden"></div>
+    </div>
   </div>
 
   <!-- Main layout -->
@@ -68,6 +121,16 @@
         </div>
         <div id="outline-list" class="outline-list collapsed"></div>
       </div>
+
+      <!-- File History section -->
+      <div id="history-resizer" class="recent-resizer"></div>
+      <div class="sidebar-section sidebar-section-history" id="history-section">
+        <div class="sidebar-section-header clickable" id="history-section-header">
+          <span class="section-arrow" id="history-toggle-icon">▶</span>
+          <span>HISTORY</span>
+        </div>
+        <div id="history-list" class="history-list collapsed"></div>
+      </div>
     </aside>
 
     <!-- Resize handle -->
@@ -86,6 +149,14 @@
       <!-- Breadcrumbs bar -->
       <div id="breadcrumbs-bar" class="breadcrumbs-bar hidden">
         <div id="breadcrumbs" class="breadcrumbs"></div>
+      </div>
+
+      <!-- Breadcrumb context menu -->
+      <div id="breadcrumb-context-menu" class="context-menu hidden">
+        <div class="ctx-item" data-action="bc-reveal-finder">🔍 Reveal in Finder</div>
+        <div class="ctx-item" data-action="bc-open-terminal">💻 Open in Terminal</div>
+        <div class="ctx-separator"></div>
+        <div class="ctx-item" data-action="bc-copy-path">📋 Copy Path</div>
       </div>
 
       <!-- Search / Replace bar (in-file) -->
@@ -118,6 +189,69 @@
 
       <!-- Editor + Markdown preview row -->
       <div id="editor-row" class="editor-row">
+        <!-- Rich Text container (toolbar + editor, visible only in rich text mode) -->
+        <div id="richtext-container" class="richtext-container hidden">
+        <!-- Rich Text toolbar -->
+        <div id="richtext-toolbar" class="richtext-toolbar">
+          <div class="rt-group">
+            <select id="rt-heading" class="rt-select" title="Heading">
+              <option value="">Normal</option>
+              <option value="h1">Heading 1</option>
+              <option value="h2">Heading 2</option>
+              <option value="h3">Heading 3</option>
+              <option value="h4">Heading 4</option>
+            </select>
+          </div>
+          <div class="rt-separator"></div>
+          <div class="rt-group">
+            <select id="rt-fontsize" class="rt-select" title="Font Size">
+              <option value="1">8</option>
+              <option value="2">10</option>
+              <option value="3" selected>12</option>
+              <option value="4">14</option>
+              <option value="5">18</option>
+              <option value="6">24</option>
+              <option value="7">36</option>
+            </select>
+          </div>
+          <div class="rt-separator"></div>
+          <div class="rt-group">
+            <button class="rt-btn" data-cmd="bold" title="Bold (⌘B)"><b>B</b></button>
+            <button class="rt-btn" data-cmd="italic" title="Italic (⌘I)"><i>I</i></button>
+            <button class="rt-btn" data-cmd="underline" title="Underline (⌘U)"><u>U</u></button>
+            <button class="rt-btn" data-cmd="strikeThrough" title="Strikethrough"><s>S</s></button>
+          </div>
+          <div class="rt-separator"></div>
+          <div class="rt-group">
+            <input type="color" id="rt-forecolor" class="rt-color" title="Text Color" value="#ffffff" />
+            <input type="color" id="rt-backcolor" class="rt-color" title="Highlight Color" value="#333333" />
+          </div>
+          <div class="rt-separator"></div>
+          <div class="rt-group">
+            <button class="rt-btn" data-cmd="justifyLeft" title="Align Left">⫷</button>
+            <button class="rt-btn" data-cmd="justifyCenter" title="Align Center">⫿</button>
+            <button class="rt-btn" data-cmd="justifyRight" title="Align Right">⫸</button>
+          </div>
+          <div class="rt-separator"></div>
+          <div class="rt-group">
+            <button class="rt-btn" data-cmd="insertUnorderedList" title="Bullet List">•≡</button>
+            <button class="rt-btn" data-cmd="insertOrderedList" title="Numbered List">1.</button>
+          </div>
+          <div class="rt-separator"></div>
+          <div class="rt-group">
+            <button class="rt-btn" data-cmd="undo" title="Undo (⌘Z)">↶</button>
+            <button class="rt-btn" data-cmd="redo" title="Redo (⇧⌘Z)">↷</button>
+          </div>
+          <div class="rt-spacer"></div>
+          <div class="rt-group">
+            <button class="rt-btn rt-btn-exit" id="btn-exit-richtext" title="Switch to Code Editor">Code</button>
+          </div>
+        </div>
+
+        <!-- Rich Text contenteditable editor -->
+        <div id="richtext-editor" class="richtext-editor" contenteditable="true" spellcheck="true"></div>
+        </div> <!-- /richtext-container -->
+
         <!-- Editor area with split support -->
         <div id="editor-split-container" class="editor-split-container">
           <!-- Monaco editor (primary) -->
@@ -179,14 +313,35 @@
         </div>
       </div>
 
+      <!-- Terminal panel -->
+      <div id="terminal-resizer" class="terminal-resizer hidden"></div>
+      <div id="terminal-panel" class="terminal-panel hidden">
+        <div class="terminal-header">
+          <span class="terminal-title">TERMINAL</span>
+          <span id="terminal-cwd" class="terminal-cwd"></span>
+          <div class="terminal-header-actions">
+            <button id="btn-terminal-kill" class="terminal-hdr-btn" title="Kill Process (Ctrl+C)">□</button>
+            <button id="btn-terminal-clear" class="terminal-hdr-btn" title="Clear">⌫</button>
+            <button id="btn-terminal-close" class="terminal-hdr-btn" title="Close Terminal">✕</button>
+          </div>
+        </div>
+        <div id="terminal-output" class="terminal-output"></div>
+        <div class="terminal-input-row">
+          <span id="terminal-prompt" class="terminal-prompt">$</span>
+          <input type="text" id="terminal-input" class="terminal-input" placeholder="Type a command..." spellcheck="false" autocomplete="off" />
+        </div>
+      </div>
+
       <!-- Status bar -->
       <div id="status-bar">
         <span id="status-git" class="status-clickable status-git hidden" title="Git Branch">⎇ main</span>
         <span id="status-position">Ln 1, Col 1</span>
         <span id="status-encoding">UTF-8</span>
-        <span id="status-language">Plain Text</span>
+        <span id="status-language" class="status-clickable" title="Change Language Mode">Plain Text</span>
+        <span id="status-richtext" class="status-richtext status-clickable hidden" title="Toggle Rich Text Mode">Rich Text</span>
         <span id="status-eol">LF</span>
         <span id="status-indent">Spaces: 2</span>
+        <span id="status-minimap" class="status-clickable" title="Toggle Minimap">Minimap</span>
         <span id="status-theme" class="status-clickable" title="Change Theme">Theme: Dark</span>
         <span id="status-autosave" class="status-autosave">● Auto-saved</span>
       </div>
@@ -236,6 +391,14 @@
     </div>
   </div>
 
+  <!-- Language Picker modal -->
+  <div id="language-picker-overlay" class="modal-overlay hidden">
+    <div class="quick-open-modal">
+      <input type="text" id="language-picker-input" placeholder="Select Language Mode…" spellcheck="false" />
+      <div id="language-picker-results" class="quick-open-results"></div>
+    </div>
+  </div>
+
   <!-- Context menu (file tree) -->
   <div id="context-menu" class="context-menu hidden">
     <div class="ctx-item" data-action="new-file">📄 New File</div>
@@ -247,6 +410,8 @@
     <div class="ctx-item" data-action="copy-path">📋 Copy Path</div>
     <div class="ctx-item" data-action="reveal-finder">🔍 Reveal in Finder</div>
     <div class="ctx-separator"></div>
+    <div class="ctx-item" data-action="file-history">🕘 File History</div>
+    <div class="ctx-separator"></div>
     <div class="ctx-item" data-action="open-terminal">💻 Open in Terminal</div>
   </div>
 
@@ -256,18 +421,40 @@
     <div class="ctx-item" data-action="tab-close-others">Close Others</div>
     <div class="ctx-item" data-action="tab-close-all">Close All</div>
     <div class="ctx-separator"></div>
+    <div class="ctx-item" data-action="tab-rename">✏️ Rename</div>
     <div class="ctx-item" data-action="tab-copy-path">📋 Copy Path</div>
     <div class="ctx-item" data-action="tab-reveal-finder">🔍 Reveal in Finder</div>
     <div class="ctx-separator"></div>
+    <div class="ctx-item" data-action="tab-file-history">🕘 File History</div>
+    <div class="ctx-separator"></div>
     <div class="ctx-item" data-action="tab-open-terminal">💻 Open in Terminal</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item ctx-item-danger" data-action="tab-delete">🗑️ Delete File</div>
   </div>
 
   <!-- Welcome screen (full-screen overlay — shown before any folder/file is opened) -->
   <div id="welcome-screen">
     <div class="welcome-content">
       <div class="welcome-header">
-        <h1 class="welcome-title">SplecNote</h1>
+        <h1 class="welcome-title">CongaNote</h1>
         <p class="welcome-subtitle">Editing evolved</p>
+      </div>
+
+      <!-- Spotlight Search Bar -->
+      <div class="welcome-search-container">
+        <div class="welcome-search-bar" id="welcome-search-bar">
+          <svg class="welcome-search-icon" width="16" height="16" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" stroke-width="1.5"/></svg>
+          <input id="welcome-search-input" type="text" placeholder="Spotlight Search — find any file on your Mac..." spellcheck="false" autocomplete="off" />
+          <kbd class="welcome-search-kbd">⇧⌘Space</kbd>
+        </div>
+        <div id="welcome-search-results" class="welcome-search-results hidden">
+          <div class="welcome-search-shimmer hidden" id="welcome-search-shimmer">
+            <div class="shimmer-line"></div>
+            <div class="shimmer-line short"></div>
+            <div class="shimmer-line"></div>
+          </div>
+          <div id="welcome-search-list"></div>
+        </div>
       </div>
 
       <div class="welcome-body">
@@ -282,6 +469,7 @@
 
           <h2 class="welcome-section-title welcome-section-recent">Recent</h2>
           <div id="welcome-recent" class="welcome-recent"></div>
+          <a class="welcome-link welcome-more-btn" id="btn-welcome-more-recent">More...</a>
         </div>
 
         <div class="welcome-right">
@@ -301,10 +489,483 @@
     </div>
   </div>
 
+  <!-- Recent Files Full Panel (overlay) -->
+  <div id="recent-panel" class="recent-panel hidden">
+    <div class="recent-panel-content">
+      <div class="recent-panel-header">
+        <h2 class="recent-panel-title">Recent Files</h2>
+        <div class="recent-panel-actions">
+          <button id="btn-recent-clear" class="recent-panel-btn" title="Clear Recent Files">Clear All</button>
+          <button id="btn-recent-close" class="recent-panel-btn recent-panel-close" title="Close">✕</button>
+        </div>
+      </div>
+      <div id="recent-panel-list" class="recent-panel-list"></div>
+    </div>
+  </div>
+
+  <!-- Git Info popup (anchored to status bar) -->
+  <div id="git-info-popup" class="git-info-popup hidden">
+    <div class="git-info-header">
+      <span class="git-info-title">Source Control</span>
+      <button id="btn-git-info-close" class="git-info-close-btn" title="Close">✕</button>
+    </div>
+    <div id="git-info-body" class="git-info-body">
+      <!-- Branch section -->
+      <div class="git-info-section">
+        <div class="git-info-branch-row">
+          <span id="git-info-branch" class="git-info-branch"></span>
+          <span id="git-info-tracking" class="git-info-tracking"></span>
+        </div>
+        <div id="git-info-sync" class="git-info-sync"></div>
+        <div id="git-info-remote" class="git-info-remote"></div>
+        <div id="git-info-stash" class="git-info-stash hidden"></div>
+      </div>
+
+      <!-- Quick actions -->
+      <div class="git-info-section git-info-actions">
+        <button class="git-action-btn" id="btn-git-pull" title="Pull from remote">⬇ Pull</button>
+        <button class="git-action-btn" id="btn-git-push" title="Push to remote">⬆ Push</button>
+        <button class="git-action-btn" id="btn-git-fetch" title="Fetch from remote">⟳ Fetch</button>
+      </div>
+
+      <!-- Changed files section -->
+      <div class="git-info-section">
+        <div class="git-info-section-title">Changed Files</div>
+        <div id="git-info-files" class="git-info-files"></div>
+      </div>
+
+      <!-- Recent commits section -->
+      <div class="git-info-section">
+        <div class="git-info-section-title">Recent Commits</div>
+        <div id="git-info-commits" class="git-info-commits"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ API CLIENT (Postman-style) ============ -->
+  <div id="api-client-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">🌐 API Client</span>
+      <div class="tool-panel-actions">
+        <button id="btn-api-history" class="tool-hdr-btn" title="History">🕐</button>
+        <button id="btn-api-collections" class="tool-hdr-btn" title="Collections">📁</button>
+        <button id="btn-api-close" class="tool-hdr-btn" title="Close">✕</button>
+      </div>
+    </div>
+    <div class="api-client-body">
+      <!-- Request bar -->
+      <div class="api-request-bar">
+        <select id="api-method" class="api-method">
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="PATCH">PATCH</option>
+          <option value="DELETE">DELETE</option>
+          <option value="HEAD">HEAD</option>
+          <option value="OPTIONS">OPTIONS</option>
+        </select>
+        <input id="api-url" class="api-url" type="text" placeholder="https://api.example.com/endpoint" spellcheck="false" />
+        <button id="btn-api-send" class="api-send-btn">Send</button>
+        <button id="btn-api-save" class="api-save-btn" title="Save to Collection">💾</button>
+      </div>
+      <!-- Request tabs -->
+      <div class="api-tabs">
+        <button class="api-tab active" data-panel="params">Params</button>
+        <button class="api-tab" data-panel="headers">Headers</button>
+        <button class="api-tab" data-panel="auth">Auth</button>
+        <button class="api-tab" data-panel="body">Body</button>
+      </div>
+      <!-- Params panel -->
+      <div class="api-tab-panel active" id="api-panel-params">
+        <div class="api-kv-table" id="api-params-table">
+          <div class="api-kv-header"><span>Key</span><span>Value</span><span></span></div>
+        </div>
+        <button class="api-add-row-btn" data-target="api-params-table">+ Add Param</button>
+      </div>
+      <!-- Headers panel -->
+      <div class="api-tab-panel" id="api-panel-headers">
+        <div class="api-kv-table" id="api-headers-table">
+          <div class="api-kv-header"><span>Key</span><span>Value</span><span></span></div>
+        </div>
+        <button class="api-add-row-btn" data-target="api-headers-table">+ Add Header</button>
+      </div>
+      <!-- Auth panel -->
+      <div class="api-tab-panel" id="api-panel-auth">
+        <div class="api-auth-section">
+          <label>Type</label>
+          <select id="api-auth-type" class="api-auth-select">
+            <option value="none">No Auth</option>
+            <option value="bearer">Bearer Token</option>
+            <option value="basic">Basic Auth</option>
+            <option value="apikey">API Key</option>
+          </select>
+        </div>
+        <div id="api-auth-fields" class="api-auth-fields"></div>
+      </div>
+      <!-- Body panel -->
+      <div class="api-tab-panel" id="api-panel-body">
+        <div class="api-body-type-row">
+          <select id="api-body-type" class="api-auth-select">
+            <option value="none">None</option>
+            <option value="json">JSON</option>
+            <option value="text">Text</option>
+            <option value="form">x-www-form-urlencoded</option>
+          </select>
+        </div>
+        <textarea id="api-body-content" class="api-body-editor" placeholder='{"key": "value"}' spellcheck="false"></textarea>
+      </div>
+      <!-- Response area -->
+      <div class="api-response-section">
+        <div class="api-response-header">
+          <span class="api-response-title">Response</span>
+          <span id="api-response-status" class="api-response-status"></span>
+          <span id="api-response-time" class="api-response-time"></span>
+          <span id="api-response-size" class="api-response-size"></span>
+        </div>
+        <div class="api-response-tabs">
+          <button class="api-tab active" data-rpanel="body">Body</button>
+          <button class="api-tab" data-rpanel="headers">Headers</button>
+        </div>
+        <div class="api-response-body active" id="api-resp-body">
+          <pre id="api-response-content" class="api-response-content">Send a request to see the response</pre>
+        </div>
+        <div class="api-response-body" id="api-resp-headers">
+          <pre id="api-response-headers-content" class="api-response-content"></pre>
+        </div>
+      </div>
+    </div>
+    <!-- History sidebar (toggleable) -->
+    <div id="api-history-panel" class="api-history-panel hidden">
+      <div class="api-history-header"><span>Request History</span><button id="btn-api-clear-history" class="tool-hdr-btn">Clear</button></div>
+      <div id="api-history-list" class="api-history-list"></div>
+    </div>
+    <!-- Collections sidebar (toggleable) -->
+    <div id="api-collections-panel" class="api-collections-panel hidden">
+      <div class="api-history-header">
+        <span>Collections</span>
+        <div class="api-col-actions">
+          <button id="btn-api-import" class="tool-hdr-btn" title="Import Collection (Postman JSON)">⬆ Import</button>
+          <button id="btn-api-export" class="tool-hdr-btn" title="Export Collection (Postman JSON)">⬇ Export</button>
+          <button id="btn-api-new-collection" class="tool-hdr-btn">+ New</button>
+        </div>
+      </div>
+      <div id="api-collections-list" class="api-collections-list"></div>
+    </div>
+  </div>
+
+  <!-- ============ REGEX TESTER ============ -->
+  <div id="regex-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">🔤 Regex Tester</span>
+      <button id="btn-regex-close" class="tool-hdr-btn">✕</button>
+    </div>
+    <div class="regex-body">
+      <div class="regex-input-row">
+        <span class="regex-slash">/</span>
+        <input id="regex-pattern" class="regex-pattern-input" type="text" placeholder="Enter regex pattern..." spellcheck="false" />
+        <span class="regex-slash">/</span>
+        <input id="regex-flags" class="regex-flags-input" type="text" value="g" placeholder="flags" spellcheck="false" />
+      </div>
+      <div class="regex-match-info" id="regex-match-info">0 matches</div>
+      <div class="regex-test-area">
+        <label class="regex-label">Test String</label>
+        <textarea id="regex-test-string" class="regex-test-input" placeholder="Enter test string here..." spellcheck="false"></textarea>
+      </div>
+      <div class="regex-results-area">
+        <label class="regex-label">Matches</label>
+        <div id="regex-results" class="regex-results"></div>
+      </div>
+      <div class="regex-explanation-area">
+        <label class="regex-label">Explanation</label>
+        <div id="regex-explanation" class="regex-explanation"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ JSON/YAML TREE VIEWER ============ -->
+  <div id="json-viewer-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">🌳 Data Viewer</span>
+      <div class="tool-panel-actions">
+        <button id="btn-json-format" class="tool-hdr-btn" title="Format/Prettify">✨</button>
+        <button id="btn-json-minify" class="tool-hdr-btn" title="Minify">📦</button>
+        <button id="btn-json-to-yaml" class="tool-hdr-btn" title="Convert JSON↔YAML">🔄</button>
+        <button id="btn-json-copy" class="tool-hdr-btn" title="Copy">📋</button>
+        <button id="btn-json-close" class="tool-hdr-btn">✕</button>
+      </div>
+    </div>
+    <div class="json-viewer-body">
+      <div class="json-search-row">
+        <input id="json-viewer-search" class="json-search-input" type="text" placeholder="Search keys or values..." spellcheck="false" />
+      </div>
+      <div id="json-tree" class="json-tree"></div>
+    </div>
+  </div>
+
+  <!-- ============ SMART BOOKMARKS ============ -->
+  <div id="bookmarks-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">🔖 Bookmarks</span>
+      <div class="tool-panel-actions">
+        <button id="btn-bookmark-add" class="tool-hdr-btn" title="Bookmark current cursor line">📌 Line</button>
+        <button id="btn-bookmark-clear" class="tool-hdr-btn" title="Clear All">🗑</button>
+        <button id="btn-bookmark-close" class="tool-hdr-btn">✕</button>
+      </div>
+    </div>
+    <div class="bookmarks-body">
+      <div class="bookmark-add-row">
+        <input id="bookmark-input" type="text" class="bookmark-input" placeholder="Type a note and press Enter to add a bookmark…" spellcheck="false" />
+      </div>
+      <div id="bookmarks-list" class="bookmarks-list">
+        <div class="bookmarks-empty">No bookmarks yet.<br>Type above or click 📌 Line to bookmark your cursor position.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ CODE SCREENSHOT ============ -->
+  <div id="screenshot-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">📸 Code Screenshot</span>
+      <div class="tool-panel-actions">
+        <button id="btn-screenshot-export" class="tool-hdr-btn" title="Export PNG">⬇ Export</button>
+        <button id="btn-screenshot-copy" class="tool-hdr-btn" title="Copy to Clipboard">📋 Copy</button>
+        <button id="btn-screenshot-close" class="tool-hdr-btn">✕</button>
+      </div>
+    </div>
+    <div class="screenshot-body">
+      <div class="screenshot-options">
+        <label>Background <input type="color" id="screenshot-bg" value="#1e1e2e" /></label>
+        <label>Padding <input type="range" id="screenshot-padding" min="16" max="80" value="40" /></label>
+        <label>Border Radius <input type="range" id="screenshot-radius" min="0" max="24" value="12" /></label>
+        <label><input type="checkbox" id="screenshot-watermark" checked /> Watermark</label>
+        <label><input type="checkbox" id="screenshot-linenums" checked /> Line Numbers</label>
+      </div>
+      <div class="screenshot-preview-container">
+        <div id="screenshot-preview" class="screenshot-preview">
+          <div class="screenshot-window-dots">
+            <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+          </div>
+          <pre id="screenshot-code" class="screenshot-code"></pre>
+          <div id="screenshot-watermark-text" class="screenshot-watermark">CongaNote</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ DATABASE CLIENT ============ -->
+  <div id="db-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">🗄 Database</span>
+      <div class="tool-panel-actions">
+        <button id="btn-db-connect" class="tool-hdr-btn" title="Connect">🔌 Connect</button>
+        <button id="btn-db-close" class="tool-hdr-btn">✕</button>
+      </div>
+    </div>
+    <div class="db-body">
+      <!-- Connection form -->
+      <div id="db-connect-form" class="db-connect-form">
+        <select id="db-type" class="api-auth-select">
+          <option value="sqlite">SQLite</option>
+          <option value="json-file">JSON File</option>
+          <option value="csv">CSV File</option>
+        </select>
+        <div class="db-field-row">
+          <button id="btn-db-browse" class="api-send-btn">Browse File...</button>
+          <span id="db-filepath" class="db-filepath">No file selected</span>
+        </div>
+        <button id="btn-db-open" class="api-send-btn" style="width:100%">Open Database</button>
+      </div>
+      <!-- Query area -->
+      <div id="db-query-area" class="db-query-area hidden">
+        <div class="db-tables-sidebar">
+          <div class="db-tables-title">Tables</div>
+          <div id="db-tables-list" class="db-tables-list"></div>
+        </div>
+        <div class="db-main">
+          <textarea id="db-query-input" class="db-query-input" placeholder="SELECT * FROM tablename LIMIT 100;" spellcheck="false"></textarea>
+          <div class="db-query-actions">
+            <button id="btn-db-run" class="api-send-btn">▶ Run Query</button>
+            <span id="db-query-status" class="db-query-status"></span>
+          </div>
+          <div id="db-results" class="db-results">
+            <div class="db-results-empty">Run a query to see results</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SNIPPET MANAGER ============ -->
+  <div id="snippet-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">✂️ Snippets</span>
+      <div class="tool-panel-actions">
+        <button id="btn-snippet-add" class="tool-hdr-btn" title="New Snippet">+ New</button>
+        <button id="btn-snippet-close" class="tool-hdr-btn">✕</button>
+      </div>
+    </div>
+    <div class="snippet-body">
+      <input id="snippet-search" class="snippet-search" type="text" placeholder="Search snippets..." spellcheck="false" />
+      <div id="snippet-list-container">
+        <div id="snippet-list" class="snippet-list">
+          <div class="snippets-empty">No snippets yet.<br>Click + New to create one.</div>
+        </div>
+      </div>
+      <div id="snippet-form" class="snippet-form hidden">
+        <input id="snippet-name" class="snippet-field" type="text" placeholder="Snippet name" spellcheck="false" />
+        <input id="snippet-lang" class="snippet-field" type="text" placeholder="Language (e.g. javascript)" spellcheck="false" />
+        <input id="snippet-tags" class="snippet-field" type="text" placeholder="Tags (comma-separated)" spellcheck="false" />
+        <textarea id="snippet-code" class="snippet-code-input" placeholder="Paste your code here..." spellcheck="false"></textarea>
+        <div class="snippet-form-actions">
+          <button id="btn-snippet-save" class="api-send-btn">💾 Save</button>
+          <button id="btn-snippet-cancel" class="tool-hdr-btn">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ COLOR PICKER ============ -->
+  <div id="color-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">🎨 Color Picker</span>
+      <div class="tool-panel-actions">
+        <button id="btn-color-scan" class="tool-hdr-btn" title="Scan current file for colors">🔍 Scan</button>
+        <button id="btn-color-close" class="tool-hdr-btn">✕</button>
+      </div>
+    </div>
+    <div class="color-picker-body">
+      <div class="color-picker-row">
+        <input type="color" id="color-picker-input" class="color-picker-native" value="#E4322B" />
+        <div id="color-preview-swatch" class="color-preview-swatch" style="background:#E4322B"></div>
+        <input id="color-hex-input" type="text" class="color-hex-input" value="#E4322B" spellcheck="false" maxlength="7" />
+      </div>
+      <div class="color-format-row">
+        <button class="color-format-btn active" data-format="hex">HEX</button>
+        <button class="color-format-btn" data-format="rgb">RGB</button>
+        <button class="color-format-btn" data-format="hsl">HSL</button>
+      </div>
+      <div class="color-outputs">
+        <div class="color-output-row"><span class="color-output-label">HEX</span><span id="color-hex-output" class="color-output-value">#E4322B</span></div>
+        <div class="color-output-row"><span class="color-output-label">RGB</span><span id="color-rgb-output" class="color-output-value">rgb(228, 50, 43)</span></div>
+        <div class="color-output-row"><span class="color-output-label">HSL</span><span id="color-hsl-output" class="color-output-value">hsl(2, 78%, 53%)</span></div>
+      </div>
+      <button id="btn-color-insert" class="api-send-btn" style="width:100%;margin-top:8px;">⏎ Insert into Editor</button>
+      <div class="color-list-header">Colors in file</div>
+      <div id="color-list" class="color-list">
+        <div class="color-empty">Click "Scan" to find colors in current file</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ TODO / FIXME TRACKER ============ -->
+  <div id="todo-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">✅ TODO Tracker</span>
+      <div class="tool-panel-actions">
+        <button id="btn-todo-rescan" class="tool-hdr-btn" title="Re-scan">⟳</button>
+        <button id="btn-todo-close" class="tool-hdr-btn">✕</button>
+      </div>
+    </div>
+    <div class="todo-tracker-body">
+      <!-- Landing / empty state with big scan button -->
+      <div id="todo-landing" class="todo-landing">
+        <div class="todo-landing-icon">✅</div>
+        <div class="todo-landing-title">Scan for TODOs & FIXMEs</div>
+        <div class="todo-landing-desc">Find all TODO, FIXME, HACK, BUG, and NOTE comments across your files.</div>
+        <button id="btn-todo-scan-big" class="todo-scan-big-btn">🔍 Scan Now</button>
+        <div class="todo-landing-hint">Scans workspace folder or all open tabs</div>
+      </div>
+      <!-- Results area (hidden until scan) -->
+      <div id="todo-results" class="todo-results hidden">
+        <div id="todo-stats" class="todo-stats"></div>
+        <div class="todo-filters">
+          <button class="todo-filter-btn active" data-filter="all">All</button>
+          <button class="todo-filter-btn" data-filter="TODO">TODO</button>
+          <button class="todo-filter-btn" data-filter="FIXME">FIXME</button>
+          <button class="todo-filter-btn" data-filter="HACK">HACK</button>
+          <button class="todo-filter-btn" data-filter="BUG">BUG</button>
+          <button class="todo-filter-btn" data-filter="NOTE">NOTE</button>
+        </div>
+        <div id="todo-list" class="todo-list"></div>
+        <!-- Inline code preview -->
+        <div id="todo-preview" class="todo-preview hidden">
+          <div class="todo-preview-header">
+            <span id="todo-preview-filename" class="todo-preview-filename"></span>
+            <div class="todo-preview-actions">
+              <button id="btn-todo-goto" class="todo-goto-btn">↗ Open & Go to Line</button>
+              <button id="btn-todo-preview-close" class="tool-hdr-btn">✕</button>
+            </div>
+          </div>
+          <pre id="todo-preview-code" class="todo-preview-code"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ POMODORO FOCUS TIMER ============ -->
+  <div id="pomo-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">🍅 Pomodoro</span>
+      <button id="btn-pomo-close" class="tool-hdr-btn">✕</button>
+    </div>
+    <div class="pomo-body">
+      <div id="pomo-mode-label" class="pomo-mode-label pomo-work">🍅 Focus Time</div>
+      <div class="pomo-timer-ring">
+        <div id="pomo-progress" class="pomo-progress"></div>
+        <div id="pomo-timer-display" class="pomo-timer-display">25:00</div>
+      </div>
+      <div id="pomo-session-count" class="pomo-session-count">Session 1</div>
+      <div class="pomo-controls">
+        <button id="btn-pomo-start" class="pomo-ctrl-btn pomo-start">▶ Start</button>
+        <button id="btn-pomo-pause" class="pomo-ctrl-btn pomo-pause" disabled>⏸ Pause</button>
+        <button id="btn-pomo-reset" class="pomo-ctrl-btn pomo-reset">↺ Reset</button>
+        <button id="btn-pomo-skip" class="pomo-ctrl-btn pomo-skip">⏭ Skip</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Diff Checker Panel -->
+  <div id="diff-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">⇄ Diff Checker</span>
+      <div class="diff-header-actions">
+        <button id="btn-diff-swap" class="tool-hdr-btn" title="Swap sides">⇆</button>
+        <label class="diff-inline-toggle" title="Toggle inline mode">
+          <input type="checkbox" id="diff-inline-check" />
+          <span>Inline</span>
+        </label>
+        <button id="btn-diff-close" class="tool-hdr-btn">✕</button>
+      </div>
+    </div>
+    <div class="diff-body">
+      <div class="diff-inputs">
+        <div class="diff-input-col">
+          <div class="diff-input-label">Original</div>
+          <textarea id="diff-original" class="diff-textarea" placeholder="Paste original text here…" spellcheck="false"></textarea>
+        </div>
+        <div class="diff-input-col">
+          <div class="diff-input-label">Modified</div>
+          <textarea id="diff-modified" class="diff-textarea" placeholder="Paste modified text here…" spellcheck="false"></textarea>
+        </div>
+      </div>
+      <div class="diff-controls">
+        <button id="btn-diff-compare" class="diff-compare-btn">▶ Compare</button>
+        <button id="btn-diff-clear" class="diff-clear-btn">Clear</button>
+        <span id="diff-stats" class="diff-stats"></span>
+      </div>
+      <div id="diff-output" class="diff-output hidden"></div>
+    </div>
+  </div>
+
   <!-- Toast notifications container -->
   <div id="toast-container" class="toast-container"></div>
 
   <script src="../../node_modules/monaco-editor/min/vs/loader.js"></script>
   <script src="app.js"></script>
+  <script src="modules/snippets.js"></script>
+  <script src="modules/colorpicker.js"></script>
+  <script src="modules/todotracker.js"></script>
+  <script src="modules/pomodoro.js"></script>
+  <script src="modules/diffchecker.js"></script>
 </body>
 </html>
