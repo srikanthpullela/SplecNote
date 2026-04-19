@@ -50,6 +50,7 @@ const state = {
   activeToolPanel: null, // 'api'|'regex'|'json'|'bookmarks'|'screenshot'|'db'|null
   historySectionOpen: false,
 };
+window.state = state;
 
 /* ---- DOM cache ---- */
 const dom = {};
@@ -572,7 +573,7 @@ function initMonaco() {
         cursorBlinking: 'smooth',
         padding: { top: 10 },
         lineNumbers: 'on',
-        glyphMargin: false,
+        glyphMargin: true,
         folding: true,
         tabSize: 2,
       });
@@ -587,6 +588,20 @@ function initMonaco() {
           if (tab?.filePath) showFileHistoryInPanel(tab.filePath);
         }
       });
+
+      // Salesforce submenu in editor right-click
+      state.editor.addAction({
+        id: 'congacode.salesforce',
+        label: '⚡ Salesforce',
+        contextMenuGroupId: 'z_salesforce',
+        contextMenuOrder: 0,
+        run: () => {
+          const tab = state.tabs.find(t => t.id === state.activeTabId);
+          if (!tab?.filePath) return;
+          showSfEditorSubmenu(tab.filePath);
+        }
+      });
+
       state.editor.onDidChangeCursorPosition(updateStatusPosition);
       state.editor.onDidChangeModelContent(() => {
         markTabModified(state.activeTabId, true);
@@ -700,11 +715,13 @@ window.activateTab = activateTab;
     hideRichTextEditor();
   }
 
-  // Restore main editor visibility (may have been hidden by diff/commit viewers)
+  // Restore main editor visibility (may have been hidden by diff/commit/richtext/image viewers)
+  dom.editorSplitContainer.style.display = '';
   dom.editorContainer.style.display = '';
   state.editor.setModel(tab.model);
   if (tab.viewState) state.editor.restoreViewState(tab.viewState);
   state.editor.focus();
+  showFileStatusItems();
   renderTabs();
   updateStatusLanguage(tab);
   updateTitleBar(tab);
@@ -746,6 +763,7 @@ function closeTab(id) {
   if (state.tabs.length === 0) {
     state.activeTabId = null;
     state.editor.setModel(null);
+    hideFileStatusItems();
     if (state.folderPath) {
       // Folder is open — show no-editor overlay, not the full welcome screen
       hideWelcome();
@@ -1057,6 +1075,8 @@ async function openFolder(dirPath) {
     await startWatching(dirPath);
     // Refresh git status
     refreshGitStatus();
+    // Refresh Salesforce org (loads saved org for this folder)
+    if (window.refreshSalesforceOrgs) window.refreshSalesforceOrgs();
     // Update terminal CWD if terminal is open
     if (state.terminalVisible && !state.terminalCwd) {
       state.terminalCwd = dirPath;
@@ -1076,6 +1096,7 @@ async function openFolder(dirPath) {
     }
     // Show no-editor overlay if no tabs are open
     if (state.tabs.length === 0) {
+      hideFileStatusItems();
       showEmptyTabShortcuts();
     }
     saveSessionDebounced();
@@ -1211,14 +1232,75 @@ function showContextMenu(x, y, targetPath, isDir) {
     const prevSep = historyItem.previousElementSibling;
     if (prevSep && prevSep.classList.contains('ctx-separator')) prevSep.style.display = isDir ? 'none' : '';
   }
+  // Show/hide Salesforce context menu items
+  const ext = targetPath.split('.').pop().toLowerCase();
+  const isSfFile = ['cls', 'trigger', 'page', 'component', 'cmp', 'js', 'html', 'css', 'xml'].includes(ext);
+  const showSf = isSfFile || isDir;
+  dom.contextMenu.querySelectorAll('.sf-ctx-item, .sf-ctx-sep').forEach(el => {
+    el.style.display = showSf ? '' : 'none';
+  });
   dom.contextMenu.classList.remove('hidden');
   dom.contextMenu.style.left = Math.min(x, window.innerWidth - 200) + 'px';
-  dom.contextMenu.style.top = Math.min(y, window.innerHeight - 250) + 'px';
+  dom.contextMenu.style.top = Math.min(y, window.innerHeight - 300) + 'px';
 }
 
 function hideContextMenu() {
   dom.contextMenu.classList.add('hidden');
 }
+
+/* ---- Salesforce editor submenu ---- */
+let _lastContextMenuPos = { x: 0, y: 0 };
+// Track where user right-clicks in the editor
+document.addEventListener('contextmenu', (e) => {
+  _lastContextMenuPos = { x: e.clientX, y: e.clientY };
+}, true);
+
+function showSfEditorSubmenu(filePath) {
+  const submenu = document.getElementById('sf-editor-submenu');
+  if (!submenu) return;
+
+  const ext = filePath.split('.').pop().toLowerCase();
+  // Show/hide items based on file type
+  submenu.querySelectorAll('[data-sf-action]').forEach(el => {
+    const action = el.dataset.sfAction;
+    if (action === 'sf-flow-viz' || action === 'sf-impact') {
+      el.style.display = (ext === 'cls' || ext === 'trigger') ? '' : 'none';
+    } else if (action === 'sf-api-view' || action === 'sf-test-runner') {
+      el.style.display = ext === 'cls' ? '' : 'none';
+    }
+  });
+
+  // Position at the last right-click location
+  let x = _lastContextMenuPos.x;
+  let y = _lastContextMenuPos.y;
+  // Clamp to viewport
+  if (x + 220 > window.innerWidth) x = window.innerWidth - 230;
+  if (y + 220 > window.innerHeight) y = window.innerHeight - 230;
+
+  submenu.style.left = x + 'px';
+  submenu.style.top = y + 'px';
+  submenu.classList.remove('hidden');
+}
+
+function hideSfEditorSubmenu() {
+  document.getElementById('sf-editor-submenu')?.classList.add('hidden');
+}
+
+// Dismiss on outside click
+document.addEventListener('mousedown', (e) => {
+  if (!e.target.closest('#sf-editor-submenu')) hideSfEditorSubmenu();
+});
+
+// Submenu click handler
+document.getElementById('sf-editor-submenu')?.addEventListener('click', (e) => {
+  const action = e.target.closest('[data-sf-action]')?.dataset.sfAction;
+  if (!action) return;
+  hideSfEditorSubmenu();
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (tab?.filePath && window.handleSfContextAction) {
+    window.handleSfContextAction(action, tab.filePath);
+  }
+});
 
 function initContextMenu() {
   document.addEventListener('click', hideContextMenu);
@@ -1235,7 +1317,7 @@ function initContextMenu() {
 
     switch (action) {
       case 'new-file': {
-        const name = prompt('New file name:');
+        const name = await showInputDialog('New File', 'New file name:');
         if (!name) return;
         const fp = `${parentDir}/${name}`;
         await window.congacode.writeFile(fp, '');
@@ -1243,7 +1325,7 @@ function initContextMenu() {
         break;
       }
       case 'new-folder': {
-        const name = prompt('New folder name:');
+        const name = await showInputDialog('New Folder', 'New folder name:');
         if (!name) return;
         await window.congacode.createDir(`${parentDir}/${name}`);
         await refreshTree();
@@ -1251,7 +1333,7 @@ function initContextMenu() {
       }
       case 'rename': {
         const oldName = tp.split('/').pop();
-        const newName = prompt('Rename to:', oldName);
+        const newName = await showInputDialog('Rename', 'Rename to:', oldName);
         if (!newName || newName === oldName) return;
         const newPath = tp.substring(0, tp.lastIndexOf('/')) + '/' + newName;
         await window.congacode.rename(tp, newPath);
@@ -1259,7 +1341,7 @@ function initContextMenu() {
         break;
       }
       case 'delete': {
-        if (!confirm(`Delete "${tp.split('/').pop()}"?`)) return;
+        if (!(await showConfirmDialog('Delete', `Delete "${tp.split('/').pop()}"?`))) return;
         await window.congacode.deleteFile(tp);
         await refreshTree();
         break;
@@ -1280,6 +1362,15 @@ function initContextMenu() {
       }
       case 'open-terminal': {
         try { await window.congacode.openInTerminal(parentDir); } catch (err) { console.error('open terminal error:', err); }
+        break;
+      }
+      // Salesforce context actions
+      case 'sf-flow-viz':
+      case 'sf-impact':
+      case 'sf-api-view':
+      case 'sf-test-runner':
+      case 'sf-deploy-file': {
+        if (window.handleSfContextAction) window.handleSfContextAction(action, tp);
         break;
       }
     }
@@ -1305,12 +1396,19 @@ function showTabContextMenu(x, y, tabId) {
     el.style.display = tab?.filePath ? '' : 'none';
   });
   // Also hide separators for path actions / delete if no file
-  const seps = menu.querySelectorAll('.ctx-separator');
+  const seps = menu.querySelectorAll('.ctx-separator:not(.sf-tab-ctx-sep)');
   seps.forEach((sep, i) => { if (i >= 1) sep.style.display = tab?.filePath ? '' : 'none'; });
+
+  // Show/hide Salesforce items based on file extension
+  const ext = tab?.filePath ? tab.filePath.split('.').pop().toLowerCase() : '';
+  const isSfFile = ['cls', 'trigger', 'page', 'component', 'cmp', 'js', 'html', 'css', 'xml'].includes(ext);
+  menu.querySelectorAll('.sf-tab-ctx-item, .sf-tab-ctx-sep').forEach(el => {
+    el.style.display = (tab?.filePath && isSfFile) ? '' : 'none';
+  });
 
   menu.classList.remove('hidden');
   menu.style.left = Math.min(x, window.innerWidth - 200) + 'px';
-  menu.style.top = Math.min(y, window.innerHeight - 250) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - 300) + 'px';
 }
 
 function hideTabContextMenu() {
@@ -1368,7 +1466,7 @@ function initTabContextMenu() {
       }
       case 'tab-delete': {
         if (tab.filePath) {
-          const confirmed = confirm(`Are you sure you want to permanently delete "${tab.title}"?\n\nThis action cannot be undone.`);
+          const confirmed = await showConfirmDialog('Delete File', `Are you sure you want to permanently delete "${tab.title}"? This action cannot be undone.`);
           if (!confirmed) break;
           try {
             const ok = await window.congacode.deleteFile(tab.filePath);
@@ -1382,6 +1480,15 @@ function initTabContextMenu() {
           } catch (err) {
             showToast(`Delete failed: ${err.message}`, 'error', 3000);
           }
+        }
+        break;
+      }
+      // Salesforce tab context actions
+      case 'tab-sf-flow-viz':
+      case 'tab-sf-impact':
+      case 'tab-sf-deploy': {
+        if (tab.filePath && window.handleSfContextAction) {
+          window.handleSfContextAction(action, tab.filePath);
         }
         break;
       }
@@ -1829,6 +1936,7 @@ const COMMANDS = [
   { id: 'richtext-mode',  label: 'Toggle Rich Text Mode', shortcut: '', action: toggleRichTextMode },
   { id: 'save-as-type',   label: 'Save As (Change File Type)...', shortcut: '⇧⌘S', action: saveAsFile },
   { id: 'recent-files',   label: 'Show Recent Files',  shortcut: '',      action: showRecentPanel },
+  { id: 'reload-window',  label: 'Reload Window',     shortcut: '⇧⌘R',      action: () => location.reload() },
   { id: 'system-search',  label: 'Spotlight Search',  shortcut: '⇧⌘Space',  action: focusSystemSearch },
   { id: 'api-client',     label: 'API Client',        shortcut: '⌃⇧A',      action: () => toggleToolPanel('api-client-panel') },
   { id: 'regex-tester',    label: 'Regex Tester',       shortcut: '⌃⇧R',      action: () => toggleToolPanel('regex-panel') },
@@ -1841,6 +1949,23 @@ const COMMANDS = [
   { id: 'todo-tracker',     label: 'TODO Tracker',       shortcut: '⌃⇧G',      action: () => toggleToolPanel('todo-panel') },
   { id: 'pomodoro',         label: 'Pomodoro Timer',     shortcut: '⌃⇧Y',      action: () => toggleToolPanel('pomo-panel') },
   { id: 'diff-checker',      label: 'Diff Checker',       shortcut: '⌃⇧I',      action: () => toggleToolPanel('diff-panel') },
+  { id: 'salesforce',        label: 'Salesforce Panel',   shortcut: '⌃⇧F',      action: () => toggleToolPanel('salesforce-panel') },
+  { id: 'debug-start',        label: 'Debug: Start with Request', shortcut: 'F5', action: () => { if (window.debugState?.active) window.debugContinue?.(); } },
+  { id: 'debug-stop',          label: 'Debug: Stop',              shortcut: '⇧F5', action: () => window.debugStop?.() },
+  { id: 'debug-step-over',     label: 'Debug: Step Over',         shortcut: 'F10', action: () => window.debugStepOver?.() },
+  { id: 'debug-step-into',     label: 'Debug: Step Into',         shortcut: 'F11', action: () => window.debugStepInto?.() },
+  { id: 'debug-step-out',      label: 'Debug: Step Out',          shortcut: '⇧F11', action: () => window.debugStepOut?.() },
+  { id: 'debug-toggle-bp',     label: 'Debug: Toggle Breakpoint', shortcut: 'F9', action: () => {
+    const editor = state.editor;
+    if (!editor) return;
+    const pos = editor.getPosition();
+    const model = editor.getModel();
+    if (!pos || !model) return;
+    const filePath = model.uri.fsPath || model.uri.path;
+    if (filePath.endsWith('.cls') || filePath.endsWith('.trigger')) {
+      window.debugState && window.debugState.breakpoints && (typeof toggleBreakpoint === 'function' ? toggleBreakpoint(filePath, pos.lineNumber) : null);
+    }
+  }},
 ];
 
 function showCommandPalette() {
@@ -2399,23 +2524,26 @@ function groupRecentFiles(files) {
     'Applications', 'Pictures', 'Music', 'Movies', 'Public',
   ]);
 
-  const directoryPaths = [];
-  const fileItems = [];
+  // Track the earliest MRU index for each entry to preserve recency order
+  const directoryPaths = []; // { path, mruIndex }
+  const fileItems = [];      // { path, mruIndex }
 
-  for (const fp of files) {
+  for (let i = 0; i < files.length; i++) {
+    const fp = files[i];
     const name = fp.split('/').pop();
     if (!name.includes('.')) {
-      directoryPaths.push(fp);
+      directoryPaths.push({ path: fp, mruIndex: i });
     } else {
-      fileItems.push(fp);
+      fileItems.push({ path: fp, mruIndex: i });
     }
   }
 
   // Determine project root for each file
   const projectMap = new Map(); // projectRoot → [filepath, …]
-  const projectOrder = [];
+  const projectMruIndex = new Map(); // projectRoot → earliest mruIndex
 
-  for (const fp of fileItems) {
+  for (const item of fileItems) {
+    const fp = item.path;
     const rel = fp.substring(home.length + 1); // e.g. "cpq-admin/resources/file.js"
     const segments = rel.split('/');
 
@@ -2430,51 +2558,68 @@ function groupRecentFiles(files) {
 
     if (!projectMap.has(projectRoot)) {
       projectMap.set(projectRoot, []);
-      projectOrder.push(projectRoot);
+      projectMruIndex.set(projectRoot, item.mruIndex);
+    } else {
+      // Keep the earliest (lowest) MRU index for this project group
+      projectMruIndex.set(projectRoot, Math.min(projectMruIndex.get(projectRoot), item.mruIndex));
     }
     projectMap.get(projectRoot).push(fp);
   }
 
-  const entries = [];
-  const coveredRoots = new Set(projectOrder);
+  const coveredRoots = new Set(projectMap.keys());
 
-  // Output directory entries that aren't already represented by a file group
-  for (const fp of directoryPaths) {
-    if (coveredRoots.has(fp)) continue; // folder group already covers this
-    entries.push({
-      type: 'directory',
-      path: fp,
-      name: fp.split('/').pop(),
-      shortDir: shorten(fp.substring(0, fp.lastIndexOf('/'))),
+  // Build all entries with their MRU index for proper ordering
+  const allEntries = [];
+
+  // Directory entries (those not already represented by a file group)
+  for (const d of directoryPaths) {
+    if (coveredRoots.has(d.path)) continue;
+    allEntries.push({
+      mruIndex: d.mruIndex,
+      entry: {
+        type: 'directory',
+        path: d.path,
+        name: d.path.split('/').pop(),
+        shortDir: shorten(d.path.substring(0, d.path.lastIndexOf('/'))),
+      },
     });
   }
 
-  // Output file groups
-  for (const root of projectOrder) {
-    const fps = projectMap.get(root);
+  // File groups / individual files
+  for (const [root, fps] of projectMap) {
     const name = root.split('/').pop();
     const shortDir = shorten(root.substring(0, root.lastIndexOf('/')));
+    const mruIdx = projectMruIndex.get(root);
 
     if (fps.length > 1) {
-      entries.push({
-        type: 'folder-group',
-        dir: root,
-        name: name,
-        shortDir: shortDir,
-        files: fps,
+      allEntries.push({
+        mruIndex: mruIdx,
+        entry: {
+          type: 'folder-group',
+          dir: root,
+          name: name,
+          shortDir: shortDir,
+          files: fps,
+        },
       });
     } else {
       const fp = fps[0];
-      entries.push({
-        type: 'file',
-        path: fp,
-        name: fp.split('/').pop(),
-        shortDir: shorten(fp.substring(0, fp.lastIndexOf('/'))),
+      allEntries.push({
+        mruIndex: mruIdx,
+        entry: {
+          type: 'file',
+          path: fp,
+          name: fp.split('/').pop(),
+          shortDir: shorten(fp.substring(0, fp.lastIndexOf('/'))),
+        },
       });
     }
   }
 
-  return entries;
+  // Sort by MRU index (most recent first)
+  allEntries.sort((a, b) => a.mruIndex - b.mruIndex);
+
+  return allEntries.map(e => e.entry);
 }
 
 /**
@@ -2662,6 +2807,7 @@ function hideRecentPanel() {
 let _sysSearchTimer = null;
 let _sysSearchActive = -1;
 let _sysSearchResults = [];
+let _sysSearchGen = 0;
 
 function initSystemSearch() {
   const input = $('#titlebar-search-input');
@@ -2678,7 +2824,8 @@ function initSystemSearch() {
     // Show loading state
     dropdown.classList.remove('hidden');
     dropdown.innerHTML = '<div class="sys-search-loading">Searching...</div>';
-    _sysSearchTimer = setTimeout(() => runSystemSearch(q), 250);
+    const gen = ++_sysSearchGen;
+    _sysSearchTimer = setTimeout(() => runSystemSearch(q, gen), 250);
   });
 
   input.addEventListener('focus', () => {
@@ -2721,40 +2868,150 @@ function initSystemSearch() {
   });
 }
 
-async function runSystemSearch(query) {
+async function runSystemSearch(query, gen) {
   const dropdown = $('#titlebar-search-results');
   if (!dropdown) return;
 
   try {
-    const results = await window.congacode.systemSearch(query);
-    _sysSearchResults = results;
+    // Run searches in parallel: file name search + workspace content search
+    const fileSearchPromise = window.congacode.systemSearch(query);
+    const contentSearchPromise = state.folderPath
+      ? window.congacode.searchInFiles(state.folderPath, query, { caseSensitive: false, isRegex: false })
+      : Promise.resolve([]);
+
+    const [fileResults, contentResults] = await Promise.all([fileSearchPromise, contentSearchPromise]);
+
+    // Discard stale results if a newer search was started
+    if (gen !== _sysSearchGen) return;
+
+    const lowerQ = query.toLowerCase();
+    let html = '';
+    const allResults = []; // unified result list for keyboard navigation
+
+    // Section 0: Search open tabs/buffers (always works, even without a folder)
+    const openTabMatches = [];
+    const contentFilePaths = new Set((contentResults || []).map(f => f.filePath));
+    for (const tab of state.tabs) {
+      if (!tab.model) continue;
+      // Skip tabs already covered by workspace grep results
+      if (tab.filePath && contentFilePaths.has(tab.filePath)) continue;
+      const text = tab.model.getValue();
+      if (!text) continue;
+      const lines = text.split('\n');
+      const matches = [];
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].toLowerCase().includes(lowerQ)) {
+          matches.push({ line: i + 1, text: lines[i].trim().substring(0, 200) });
+          if (matches.length >= 10) break; // cap per file
+        }
+      }
+      if (matches.length > 0) {
+        openTabMatches.push({
+          filePath: tab.filePath || null,
+          tabId: tab.id,
+          title: tab.title || 'Untitled',
+          matches,
+        });
+      }
+    }
+
+    if (openTabMatches.length > 0) {
+      html += '<div class="sys-search-section-header">📝 Open Tabs</div>';
+      for (const file of openTabMatches) {
+        const icon = getFileIcon(file.title);
+        html += `<div class="sys-search-content-file">${icon} ${escHtml(file.title)} <span class="sys-search-match-count">${file.matches.length} match${file.matches.length > 1 ? 'es' : ''}</span></div>`;
+        for (const match of file.matches.slice(0, 3)) {
+          const matchResult = {
+            path: file.filePath,
+            name: file.title,
+            dir: '',
+            isDirectory: false,
+            _contentMatch: true,
+            _line: match.line,
+            _tabId: file.tabId,
+          };
+          allResults.push(matchResult);
+          const lineText = match.text.length > 120 ? match.text.substring(0, 120) + '…' : match.text;
+          const highlightedText = highlightMatch(lineText, lowerQ);
+          html += `<div class="sys-search-item sys-search-content-match" data-idx="${allResults.length - 1}">
+            <span class="sys-search-line-num">L${match.line}</span>
+            <span class="sys-search-match-text">${highlightedText}</span>
+          </div>`;
+        }
+        if (file.matches.length > 3) {
+          html += `<div class="sys-search-more">… ${file.matches.length - 3} more matches</div>`;
+        }
+      }
+    }
+
+    // Section 1: File name matches
+    const filteredFiles = fileResults || [];
+    if (filteredFiles.length > 0) {
+      html += '<div class="sys-search-section-header">📄 File Matches</div>';
+      for (const r of filteredFiles.slice(0, 15)) {
+        const icon = r.isDirectory ? '📁' : getFileIcon(r.name);
+        const nameHtml = highlightMatch(r.name, lowerQ);
+        allResults.push(r);
+        html += `<div class="sys-search-item" data-idx="${allResults.length - 1}">
+          <span class="sys-search-icon">${icon}</span>
+          <span class="sys-search-name">${nameHtml}</span>
+          <span class="sys-search-dir">${escHtml(r.dir)}</span>
+        </div>`;
+      }
+    }
+
+    // Section 2: Content matches within workspace
+    const validContent = (contentResults || []).filter(f => f.matches && f.matches.length > 0);
+    if (validContent.length > 0) {
+      html += '<div class="sys-search-section-header">🔍 Content Matches</div>';
+      const basePath = state.folderPath || '';
+      for (const file of validContent.slice(0, 20)) {
+        const relPath = file.filePath.replace(basePath + '/', '');
+        const fileName = relPath.split('/').pop();
+        const icon = getFileIcon(fileName);
+        // Show the file header
+        html += `<div class="sys-search-content-file">${icon} ${escHtml(relPath)} <span class="sys-search-match-count">${file.matches.length} match${file.matches.length > 1 ? 'es' : ''}</span></div>`;
+        // Show up to 3 matching lines per file
+        for (const match of file.matches.slice(0, 3)) {
+          const matchResult = {
+            path: file.filePath,
+            name: fileName,
+            dir: relPath,
+            isDirectory: false,
+            _contentMatch: true,
+            _line: match.line,
+          };
+          allResults.push(matchResult);
+          const lineText = match.text.length > 120 ? match.text.substring(0, 120) + '…' : match.text;
+          const highlightedText = highlightMatch(lineText, lowerQ);
+          html += `<div class="sys-search-item sys-search-content-match" data-idx="${allResults.length - 1}">
+            <span class="sys-search-line-num">L${match.line}</span>
+            <span class="sys-search-match-text">${highlightedText}</span>
+          </div>`;
+        }
+        if (file.matches.length > 3) {
+          html += `<div class="sys-search-more">… ${file.matches.length - 3} more matches</div>`;
+        }
+      }
+    }
+
+    _sysSearchResults = allResults;
     _sysSearchActive = -1;
 
-    if (results.length === 0) {
-      dropdown.innerHTML = '<div class="sys-search-empty">No files found</div>';
+    if (allResults.length === 0) {
+      dropdown.innerHTML = '<div class="sys-search-empty">No results found</div>';
       return;
     }
 
-    // Highlight matching parts in the file name
-    const lowerQ = query.toLowerCase();
-    let html = '';
-    for (const r of results) {
-      const icon = r.isDirectory ? '📁' : getFileIcon(r.name);
-      const nameHtml = highlightMatch(r.name, lowerQ);
-      html += `<div class="sys-search-item" data-path="${escHtml(r.path)}">
-        <span class="sys-search-icon">${icon}</span>
-        <span class="sys-search-name">${nameHtml}</span>
-        <span class="sys-search-dir">${escHtml(r.dir)}</span>
-      </div>`;
-    }
     html += '<div class="sys-search-hint"><span><kbd>↑↓</kbd> Navigate <kbd>↵</kbd> Open</span><span><kbd>esc</kbd> Close</span></div>';
     dropdown.innerHTML = html;
 
     // Click handlers
-    dropdown.querySelectorAll('.sys-search-item').forEach((el, i) => {
-      el.addEventListener('click', () => openSystemSearchResult(results[i]));
+    dropdown.querySelectorAll('.sys-search-item').forEach((el) => {
+      const idx = parseInt(el.dataset.idx, 10);
+      el.addEventListener('click', () => openSystemSearchResult(allResults[idx]));
       el.addEventListener('mouseenter', () => {
-        _sysSearchActive = i;
+        _sysSearchActive = idx;
         updateSysSearchActive(dropdown.querySelectorAll('.sys-search-item'));
       });
     });
@@ -2790,8 +3047,43 @@ async function openSystemSearchResult(result) {
     await openFolder(result.path);
   } else {
     try {
+      // If it's a match from an open tab, just switch to that tab
+      if (result._tabId) {
+        const tab = state.tabs.find(t => t.id === result._tabId);
+        if (tab) {
+          switchToTab(tab.id);
+          if (result._contentMatch && result._line && state.editor) {
+            setTimeout(() => {
+              state.editor.revealLineInCenter(result._line);
+              state.editor.setPosition({ lineNumber: result._line, column: 1 });
+              state.editor.focus();
+              const decs = state.editor.deltaDecorations([], [{
+                range: new monaco.Range(result._line, 1, result._line, 1),
+                options: { isWholeLine: true, className: 'line-highlight-flash' },
+              }]);
+              setTimeout(() => state.editor.deltaDecorations(decs, []), 1500);
+            }, 150);
+          }
+          return;
+        }
+      }
+
       const content = await window.congacode.readFile(result.path);
       await openFile(result.path, content);
+      // If this was a content match, jump to the matching line
+      if (result._contentMatch && result._line && state.editor) {
+        setTimeout(() => {
+          state.editor.revealLineInCenter(result._line);
+          state.editor.setPosition({ lineNumber: result._line, column: 1 });
+          state.editor.focus();
+          // Flash highlight
+          const decs = state.editor.deltaDecorations([], [{
+            range: new monaco.Range(result._line, 1, result._line, 1),
+            options: { isWholeLine: true, className: 'line-highlight-flash' },
+          }]);
+          setTimeout(() => state.editor.deltaDecorations(decs, []), 1500);
+        }, 150);
+      }
     } catch (err) {
       console.error('Failed to open search result:', err);
     }
@@ -2805,6 +3097,12 @@ function hideSystemSearch() {
 }
 
 function focusSystemSearch() {
+  // If on welcome screen, focus the welcome search; otherwise the titlebar search
+  const welcomeScreen = $('#welcome-screen');
+  if (welcomeScreen && !welcomeScreen.classList.contains('hidden')) {
+    const wsInput = $('#welcome-search-input');
+    if (wsInput) { wsInput.focus(); wsInput.select(); return; }
+  }
   const input = $('#titlebar-search-input');
   if (input) { input.focus(); input.select(); }
 }
@@ -2815,6 +3113,7 @@ function focusSystemSearch() {
 let _wsSearchTimer = null;
 let _wsSearchActive = -1;
 let _wsSearchResults = [];
+let _wsSearchGen = 0;
 
 function initWelcomeSearch() {
   const input   = $('#welcome-search-input');
@@ -2831,7 +3130,8 @@ function initWelcomeSearch() {
     results.classList.remove('hidden');
     if (shimmer) shimmer.classList.remove('hidden');
     if (list) list.innerHTML = '';
-    _wsSearchTimer = setTimeout(() => runWelcomeSearch(q), 250);
+    const gen = ++_wsSearchGen;
+    _wsSearchTimer = setTimeout(() => runWelcomeSearch(q, gen), 250);
   });
 
   input.addEventListener('focus', () => {
@@ -2873,7 +3173,7 @@ function initWelcomeSearch() {
   });
 }
 
-async function runWelcomeSearch(query) {
+async function runWelcomeSearch(query, gen) {
   const results = $('#welcome-search-results');
   const shimmer = $('#welcome-search-shimmer');
   const list    = $('#welcome-search-list');
@@ -2881,6 +3181,8 @@ async function runWelcomeSearch(query) {
 
   try {
     const items = await window.congacode.systemSearch(query);
+    // Discard stale results if a newer search was started
+    if (gen !== _wsSearchGen) return;
     _wsSearchResults = items;
     _wsSearchActive = -1;
     if (shimmer) shimmer.classList.add('hidden');
@@ -3023,6 +3325,27 @@ function initRecentResizer() {
 /* ================================================================
    17. STATUS BAR
    ================================================================ */
+
+/** Hide file-specific status items when no tab is open */
+function hideFileStatusItems() {
+  if (dom.statusPosition) dom.statusPosition.classList.add('hidden');
+  if (dom.statusEncoding) dom.statusEncoding.classList.add('hidden');
+  if (dom.statusLanguage) dom.statusLanguage.classList.add('hidden');
+  if (dom.statusEol) dom.statusEol.classList.add('hidden');
+  if (dom.statusIndent) dom.statusIndent.classList.add('hidden');
+  const rt = $('#status-richtext');
+  if (rt) rt.classList.add('hidden');
+}
+
+/** Show file-specific status items when a tab is active */
+function showFileStatusItems() {
+  if (dom.statusPosition) dom.statusPosition.classList.remove('hidden');
+  if (dom.statusEncoding) dom.statusEncoding.classList.remove('hidden');
+  if (dom.statusLanguage) dom.statusLanguage.classList.remove('hidden');
+  if (dom.statusEol) dom.statusEol.classList.remove('hidden');
+  if (dom.statusIndent) dom.statusIndent.classList.remove('hidden');
+}
+
 function updateStatusPosition() {
   if (!state.editor) return;
   const pos = state.editor.getPosition();
@@ -3258,6 +3581,37 @@ function initKeyboard() {
     if (e.ctrlKey && shift && !alt && e.key === 'Y') { e.preventDefault(); toggleToolPanel('pomo-panel'); return; }
     // Ctrl+Shift+I → Diff Checker
     if (e.ctrlKey && shift && !alt && e.key === 'I') { e.preventDefault(); toggleToolPanel('diff-panel'); return; }
+    // Ctrl+Shift+F → Salesforce
+    if (e.ctrlKey && shift && !alt && e.key === 'F') { e.preventDefault(); toggleToolPanel('salesforce-panel'); return; }
+    // F5 → Continue debugging (when active) 
+    if (!cmd && !shift && !alt && !e.ctrlKey && e.key === 'F5') { e.preventDefault(); if (window.debugState?.active) window.debugContinue?.(); return; }
+    // Shift+F5 → Stop debugging
+    if (!cmd && shift && !alt && !e.ctrlKey && e.key === 'F5') { e.preventDefault(); window.debugStop?.(); return; }
+    // F10 → Step Over
+    if (!cmd && !shift && !alt && !e.ctrlKey && e.key === 'F10') { e.preventDefault(); window.debugStepOver?.(); return; }
+    // F11 → Step Into
+    if (!cmd && !shift && !alt && !e.ctrlKey && e.key === 'F11') { e.preventDefault(); window.debugStepInto?.(); return; }
+    // Shift+F11 → Step Out
+    if (!cmd && shift && !alt && !e.ctrlKey && e.key === 'F11') { e.preventDefault(); window.debugStepOut?.(); return; }
+    // F9 → Toggle Breakpoint
+    if (!cmd && !shift && !alt && !e.ctrlKey && e.key === 'F9') {
+      e.preventDefault();
+      const editor = state.editor;
+      if (editor && window.debugState) {
+        const pos = editor.getPosition();
+        const model = editor.getModel();
+        if (pos && model) {
+          const fp = model.uri.fsPath || model.uri.path;
+          if (fp.endsWith('.cls') || fp.endsWith('.trigger')) {
+            const ev = new CustomEvent('congacode-toggle-breakpoint', { detail: { filePath: fp, line: pos.lineNumber } });
+            document.dispatchEvent(ev);
+          }
+        }
+      }
+      return;
+    }
+    // Ctrl+Shift+U → Run menu
+    if (e.ctrlKey && shift && !alt && e.key === 'U') { e.preventDefault(); if (window.toggleRunMenu) window.toggleRunMenu(); return; }
     // Cmd+P → Quick Open
     if (cmd && !shift && !alt && e.key === 'p') { e.preventDefault(); showQuickOpen(); return; }
     // Cmd+Shift+P → Command Palette
@@ -3430,12 +3784,6 @@ function initKeyboard() {
       if (state.editor) state.editor.getAction('cursorUndo')?.run();
       return;
     }
-    // Cmd+Shift+Space → Trigger parameter hints
-    if (cmd && shift && !alt && e.key === ' ') {
-      e.preventDefault();
-      if (state.editor) state.editor.getAction('editor.action.triggerParameterHints')?.run();
-      return;
-    }
     // Cmd+\ → Split editor
     if (cmd && !shift && !alt && e.key === '\\') {
       e.preventDefault();
@@ -3493,6 +3841,7 @@ function initIpcHandlers() {
   api.on('edit:find', () => showSearchBar(false));
   api.on('edit:replace', () => showSearchBar(true));
   api.on('edit:find-in-files', () => showGlobalSearch());
+  api.on('edit:spotlight-search', () => focusSystemSearch());
   api.on('edit:goto-line', () => showGotoBar());
   api.on('edit:quick-open', () => showQuickOpen());
   api.on('edit:command-palette', () => showCommandPalette());
@@ -3565,6 +3914,83 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
+/* ---------- Custom dialog helpers (Electron blocks native prompt/confirm) ---------- */
+function showInputDialog(title, message, defaultValue = '') {
+  return new Promise((resolve) => {
+    const overlay = $('#input-dialog-overlay');
+    const titleEl = $('#input-dialog-title');
+    const msgEl = $('#input-dialog-message');
+    const input = $('#input-dialog-input');
+    const okBtn = $('#btn-input-dialog-ok');
+    const cancelBtn = $('#btn-input-dialog-cancel');
+    const closeBtn = $('#btn-input-dialog-close');
+
+    titleEl.textContent = title || 'Input';
+    msgEl.textContent = message || '';
+    input.value = defaultValue;
+    overlay.classList.remove('hidden');
+    setTimeout(() => { input.focus(); input.select(); }, 50);
+
+    function cleanup() {
+      overlay.classList.add('hidden');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      closeBtn.removeEventListener('click', onCancel);
+      document.removeEventListener('keydown', onKey);
+    }
+    function onOk() { const v = input.value; cleanup(); resolve(v); }
+    function onCancel() { cleanup(); resolve(null); }
+    function onKey(e) {
+      if (e.key === 'Enter') { e.preventDefault(); onOk(); }
+      else if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+    }
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    closeBtn.addEventListener('click', onCancel);
+    document.addEventListener('keydown', onKey);
+  });
+}
+
+function showConfirmDialog(title, message) {
+  return new Promise((resolve) => {
+    const overlay = $('#input-dialog-overlay');
+    const titleEl = $('#input-dialog-title');
+    const msgEl = $('#input-dialog-message');
+    const input = $('#input-dialog-input');
+    const okBtn = $('#btn-input-dialog-ok');
+    const cancelBtn = $('#btn-input-dialog-cancel');
+    const closeBtn = $('#btn-input-dialog-close');
+
+    titleEl.textContent = title || 'Confirm';
+    msgEl.textContent = message || '';
+    input.style.display = 'none';
+    overlay.classList.remove('hidden');
+    setTimeout(() => okBtn.focus(), 50);
+
+    function cleanup() {
+      overlay.classList.add('hidden');
+      input.style.display = '';
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      closeBtn.removeEventListener('click', onCancel);
+      document.removeEventListener('keydown', onKey);
+    }
+    function onOk() { cleanup(); resolve(true); }
+    function onCancel() { cleanup(); resolve(false); }
+    function onKey(e) {
+      if (e.key === 'Enter') { e.preventDefault(); onOk(); }
+      else if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+    }
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    closeBtn.addEventListener('click', onCancel);
+    document.addEventListener('keydown', onKey);
+  });
+}
+// Expose for modules
+window.showInputDialog = showInputDialog;
+window.showConfirmDialog = showConfirmDialog;
+
 function guessLanguage(filename) {
   const ext = filename.split('.').pop().toLowerCase();
   const map = {
@@ -3578,6 +4004,7 @@ function guessLanguage(filename) {
     dockerfile: 'dockerfile', makefile: 'makefile',
     lua: 'lua', r: 'r', perl: 'perl', dart: 'dart',
     vue: 'html', svelte: 'html',
+    cls: 'apex', trigger: 'apex',
   };
   return map[ext] || 'plaintext';
 }
@@ -3593,6 +4020,7 @@ function getFileIcon(name) {
     png: '🖼️', jpg: '🖼️', gif: '🖼️', svg: '🖼️', ico: '🖼️',
     mp3: '🎵', wav: '🎵', mp4: '🎬', zip: '📦', tar: '📦',
     vue: '💚', svelte: '🧡',
+    cls: '⚡', trigger: '⚡',
   };
   return icons[ext] || '📄';
 }
@@ -3621,6 +4049,7 @@ function showToast(message, type = 'info', duration = 4000) {
   }
   return toast;
 }
+window.showToast = showToast;
 
 function dismissToast(toast) {
   toast.classList.add('toast-out');
@@ -5275,11 +5704,12 @@ function enterRichTextMode(tab, loadFromModel = true) {
   dom.richTextContainer.classList.remove('hidden');
 
   if (loadFromModel) {
-    // Convert plain text to HTML paragraphs
-    const text = tab.model.getValue();
     if (tab._richTextHtml) {
+      // Restore previously saved rich HTML (preserves images, formatting, etc.)
       dom.richTextEditor.innerHTML = tab._richTextHtml;
     } else {
+      // First time: convert plain text to HTML paragraphs
+      const text = tab.model.getValue();
       dom.richTextEditor.innerHTML = text
         .split('\n')
         .map(line => `<div>${line || '<br>'}</div>`)
@@ -5310,11 +5740,16 @@ function exitRichTextMode(tab) {
   if (!tab) tab = state.tabs.find(t => t.id === state.activeTabId);
   if (!tab) return;
 
-  // Save the plain text back to Monaco model
-  const plainText = dom.richTextEditor.innerText;
+  // Save the rich HTML so we can restore it on re-enter (undo-friendly)
+  tab._richTextHtml = dom.richTextEditor.innerHTML;
+
+  // Save the plain text representation to Monaco model
+  // Use a smarter conversion that preserves structure better
+  const plainText = richHtmlToPlainText(dom.richTextEditor);
   tab.model.setValue(plainText);
   tab._richTextMode = false;
-  tab._richTextHtml = null;
+  // NOTE: We do NOT null out _richTextHtml — this lets Ctrl+Z work
+  // by preserving the full rich content when switching back.
 
   hideRichTextEditor();
 
@@ -5333,15 +5768,97 @@ function hideRichTextEditor() {
   if (dom.richTextContainer) dom.richTextContainer.classList.add('hidden');
   if (dom.statusRichText) dom.statusRichText.classList.add('hidden');
   if (dom.richTextEditor) dom.richTextEditor.oninput = null;
+  // Restore editor split container (enterRichTextMode hides it)
+  if (dom.editorSplitContainer) dom.editorSplitContainer.style.display = '';
 }
 
 function saveRichTextContent(tab) {
   // When saving from rich text mode, save plain text to file
   if (tab._richTextMode && dom.richTextEditor) {
     tab._richTextHtml = dom.richTextEditor.innerHTML;
-    const plainText = dom.richTextEditor.innerText;
+    const plainText = richHtmlToPlainText(dom.richTextEditor);
     tab.model.setValue(plainText);
   }
+}
+
+/**
+ * Convert rich HTML content to plain text, preserving structure.
+ * Handles images (alt text / [image] placeholder), lists, headings, etc.
+ */
+function richHtmlToPlainText(el) {
+  if (!el) return '';
+  const lines = [];
+
+  function walk(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      lines.push(node.textContent);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+    const tag = node.tagName.toLowerCase();
+
+    // Images — preserve as placeholder
+    if (tag === 'img') {
+      const alt = node.getAttribute('alt') || '';
+      const src = node.getAttribute('src') || '';
+      if (alt) {
+        lines.push(`[image: ${alt}]`);
+      } else if (src.startsWith('data:')) {
+        lines.push('[embedded image]');
+      } else {
+        lines.push(`[image: ${src}]`);
+      }
+      return;
+    }
+
+    // Line break
+    if (tag === 'br') {
+      lines.push('\n');
+      return;
+    }
+
+    // Block-level elements get newlines
+    const blockTags = ['div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'tr', 'blockquote', 'pre', 'hr'];
+    const isBlock = blockTags.includes(tag);
+
+    if (tag === 'hr') {
+      lines.push('\n---\n');
+      return;
+    }
+
+    // List item prefix
+    if (tag === 'li') {
+      const parent = node.parentElement;
+      if (parent && parent.tagName.toLowerCase() === 'ol') {
+        const idx = Array.from(parent.children).indexOf(node) + 1;
+        lines.push(`${idx}. `);
+      } else {
+        lines.push('• ');
+      }
+    }
+
+    // Heading prefix
+    if (/^h[1-6]$/.test(tag)) {
+      const level = parseInt(tag[1], 10);
+      lines.push('#'.repeat(level) + ' ');
+    }
+
+    for (const child of node.childNodes) {
+      walk(child);
+    }
+
+    if (isBlock) {
+      lines.push('\n');
+    }
+  }
+
+  walk(el);
+
+  // Clean up: collapse multiple newlines, trim
+  return lines.join('')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function initRichTextEditor() {
@@ -5413,8 +5930,100 @@ function initRichTextEditor() {
     dom.statusRichText.addEventListener('click', toggleRichTextMode);
   }
 
+  // Rich text context menu (right-click)
+  initRichTextContextMenu();
+
   // Show Rich Text indicator for plain text files
   updateRichTextIndicator();
+}
+
+function initRichTextContextMenu() {
+  const rtEditor = dom.richTextEditor;
+  const ctxMenu = $('#richtext-context-menu');
+  if (!rtEditor || !ctxMenu) return;
+
+  rtEditor.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Position the menu
+    ctxMenu.style.left = e.clientX + 'px';
+    ctxMenu.style.top = e.clientY + 'px';
+    ctxMenu.classList.remove('hidden');
+
+    // Adjust if menu goes off-screen
+    requestAnimationFrame(() => {
+      const rect = ctxMenu.getBoundingClientRect();
+      if (rect.right > window.innerWidth) ctxMenu.style.left = (e.clientX - rect.width) + 'px';
+      if (rect.bottom > window.innerHeight) ctxMenu.style.top = (e.clientY - rect.height) + 'px';
+    });
+  });
+
+  // Close on click outside
+  document.addEventListener('mousedown', (e) => {
+    if (!ctxMenu.contains(e.target)) ctxMenu.classList.add('hidden');
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') ctxMenu.classList.add('hidden');
+  });
+
+  // Handle context menu actions
+  ctxMenu.querySelectorAll('[data-rt-action]').forEach(item => {
+    item.addEventListener('click', () => {
+      ctxMenu.classList.add('hidden');
+      const action = item.dataset.rtAction;
+      rtEditor.focus();
+
+      switch (action) {
+        case 'rt-cut':
+          document.execCommand('cut');
+          break;
+        case 'rt-copy':
+          document.execCommand('copy');
+          break;
+        case 'rt-paste':
+          navigator.clipboard.readText().then(text => {
+            document.execCommand('insertText', false, text);
+          }).catch(() => {
+            document.execCommand('paste');
+          });
+          break;
+        case 'rt-select-all':
+          document.execCommand('selectAll');
+          break;
+        case 'rt-bold':
+          document.execCommand('bold');
+          break;
+        case 'rt-italic':
+          document.execCommand('italic');
+          break;
+        case 'rt-underline':
+          document.execCommand('underline');
+          break;
+        case 'rt-strikethrough':
+          document.execCommand('strikeThrough');
+          break;
+        case 'rt-unordered-list':
+          document.execCommand('insertUnorderedList');
+          break;
+        case 'rt-ordered-list':
+          document.execCommand('insertOrderedList');
+          break;
+        case 'rt-align-left':
+          document.execCommand('justifyLeft');
+          break;
+        case 'rt-align-center':
+          document.execCommand('justifyCenter');
+          break;
+        case 'rt-align-right':
+          document.execCommand('justifyRight');
+          break;
+        case 'rt-clear-format':
+          document.execCommand('removeFormat');
+          break;
+      }
+    });
+  });
 }
 
 function updateRichTextIndicator() {
@@ -5447,10 +6056,11 @@ const toolBtnMap = {
   'todo-panel': 'tbtn-todo',
   'pomo-panel': 'tbtn-pomo',
   'diff-panel': 'tbtn-diff',
+  'salesforce-panel': 'tbtn-salesforce',
 };
 
 function toggleToolPanel(panelId) {
-  const panels = ['api-client-panel', 'regex-panel', 'json-viewer-panel', 'bookmarks-panel', 'screenshot-panel', 'db-panel', 'snippet-panel', 'color-panel', 'todo-panel', 'pomo-panel', 'diff-panel'];
+  const panels = ['api-client-panel', 'regex-panel', 'json-viewer-panel', 'bookmarks-panel', 'screenshot-panel', 'db-panel', 'snippet-panel', 'color-panel', 'todo-panel', 'pomo-panel', 'diff-panel', 'salesforce-panel'];
   const target = $('#' + panelId);
   const isVisible = target && !target.classList.contains('hidden');
 
@@ -5488,6 +6098,7 @@ function toggleToolPanel(panelId) {
     }
   }
 }
+window.toggleToolPanel = toggleToolPanel;
 
 // ================================================================
 // 24a. API CLIENT
@@ -5504,6 +6115,7 @@ function initToolbarButtons() {
   $('#tbtn-todo')?.addEventListener('click', () => toggleToolPanel('todo-panel'));
   $('#tbtn-pomo')?.addEventListener('click', () => toggleToolPanel('pomo-panel'));
   $('#tbtn-diff')?.addEventListener('click', () => toggleToolPanel('diff-panel'));
+  $('#tbtn-salesforce')?.addEventListener('click', () => toggleToolPanel('salesforce-panel'));
 
   // Kebab overflow menu
   initKebabMenu();
@@ -5527,6 +6139,8 @@ function initKebabMenu() {
     { id: 'tbtn-todo',       label: 'TODO Tracker',   shortcut: '⌃⇧G', panel: 'todo-panel' },
     { id: 'tbtn-pomo',       label: 'Pomodoro Timer', shortcut: '⌃⇧Y', panel: 'pomo-panel' },
     { id: 'tbtn-diff',       label: 'Diff Checker',   shortcut: '⌃⇧I', panel: 'diff-panel' },
+    { sep: true },
+    { id: 'tbtn-salesforce', label: 'Salesforce',     shortcut: '⌃⇧F', panel: 'salesforce-panel' },
   ];
 
   // Build menu items
@@ -5632,6 +6246,13 @@ function initApiClient() {
   // Save to collection
   saveBtn?.addEventListener('click', saveApiToCollection);
 
+  // Copy as cURL
+  $('#btn-api-curl-copy')?.addEventListener('click', copyAsCurl);
+
+  // Import cURL modal
+  $('#btn-api-curl-import')?.addEventListener('click', showCurlImportModal);
+  initCurlImportModal();
+
   // Request tabs
   $$('.api-client-body .api-tabs .api-tab').forEach(tab => {
     tab.addEventListener('click', () => {
@@ -5689,13 +6310,33 @@ function initApiClient() {
     renderApiHistory();
   });
 
-  // New collection
-  $('#btn-api-new-collection')?.addEventListener('click', () => {
-    const name = prompt('Collection name:');
-    if (name) {
-      state.apiCollections.push({ name, requests: [] });
-      renderApiCollections();
+  // New collection — create and optionally save current request
+  $('#btn-api-new-collection')?.addEventListener('click', async () => {
+    const name = await showInputDialog('New Collection', 'Collection name:');
+    if (!name || !name.trim()) return;
+    const col = { name: name.trim(), requests: [] };
+    // If there's a URL in the request bar, offer to add it
+    const currentUrl = $('#api-url')?.value?.trim();
+    if (currentUrl) {
+      const addCurrent = await showConfirmDialog('Add Request', `Add the current request (${currentUrl}) to "${name}"?`);
+      if (addCurrent) {
+        const method = $('#api-method')?.value || 'GET';
+        const headers = getKvPairs('api-headers-table');
+        const params = getKvPairs('api-params-table');
+        const bodyType = $('#api-body-type')?.value || 'none';
+        const bodyContent = $('#api-body-content')?.value || '';
+        const authType = $('#api-auth-type')?.value || 'none';
+        let auth = { type: authType };
+        if (authType === 'bearer') auth.token = $('#api-auth-token')?.value || '';
+        else if (authType === 'basic') { auth.username = $('#api-auth-user')?.value || ''; auth.password = $('#api-auth-pass')?.value || ''; }
+        else if (authType === 'apikey') { auth.keyName = $('#api-auth-key-name')?.value || ''; auth.keyValue = $('#api-auth-key-val')?.value || ''; }
+        const reqName = await showInputDialog('Request Name', 'Name for this request:', currentUrl.split('/').pop() || currentUrl) || currentUrl;
+        col.requests.push({ method, url: currentUrl, name: reqName, headers, params, bodyType, body: bodyContent, auth });
+      }
     }
+    state.apiCollections.push(col);
+    renderApiCollections();
+    showToast(`Collection "${name}" created${col.requests.length ? ' with 1 request' : ''}`, 'info');
   });
 
   // Import collection (Postman JSON)
@@ -5900,9 +6541,9 @@ function renderApiHistory() {
   });
 }
 
-function saveApiToCollection() {
+async function saveApiToCollection() {
   if (state.apiCollections.length === 0) {
-    const name = prompt('Create a collection first. Name:');
+    const name = await showInputDialog('New Collection', 'Create a collection first. Name:');
     if (!name) return;
     state.apiCollections.push({ name, requests: [] });
   }
@@ -5918,9 +6559,15 @@ function saveApiToCollection() {
   else if (authType === 'basic') { auth.username = $('#api-auth-user')?.value || ''; auth.password = $('#api-auth-pass')?.value || ''; }
   else if (authType === 'apikey') { auth.keyName = $('#api-auth-key-name')?.value || ''; auth.keyValue = $('#api-auth-key-val')?.value || ''; }
 
-  const colIdx = state.apiCollections.length === 1 ? 0 : parseInt(prompt(`Collection index (0-${state.apiCollections.length - 1}):`), 10);
+  let colIdx = 0;
+  if (state.apiCollections.length > 1) {
+    const names = state.apiCollections.map((c, i) => `${i}: ${c.name}`).join('\n');
+    const picked = await showInputDialog('Choose Collection', `Which collection?\n${names}`, '0');
+    if (picked === null) return;
+    colIdx = parseInt(picked, 10);
+  }
   if (isNaN(colIdx) || !state.apiCollections[colIdx]) return;
-  const reqName = prompt('Request name:', url.split('/').pop() || url) || url;
+  const reqName = await showInputDialog('Request Name', 'Name for this request:', url.split('/').pop() || url) || url;
   state.apiCollections[colIdx].requests.push({ method, url, name: reqName, headers, params, bodyType, body: bodyContent, auth });
   showToast(`Saved to "${state.apiCollections[colIdx].name}"`, 'info');
   renderApiCollections();
@@ -6114,7 +6761,8 @@ async function exportApiCollection() {
   // If multiple collections, let user choose or export all
   let colIdx = 0;
   if (state.apiCollections.length > 1) {
-    const choice = prompt(`Export which collection? (0-${state.apiCollections.length - 1}, or "all" for all):`);
+    const names = state.apiCollections.map((c, i) => `${i}: ${c.name}`).join('\n');
+    const choice = await showInputDialog('Export Collection', `Export which collection? (or "all" for all)\n${names}`, '0');
     if (choice === null) return;
     if (choice.toLowerCase() === 'all') {
       colIdx = -1; // export all
@@ -6213,6 +6861,248 @@ function buildPostmanExport(collection) {
     },
     item: items,
   };
+}
+
+// ----------------------------------------------------------------
+// cURL Copy / Import
+// ----------------------------------------------------------------
+
+/** Build a cURL command string from the current API client state */
+function buildCurlCommand() {
+  const method = $('#api-method')?.value || 'GET';
+  const url = $('#api-url')?.value?.trim() || '';
+  if (!url) return '';
+
+  const headers = getKvPairs('api-headers-table');
+  const params = getKvPairs('api-params-table');
+
+  // Auth headers
+  const authType = $('#api-auth-type')?.value;
+  if (authType === 'bearer') {
+    const token = $('#api-auth-token')?.value;
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+  } else if (authType === 'basic') {
+    const user = $('#api-auth-user')?.value || '';
+    const pass = $('#api-auth-pass')?.value || '';
+    headers['Authorization'] = `Basic ${btoa(user + ':' + pass)}`;
+  } else if (authType === 'apikey') {
+    const keyName = $('#api-auth-key-name')?.value;
+    const keyVal = $('#api-auth-key-val')?.value;
+    if (keyName && keyVal) headers[keyName] = keyVal;
+  }
+
+  // Build full URL with params
+  let fullUrl = url;
+  const paramStr = new URLSearchParams(params).toString();
+  if (paramStr) fullUrl += (url.includes('?') ? '&' : '?') + paramStr;
+
+  const parts = ['curl'];
+  if (method !== 'GET') parts.push(`-X ${method}`);
+  parts.push(`'${fullUrl}'`);
+
+  for (const [k, v] of Object.entries(headers)) {
+    parts.push(`-H '${k}: ${v}'`);
+  }
+
+  const bodyType = $('#api-body-type')?.value || 'none';
+  if (['POST', 'PUT', 'PATCH'].includes(method) && bodyType !== 'none') {
+    const body = $('#api-body-content')?.value || '';
+    if (body) {
+      parts.push(`-d '${body.replace(/'/g, "'\\''")}'`);
+    }
+  }
+
+  return parts.join(' \\\n  ');
+}
+
+/** Copy the current request as a cURL command */
+function copyAsCurl() {
+  const curl = buildCurlCommand();
+  if (!curl) { showToast('Enter a URL first', 'warning'); return; }
+  navigator.clipboard.writeText(curl).then(() => {
+    showToast('cURL copied to clipboard', 'info');
+  }).catch(() => {
+    showToast('Failed to copy to clipboard', 'error');
+  });
+}
+
+// ----------------------------------------------------------------
+// cURL Import Modal
+// ----------------------------------------------------------------
+function showCurlImportModal() {
+  const overlay = $('#curl-import-overlay');
+  const input = $('#curl-import-input');
+  if (!overlay || !input) return;
+  overlay.classList.remove('hidden');
+  input.value = '';
+  input.focus();
+}
+
+function hideCurlImportModal() {
+  const overlay = $('#curl-import-overlay');
+  if (overlay) overlay.classList.add('hidden');
+}
+
+function initCurlImportModal() {
+  const overlay = $('#curl-import-overlay');
+  const input = $('#curl-import-input');
+  const applyBtn = $('#btn-curl-import-apply');
+  const cancelBtn = $('#btn-curl-import-cancel');
+  const closeBtn = $('#btn-curl-import-close');
+  if (!overlay) return;
+
+  // Close actions
+  cancelBtn?.addEventListener('click', hideCurlImportModal);
+  closeBtn?.addEventListener('click', hideCurlImportModal);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) hideCurlImportModal();
+  });
+
+  // Auto-detect paste: immediately enable Import button when curl is pasted
+  input?.addEventListener('input', () => {
+    const val = (input.value || '').trim();
+    if (applyBtn) {
+      applyBtn.disabled = !val;
+    }
+  });
+
+  // Import button
+  applyBtn?.addEventListener('click', () => {
+    const val = (input?.value || '').trim();
+    if (!val) { showToast('Paste a cURL command first', 'warning'); return; }
+    parseCurlAndPopulate(val);
+    hideCurlImportModal();
+    // Ensure the API client panel is visible after import
+    const panel = $('#api-client-panel');
+    if (panel && panel.classList.contains('hidden')) {
+      toggleToolPanel('api-client-panel');
+    }
+  });
+
+  // Cmd/Ctrl+Enter to import quickly
+  input?.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { hideCurlImportModal(); return; }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      applyBtn?.click();
+    }
+  });
+}
+
+/** Parse a cURL command string and populate the API client fields */
+function parseCurlAndPopulate(curlStr) {
+  if (!curlStr) return;
+  // Normalize: remove line continuations
+  const normalized = curlStr.replace(/\\\s*\n/g, ' ').trim();
+
+  // Extract method
+  let method = 'GET';
+  const methodMatch = normalized.match(/-X\s+(\w+)/i);
+  if (methodMatch) method = methodMatch[1].toUpperCase();
+
+  // Extract URL — find the first http:// or https:// URL in the command
+  let url = '';
+  // Look for quoted URLs first
+  const quotedUrlMatch = normalized.match(/(?:'(https?:\/\/[^']+)'|"(https?:\/\/[^"]+)")/);
+  if (quotedUrlMatch) {
+    url = quotedUrlMatch[1] || quotedUrlMatch[2] || '';
+  } else {
+    // Look for unquoted URL
+    const unquotedUrlMatch = normalized.match(/\s(https?:\/\/\S+)/);
+    if (unquotedUrlMatch) url = unquotedUrlMatch[1];
+  }
+
+  // Extract headers
+  const headers = {};
+  const headerRegex = /-H\s+(?:'([^']*)'|"([^"]*)")/gi;
+  let hm;
+  while ((hm = headerRegex.exec(normalized)) !== null) {
+    const headerStr = hm[1] || hm[2] || '';
+    const colonIdx = headerStr.indexOf(':');
+    if (colonIdx > 0) {
+      headers[headerStr.substring(0, colonIdx).trim()] = headerStr.substring(colonIdx + 1).trim();
+    }
+  }
+
+  // Extract body data
+  let body = '';
+  const dataMatch = normalized.match(/(?:-d|--data|--data-raw|--data-binary)\s+(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")/);
+  if (dataMatch) {
+    body = dataMatch[1] || dataMatch[2] || '';
+    if (!method || method === 'GET') method = 'POST';
+  }
+
+  // Detect auth from headers
+  let authType = 'none';
+  if (headers['Authorization']) {
+    const authVal = headers['Authorization'];
+    if (authVal.startsWith('Bearer ')) {
+      authType = 'bearer';
+    } else if (authVal.startsWith('Basic ')) {
+      authType = 'basic';
+    }
+  }
+  // Check -u flag for basic auth
+  const userMatch = normalized.match(/-u\s+(?:'([^']*)'|"([^"]*)"|([\S]+))/);
+  if (userMatch) {
+    const userPass = userMatch[1] || userMatch[2] || userMatch[3] || '';
+    const [user, pass] = userPass.split(':');
+    headers['Authorization'] = `Basic ${btoa((user || '') + ':' + (pass || ''))}`;
+    authType = 'basic';
+  }
+
+  // Populate the UI
+  if ($('#api-method')) $('#api-method').value = method;
+  if ($('#api-url')) $('#api-url').value = url;
+
+  // Clear and populate headers
+  const hTable = $('#api-headers-table');
+  if (hTable) {
+    // Keep the header row, remove all data rows
+    hTable.querySelectorAll('.api-kv-row').forEach(r => r.remove());
+    const nonAuthHeaders = Object.entries(headers).filter(([k]) => k !== 'Authorization');
+    if (nonAuthHeaders.length > 0) {
+      nonAuthHeaders.forEach(([k, v]) => {
+        addKvRow('api-headers-table');
+        const rows = hTable.querySelectorAll('.api-kv-row');
+        const last = rows[rows.length - 1];
+        if (last) { last.querySelector('.api-kv-key').value = k; last.querySelector('.api-kv-value').value = v; }
+      });
+    } else {
+      addKvRow('api-headers-table');
+    }
+  }
+
+  // Set body
+  if (body) {
+    let bodyType = 'text';
+    try { JSON.parse(body); bodyType = 'json'; } catch {}
+    if (headers['Content-Type']?.includes('x-www-form-urlencoded')) bodyType = 'form';
+    if ($('#api-body-type')) $('#api-body-type').value = bodyType;
+    if ($('#api-body-content')) $('#api-body-content').value = body;
+  }
+
+  // Set auth
+  if ($('#api-auth-type')) {
+    $('#api-auth-type').value = authType;
+    updateAuthFields();
+    if (authType === 'bearer') {
+      const token = headers['Authorization']?.replace('Bearer ', '') || '';
+      setTimeout(() => { if ($('#api-auth-token')) $('#api-auth-token').value = token; }, 50);
+    } else if (authType === 'basic') {
+      const b64 = headers['Authorization']?.replace('Basic ', '') || '';
+      try {
+        const decoded = atob(b64);
+        const [user, pass] = decoded.split(':');
+        setTimeout(() => {
+          if ($('#api-auth-user')) $('#api-auth-user').value = user || '';
+          if ($('#api-auth-pass')) $('#api-auth-pass').value = pass || '';
+        }, 50);
+      } catch {}
+    }
+  }
+
+  showToast('cURL command imported successfully', 'info');
 }
 
 // ================================================================
@@ -7070,6 +7960,8 @@ async function init() {
   if (window.initTodoTracker) initTodoTracker();
   if (window.initPomodoro)    initPomodoro();
   if (window.initDiffChecker) initDiffChecker();
+  if (window.initSalesforce) initSalesforce();
+  if (window.initApexDebugger) initApexDebugger();
 
   // Sidebar section toggles
   dom.recentSectionHeader.addEventListener('click', toggleRecentSection);
@@ -7120,6 +8012,7 @@ async function init() {
   // Show welcome only if no tabs AND no folder open
   // (If a folder is restored but no tabs, show sidebar + shortcuts overlay instead)
   if (state.tabs.length === 0) {
+    hideFileStatusItems();
     if (state.folderPath) {
       hideWelcome();
       showEmptyTabShortcuts();

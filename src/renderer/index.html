@@ -60,6 +60,13 @@
       <button class="titlebar-tool-btn" id="tbtn-diff" title="Diff Checker (⌃⇧I)">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18"/><path d="M5 7H2v10h3"/><path d="M19 7h3v10h-3"/><path d="M8 7l-3 5 3 5"/><path d="M16 7l3 5-3 5"/></svg>
       </button>
+      <span class="titlebar-tools-sep"></span>
+      <button class="titlebar-tool-btn" id="tbtn-salesforce" title="Salesforce (⌃⇧F)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      </button>
+      <button class="titlebar-tool-btn titlebar-run-btn" id="tbtn-run" title="Run (⌃⇧U)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5,3 19,12 5,21"/></svg>
+      </button>
       <!-- Kebab overflow menu for small windows -->
       <button class="titlebar-tool-btn titlebar-kebab-btn" id="tbtn-kebab" title="More tools">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
@@ -73,7 +80,7 @@
     </div>
     <div id="titlebar-search" class="titlebar-search">
       <svg class="titlebar-search-icon" width="13" height="13" viewBox="0 0 16 16"><circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" stroke-width="1.5"/></svg>
-      <input id="titlebar-search-input" type="text" placeholder="Spotlight Search..." spellcheck="false" autocomplete="off" />
+      <input id="titlebar-search-input" type="text" placeholder="Search files & content..." spellcheck="false" autocomplete="off" />
       <div id="titlebar-search-results" class="titlebar-search-results hidden"></div>
     </div>
   </div>
@@ -348,6 +355,7 @@
         <span id="status-indent">Spaces: 2</span>
         <span id="status-minimap" class="status-clickable" title="Toggle Minimap">Minimap</span>
         <span id="status-theme" class="status-clickable" title="Change Theme">Theme: Dark</span>
+        <span id="status-sf-org" class="status-clickable status-sf-org" title="Click to select Salesforce Org">⚡ Select Org</span>
         <span id="status-autosave" class="status-autosave">● Auto-saved</span>
       </div>
     </main>
@@ -374,6 +382,14 @@
     <div class="quick-open-modal">
       <input type="text" id="theme-picker-input" placeholder="Select Color Theme…" spellcheck="false" />
       <div id="theme-picker-results" class="quick-open-results"></div>
+    </div>
+  </div>
+
+  <!-- Org Picker modal (status bar click) -->
+  <div id="org-picker-overlay" class="modal-overlay hidden">
+    <div class="quick-open-modal">
+      <input type="text" id="org-picker-input" placeholder="Select Salesforce Org or authenticate new…" spellcheck="false" />
+      <div id="org-picker-results" class="quick-open-results"></div>
     </div>
   </div>
 
@@ -418,6 +434,12 @@
     <div class="ctx-item" data-action="file-history">🕘 File History</div>
     <div class="ctx-separator"></div>
     <div class="ctx-item" data-action="open-terminal">💻 Open in Terminal</div>
+    <div class="ctx-separator sf-ctx-sep"></div>
+    <div class="ctx-item sf-ctx-item" data-action="sf-flow-viz">🔀 Salesforce: Flow Visualizer</div>
+    <div class="ctx-item sf-ctx-item" data-action="sf-impact">💥 Salesforce: Impact Analysis</div>
+    <div class="ctx-item sf-ctx-item" data-action="sf-api-view">🔌 Salesforce: API View</div>
+    <div class="ctx-item sf-ctx-item" data-action="sf-test-runner">🧪 Salesforce: Test Runner</div>
+    <div class="ctx-item sf-ctx-item" data-action="sf-deploy-file">🚀 Salesforce: Deploy to Org</div>
   </div>
 
   <!-- Context menu (tab bar) -->
@@ -435,6 +457,45 @@
     <div class="ctx-item" data-action="tab-open-terminal">💻 Open in Terminal</div>
     <div class="ctx-separator"></div>
     <div class="ctx-item ctx-item-danger" data-action="tab-delete">🗑️ Delete File</div>
+    <div class="ctx-separator sf-tab-ctx-sep"></div>
+    <div class="ctx-item sf-tab-ctx-item" data-action="tab-sf-flow-viz">🔀 Salesforce: Flow Visualizer</div>
+    <div class="ctx-item sf-tab-ctx-item" data-action="tab-sf-impact">💥 Salesforce: Impact Analysis</div>
+    <div class="ctx-item sf-tab-ctx-item" data-action="tab-sf-deploy">🚀 Salesforce: Deploy to Org</div>
+  </div>
+
+  <!-- Salesforce editor submenu -->
+  <div id="sf-editor-submenu" class="context-menu sf-editor-submenu hidden">
+    <div class="sf-submenu-header">⚡ Salesforce</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-sf-action="sf-flow-viz">🔀 Flow Visualizer</div>
+    <div class="ctx-item" data-sf-action="sf-impact">💥 Impact Analysis</div>
+    <div class="ctx-item" data-sf-action="sf-api-view">🔌 API View</div>
+    <div class="ctx-item" data-sf-action="sf-test-runner">🧪 Test Runner</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-sf-action="sf-deploy-file">🚀 Deploy to Org</div>
+  </div>
+
+  <!-- Rich text context menu (right-click in rich text editor) -->
+  <div id="richtext-context-menu" class="context-menu hidden">
+    <div class="ctx-item" data-rt-action="rt-cut">✂️ Cut</div>
+    <div class="ctx-item" data-rt-action="rt-copy">📋 Copy</div>
+    <div class="ctx-item" data-rt-action="rt-paste">📝 Paste</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-rt-action="rt-select-all">Select All</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-rt-action="rt-bold"><b>B</b> Bold</div>
+    <div class="ctx-item" data-rt-action="rt-italic"><i>I</i> Italic</div>
+    <div class="ctx-item" data-rt-action="rt-underline"><u>U</u> Underline</div>
+    <div class="ctx-item" data-rt-action="rt-strikethrough"><s>S</s> Strikethrough</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-rt-action="rt-unordered-list">• Bullet List</div>
+    <div class="ctx-item" data-rt-action="rt-ordered-list">1. Numbered List</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-rt-action="rt-align-left">⫷ Align Left</div>
+    <div class="ctx-item" data-rt-action="rt-align-center">⫿ Align Center</div>
+    <div class="ctx-item" data-rt-action="rt-align-right">⫸ Align Right</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-rt-action="rt-clear-format">🧹 Clear Formatting</div>
   </div>
 
   <!-- Welcome screen (full-screen overlay — shown before any folder/file is opened) -->
@@ -572,6 +633,8 @@
         <input id="api-url" class="api-url" type="text" placeholder="https://api.example.com/endpoint" spellcheck="false" />
         <button id="btn-api-send" class="api-send-btn">Send</button>
         <button id="btn-api-save" class="api-save-btn" title="Save to Collection">💾</button>
+        <button id="btn-api-curl-import" class="api-save-btn" title="Import cURL">⬆ cURL</button>
+        <button id="btn-api-curl-copy" class="api-save-btn" title="Copy as cURL">📋</button>
       </div>
       <!-- Request tabs -->
       <div class="api-tabs">
@@ -655,6 +718,45 @@
         </div>
       </div>
       <div id="api-collections-list" class="api-collections-list"></div>
+    </div>
+  </div>
+
+  <!-- Generic Input Dialog (replaces blocked prompt/confirm) -->
+  <div id="input-dialog-overlay" class="modal-overlay hidden" style="align-items:flex-start;padding-top:20vh;">
+    <div class="curl-import-modal" style="width:400px;">
+      <div class="curl-import-header" style="padding:8px 14px;">
+        <span id="input-dialog-title" class="curl-import-title">Input</span>
+        <button id="btn-input-dialog-close" class="tool-hdr-btn">✕</button>
+      </div>
+      <div class="curl-import-body" style="padding:10px 14px;">
+        <p id="input-dialog-message" class="curl-import-hint" style="margin-bottom:6px;"></p>
+        <input id="input-dialog-input" type="text" class="api-url" style="width:100%;margin-top:2px;padding:6px 8px;" spellcheck="false" />
+      </div>
+      <div class="curl-import-footer" style="padding:8px 14px;">
+        <button id="btn-input-dialog-cancel" class="curl-import-btn curl-import-cancel">Cancel</button>
+        <button id="btn-input-dialog-ok" class="curl-import-btn curl-import-apply">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- cURL Import Modal -->
+  <div id="curl-import-overlay" class="modal-overlay hidden" style="align-items:flex-start;padding-top:20vh;">
+    <div class="curl-import-modal">
+      <div class="curl-import-header">
+        <span class="curl-import-title">⬆ Import cURL</span>
+        <button id="btn-curl-import-close" class="tool-hdr-btn">✕</button>
+      </div>
+      <div class="curl-import-body">
+        <p class="curl-import-hint">Paste your cURL command below. It will auto-populate the method, URL, headers, auth, and body.</p>
+        <textarea id="curl-import-input" class="curl-import-textarea" placeholder='curl -X POST "https://api.example.com/data" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '\''{"key": "value"}'\''' spellcheck="false"></textarea>
+      </div>
+      <div class="curl-import-footer">
+        <button id="btn-curl-import-cancel" class="curl-import-btn curl-import-cancel">Cancel</button>
+        <button id="btn-curl-import-apply" class="curl-import-btn curl-import-apply">Import</button>
+      </div>
     </div>
   </div>
 
@@ -890,6 +992,7 @@
           <button class="todo-filter-btn" data-filter="HACK">HACK</button>
           <button class="todo-filter-btn" data-filter="BUG">BUG</button>
           <button class="todo-filter-btn" data-filter="NOTE">NOTE</button>
+          <button class="todo-filter-btn" data-filter="DEBUG">DEBUG</button>
         </div>
         <div id="todo-list" class="todo-list"></div>
         <!-- Inline code preview -->
@@ -962,6 +1065,275 @@
     </div>
   </div>
 
+  <!-- Salesforce Panel -->
+  <div id="salesforce-panel" class="tool-panel hidden">
+    <div class="tool-panel-header">
+      <span class="tool-panel-title">⚡ Salesforce</span>
+      <div class="sf-tab-bar">
+        <button class="sf-tab active" data-tab="sf-api">API View</button>
+        <button class="sf-tab" data-tab="sf-tests">Test Runner</button>
+        <button class="sf-tab" data-tab="sf-flow">Flow Viz</button>
+        <button class="sf-tab" data-tab="sf-impact">Impact</button>
+        <button class="sf-tab" data-tab="sf-deploy">Deploy</button>
+      </div>
+      <div class="tool-panel-actions">
+        <button id="btn-sf-close" class="tool-hdr-btn">✕</button>
+      </div>
+    </div>
+    <!-- Org selector (shared across all tabs) -->
+    <div class="sf-org-status" id="sf-org-status">
+      <span class="sf-org-dot" id="sf-org-dot"></span>
+      <select id="sf-org-select" class="sf-org-select" title="Select target org">
+        <option value="">Checking orgs...</option>
+      </select>
+      <span id="sf-org-label" class="sf-org-detail"></span>
+      <button id="sf-org-refresh" class="tool-hdr-btn" title="Refresh org list">⟳</button>
+      <button id="sf-org-login" class="sf-btn-login" title="Authenticate new org">+ Add Org</button>
+    </div>
+
+    <!-- Sub-tab: Quick API View -->
+    <div id="sf-api" class="sf-tab-content active">
+      <div class="sf-toolbar">
+        <button id="sf-api-scan" class="sf-btn sf-btn-primary">⚡ Scan Endpoints</button>
+        <select id="sf-api-filter" class="sf-select">
+          <option value="all">All Types</option>
+          <option value="rest">REST (@RestResource)</option>
+          <option value="aura">Aura (@AuraEnabled)</option>
+          <option value="soap">SOAP (webService)</option>
+          <option value="remote">VF Remote (@RemoteAction)</option>
+          <option value="invocable">Invocable (@InvocableMethod)</option>
+        </select>
+        <input id="sf-api-search" class="sf-input" type="text" placeholder="Search endpoints..." spellcheck="false" />
+      </div>
+      <div id="sf-api-results" class="sf-results">
+        <div class="sf-empty">Open a Salesforce project folder, then click <strong>Scan Endpoints</strong> to discover API endpoints.</div>
+      </div>
+      <!-- Endpoint detail / test pane -->
+      <div id="sf-api-detail" class="sf-detail hidden">
+        <div class="sf-detail-header">
+          <span id="sf-api-detail-title" class="sf-detail-title"></span>
+          <button id="sf-api-detail-close" class="tool-hdr-btn">✕</button>
+        </div>
+        <div class="sf-detail-body">
+          <div class="sf-detail-meta" id="sf-api-detail-meta"></div>
+          <div class="sf-detail-params">
+            <div class="sf-detail-label">Parameters</div>
+            <div id="sf-api-params-list" class="sf-params-list"></div>
+          </div>
+          <div class="sf-detail-actions">
+            <button id="sf-api-test-btn" class="sf-btn sf-btn-accent">▶ Test Endpoint</button>
+          </div>
+          <div id="sf-api-test-output" class="sf-test-output hidden"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sub-tab: Apex Test Runner -->
+    <div id="sf-tests" class="sf-tab-content">
+      <div class="sf-toolbar">
+        <button id="sf-tests-scan" class="sf-btn sf-btn-primary">🔍 Scan Test Classes</button>
+        <button id="sf-tests-run-all" class="sf-btn sf-btn-accent" disabled>▶ Run All Tests</button>
+        <input id="sf-tests-search" class="sf-input" type="text" placeholder="Filter tests..." spellcheck="false" />
+        <span id="sf-tests-summary" class="sf-summary"></span>
+      </div>
+      <div class="sf-tests-split">
+        <div id="sf-tests-results" class="sf-results">
+          <div class="sf-empty">Scan your project to discover <code>@isTest</code> classes and their test methods.</div>
+        </div>
+        <div id="sf-tests-console" class="sf-console">
+          <div class="sf-console-header">
+            <span class="sf-console-title">⏵ Output Console</span>
+            <button id="sf-console-clear" class="tool-hdr-btn" title="Clear">⌫</button>
+          </div>
+          <div id="sf-console-log" class="sf-console-log">
+            <div class="sf-console-line sf-console-dim">Waiting for test execution...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sub-tab: Process Flow Visualizer -->
+    <div id="sf-flow" class="sf-tab-content">
+      <div class="sf-toolbar">
+        <button id="sf-flow-generate" class="sf-btn sf-btn-primary">🔄 Generate Flow</button>
+        <button id="sf-flow-pick-file" class="sf-btn">📂 Select File</button>
+        <span id="sf-flow-filename" class="sf-flow-filename">No file selected</span>
+      </div>
+      <div class="sf-flow-body">
+        <div id="sf-flow-canvas" class="sf-flow-canvas">
+          <div class="sf-empty">Click <strong>Select File</strong> to pick an Apex class or trigger, then click <strong>Generate Flow</strong>.</div>
+        </div>
+        <div id="sf-flow-detail" class="sf-flow-detail hidden">
+          <div class="sf-detail-resizer" data-panel="sf-flow-detail"></div>
+          <div class="sf-flow-detail-header">
+            <span class="sf-flow-detail-title">Node Details</span>
+            <button id="sf-flow-detail-close" class="sf-flow-detail-close">✕</button>
+          </div>
+          <div id="sf-flow-detail-body" class="sf-flow-detail-body"></div>
+        </div>
+      </div>
+      <div class="sf-flow-legend">
+        <span class="sf-flow-legend-item"><span class="sf-flow-dot entry"></span>Entry</span>
+        <span class="sf-flow-legend-item"><span class="sf-flow-dot method"></span>Method</span>
+        <span class="sf-flow-legend-item"><span class="sf-flow-dot condition"></span>Condition</span>
+        <span class="sf-flow-legend-item"><span class="sf-flow-dot loop"></span>Loop</span>
+        <span class="sf-flow-legend-item"><span class="sf-flow-dot query"></span>SOQL</span>
+        <span class="sf-flow-legend-item"><span class="sf-flow-dot dml"></span>DML</span>
+        <span class="sf-flow-legend-item"><span class="sf-flow-dot exit"></span>Return</span>
+      </div>
+    </div>
+
+    <!-- Sub-tab: Change Impact Analyzer -->
+    <div id="sf-impact" class="sf-tab-content">
+      <div class="sf-toolbar">
+        <button id="sf-impact-analyze" class="sf-btn sf-btn-primary">🔍 Analyze Impact</button>
+        <select id="sf-impact-scope" class="sf-select">
+          <option value="current">Current File</option>
+          <option value="modified">Modified Files (Git)</option>
+        </select>
+        <span id="sf-impact-summary" class="sf-summary"></span>
+      </div>
+      <div class="sf-impact-body">
+        <div id="sf-impact-results" class="sf-impact-list">
+          <div class="sf-empty">Analyze which classes, triggers, and tests are affected by your changes.</div>
+        </div>
+        <div id="sf-impact-detail" class="sf-impact-detail hidden">
+          <div class="sf-detail-resizer" data-panel="sf-impact-detail"></div>
+          <div class="sf-impact-detail-header">
+            <span id="sf-impact-detail-title" class="sf-impact-detail-title"></span>
+            <button id="sf-impact-detail-close" class="tool-hdr-btn">✕</button>
+          </div>
+          <div id="sf-impact-detail-body" class="sf-impact-detail-body"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sub-tab: Deployment Simulator -->
+    <div id="sf-deploy" class="sf-tab-content">
+      <div class="sf-toolbar">
+        <button id="sf-deploy-simulate" class="sf-btn sf-btn-primary">� Validate</button>
+        <button id="sf-deploy-run" class="sf-btn sf-btn-accent">🚀 Deploy to Org</button>
+        <select id="sf-deploy-scope" class="sf-select">
+          <option value="all">All Metadata</option>
+          <option value="modified">Modified Only (Git)</option>
+        </select>
+        <span id="sf-deploy-summary" class="sf-summary"></span>
+      </div>
+      <div id="sf-deploy-results" class="sf-results">
+        <div class="sf-empty">Validate checks for issues before deploying. Deploy pushes metadata to your org via Salesforce CLI.</div>
+      </div>
+      <div id="sf-deploy-log" class="sf-deploy-log hidden"></div>
+    </div>
+  </div>
+
+  <!-- Run Menu Dropdown -->
+  <div id="run-menu" class="run-menu hidden">
+    <button class="run-menu-item" data-action="run-tests">▶ Run Tests</button>
+    <button class="run-menu-item" data-action="run-current-test">▶ Run Current Test</button>
+    <div class="titlebar-kebab-sep"></div>
+    <button class="run-menu-item" data-action="deploy-validate">🔍 Validate Deployment</button>
+    <button class="run-menu-item" data-action="deploy-run">🚀 Deploy to Org</button>
+    <div class="titlebar-kebab-sep"></div>
+    <button class="run-menu-item" data-action="scan-all">⚡ Full Project Scan</button>
+  </div>
+
+  <!-- ============ APEX DEBUGGER ============ -->
+
+  <!-- Debug Toolbar (floating bar, shown during debug session) -->
+  <div id="debug-toolbar" class="debug-toolbar hidden">
+    <span class="dbg-toolbar-label">DEBUGGING</span>
+    <div class="dbg-toolbar-buttons">
+      <button id="dbg-btn-continue" class="dbg-toolbar-btn" title="Continue (F5)">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,2 14,8 3,14"/></svg>
+      </button>
+      <button id="dbg-btn-step-over" class="dbg-toolbar-btn" title="Step Over (F10)">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="10" r="3"/><path d="M3 4h5a3 3 0 013 3"/><polyline points="8,2 11,4 8,6"/></svg>
+      </button>
+      <button id="dbg-btn-step-into" class="dbg-toolbar-btn" title="Step Into (F11)">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="12" r="2"/><line x1="8" y1="2" x2="8" y2="8"/><polyline points="5,6 8,9 11,6"/></svg>
+      </button>
+      <button id="dbg-btn-step-out" class="dbg-toolbar-btn" title="Step Out (⇧F11)">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="12" r="2"/><line x1="8" y1="8" x2="8" y2="2"/><polyline points="5,5 8,2 11,5"/></svg>
+      </button>
+      <button id="dbg-btn-restart" class="dbg-toolbar-btn" title="Restart (⇧⌘F5)">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 8a5 5 0 019.5-2"/><path d="M13 8a5 5 0 01-9.5 2"/><polyline points="12,3 13,6 10,6"/></svg>
+      </button>
+      <button id="dbg-btn-stop" class="dbg-toolbar-btn dbg-btn-stop" title="Stop (⇧F5)">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Debug Bottom Panel (Variables, Call Stack, Console, Breakpoints) -->
+  <div id="debug-panel" class="debug-panel hidden">
+    <div id="debug-panel-resizer" class="debug-panel-resizer"></div>
+    <div class="dbg-panel-header">
+      <div class="dbg-panel-tabs">
+        <button class="dbg-panel-tab active" data-tab="dbg-variables">Variables</button>
+        <button class="dbg-panel-tab" data-tab="dbg-watch">Watch</button>
+        <button class="dbg-panel-tab" data-tab="dbg-callstack">Call Stack</button>
+        <button class="dbg-panel-tab" data-tab="dbg-console">Console</button>
+        <button class="dbg-panel-tab" data-tab="dbg-breakpoints">Breakpoints</button>
+      </div>
+      <div class="dbg-panel-actions">
+        <button id="dbg-console-clear" class="tool-hdr-btn" title="Clear Console">⌫</button>
+      </div>
+    </div>
+    <div class="dbg-panel-body">
+      <div id="dbg-variables" class="dbg-tab-content active">
+        <div id="dbg-variables-body" class="dbg-scroll-body">
+          <div class="dbg-empty">No debug session active</div>
+        </div>
+      </div>
+      <div id="dbg-watch" class="dbg-tab-content">
+        <div id="dbg-watch-body" class="dbg-scroll-body">
+          <div class="dbg-empty">No watch expressions</div>
+        </div>
+        <div class="dbg-watch-input-row">
+          <span class="dbg-watch-icon">👁</span>
+          <input type="text" id="dbg-watch-input" class="dbg-watch-input" placeholder="Add watch expression…" spellcheck="false" autocomplete="off" />
+        </div>
+      </div>
+      <div id="dbg-callstack" class="dbg-tab-content">
+        <div id="dbg-callstack-body" class="dbg-scroll-body">
+          <div class="dbg-empty">No active call stack</div>
+        </div>
+      </div>
+      <div id="dbg-console" class="dbg-tab-content">
+        <div id="dbg-console-body" class="dbg-scroll-body">
+          <div class="dbg-empty">Debug console</div>
+        </div>
+        <div class="dbg-console-input-row">
+          <span class="dbg-console-prompt">&gt;</span>
+          <input type="text" id="dbg-console-input" class="dbg-console-input" placeholder="Evaluate expression…  e.g. request.cartId" spellcheck="false" autocomplete="off" />
+        </div>
+      </div>
+      <div id="dbg-breakpoints" class="dbg-tab-content">
+        <div id="dbg-breakpoints-body" class="dbg-scroll-body">
+          <div class="dbg-empty">No breakpoints set</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Debug Request Input Modal -->
+  <div id="debug-request-modal" class="modal-overlay hidden">
+    <div class="dbg-request-modal">
+      <div class="dbg-modal-header">
+        <span id="dbg-modal-title" class="dbg-modal-title">Debug Method</span>
+        <button id="dbg-modal-close" class="tool-hdr-btn">✕</button>
+      </div>
+      <div class="dbg-modal-body">
+        <div class="dbg-modal-info">Paste the raw API request JSON (VF Remoting, REST, or raw parameter object):</div>
+        <div id="dbg-request-editor" class="dbg-request-editor"></div>
+      </div>
+      <div class="dbg-modal-footer">
+        <button id="dbg-modal-cancel" class="sf-btn">Cancel</button>
+        <button id="dbg-modal-start" class="sf-btn sf-btn-accent">▶ Start Debugging</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast notifications container -->
   <div id="toast-container" class="toast-container"></div>
 
@@ -972,5 +1344,7 @@
   <script src="modules/todotracker.js"></script>
   <script src="modules/pomodoro.js"></script>
   <script src="modules/diffchecker.js"></script>
+  <script src="modules/salesforce.js"></script>
+  <script src="modules/apexdebugger.js"></script>
 </body>
 </html>

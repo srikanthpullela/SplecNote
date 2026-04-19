@@ -389,6 +389,7 @@ function buildMenu() {
         { label: 'Find in Files', accelerator: 'CmdOrCtrl+Shift+F', click: () => sendToFocused('edit:find-in-files') },
         { label: 'Replace', accelerator: 'CmdOrCtrl+H', click: () => sendToFocused('edit:replace') },
         { type: 'separator' },
+        { label: 'Spotlight Search', accelerator: 'CmdOrCtrl+Shift+Space', click: () => sendToFocused('edit:spotlight-search') },
         { label: 'Go to Line…', accelerator: 'CmdOrCtrl+G', click: () => sendToFocused('edit:goto-line') },
         { label: 'Go to File…', accelerator: 'CmdOrCtrl+P', click: () => sendToFocused('edit:quick-open') },
         { label: 'Command Palette…', accelerator: 'CmdOrCtrl+Shift+P', click: () => sendToFocused('edit:command-palette') },
@@ -445,6 +446,11 @@ function buildMenu() {
         { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => sendToFocused('view:zoom-in') },
         { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => sendToFocused('view:zoom-out') },
         { label: 'Reset Zoom', accelerator: 'CmdOrCtrl+0', click: () => sendToFocused('view:zoom-reset') },
+        { type: 'separator' },
+        { label: 'Reload Window', accelerator: 'CmdOrCtrl+Shift+R', click: () => {
+          const win = BrowserWindow.getFocusedWindow();
+          if (win) win.webContents.reloadIgnoringCache();
+        }},
         { type: 'separator' },
         { role: 'togglefullscreen' },
         { role: 'toggleDevTools' },
@@ -1093,6 +1099,166 @@ ipcMain.handle('terminal:set-cwd', async (_e, cwd) => {
 });
 
 // ---------------------------------------------------------------------------
+// Salesforce CLI helpers — execute commands and return captured output
+// ---------------------------------------------------------------------------
+ipcMain.handle('sf:exec', async (_e, command, cwd, timeoutMs) => {
+  const timeout = timeoutMs || 120000;
+  const isLoginCmd = /\borg\s+login\s+web\b/.test(command);
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let resolved = false;
+    const done = (result) => { if (!resolved) { resolved = true; resolve(result); } };
+
+    // For login commands: don't suppress output/color, allow browser opening
+    const env = isLoginCmd
+      ? { ...process.env, BROWSER: process.env.BROWSER || '' }
+      : { ...process.env, TERM: 'dumb', CLICOLOR: '0', NO_COLOR: '1', SF_JSON_RESULT: '1' };
+
+    const proc = spawn('/bin/zsh', ['-l', '-c', command], {
+      cwd: cwd || os.homedir(),
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    proc.stdout.on('data', (chunk) => {
+      const text = chunk.toString();
+      stdout += text;
+      // For login: detect the auth URL and open it in the default browser
+      if (isLoginCmd) {
+        const urlMatch = text.match(/(https?:\/\/[^\s]+login[^\s]*)/i)
+          || text.match(/(https?:\/\/localhost:\d+[^\s]*)/i)
+          || text.match(/(https?:\/\/[^\s]+)/i);
+        if (urlMatch && urlMatch[1]) {
+          shell.openExternal(urlMatch[1]).catch(() => {});
+        }
+      }
+    });
+    proc.stderr.on('data', (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      // Also check stderr for URLs (some CLI versions print there)
+      if (isLoginCmd) {
+        const urlMatch = text.match(/(https?:\/\/[^\s]+login[^\s]*)/i)
+          || text.match(/(https?:\/\/localhost:\d+[^\s]*)/i)
+          || text.match(/(https?:\/\/[^\s]+)/i);
+        if (urlMatch && urlMatch[1]) {
+          shell.openExternal(urlMatch[1]).catch(() => {});
+        }
+      }
+    });
+    proc.on('close', (code) => {
+      done({ code, stdout, stderr });
+    });
+    proc.on('error', (err) => {
+      done({ code: 1, stdout, stderr: err.message });
+    });
+    setTimeout(() => {
+      if (!resolved && proc && !proc.killed) {
+        proc.kill('SIGTERM');
+        done({ code: 137, stdout, stderr: 'Command timed out' });
+      }
+    }, timeout);
+  });
+});
+
+ipcMain.handle('sf:check-cli', async () => {
+  try {
+    const { execSync } = require('child_process');
+    const version = execSync('/bin/zsh -l -c "sf --version 2>/dev/null || sfdx --version 2>/dev/null"', {
+      timeout: 10000, encoding: 'utf8',
+    }).trim();
+    return { installed: true, version };
+  } catch {
+    return { installed: false, version: null };
+  }
+});
+
+ipcMain.handle('sf:org-info', async (_e, cwd) => {
+  try {
+    const { execSync } = require('child_process');
+    const result = execSync('/bin/zsh -l -c "sf org display --json 2>/dev/null"', {
+      timeout: 15000, encoding: 'utf8', cwd: cwd || os.homedir(),
+    });
+    const json = JSON.parse(result);
+    if (json.status === 0 && json.result) {
+      return {
+        connected: true,
+        username: json.result.username,
+        orgId: json.result.id,
+        instanceUrl: json.result.instanceUrl,
+        alias: json.result.alias || null,
+        apiVersion: json.result.apiVersion || null,
+      };
+    }
+    return { connected: false };
+  } catch {
+    return { connected: false };
+  }
+});
+
+ipcMain.handle('sf:org-list', async (_e, cwd) => {
+  try {
+    const { exec, execSync } = require('child_process');
+    const effectiveCwd = cwd || os.homedir();
+    // Use 'sf org list auth' — reads local auth files only, takes ~1-2s
+    // vs 'sf org list' which contacts every org and takes 30-60s
+    const result = await new Promise((resolve, reject) => {
+      exec('/bin/zsh -l -c "sf org list auth --json 2>/dev/null"', {
+        timeout: 15000, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024,
+        cwd: effectiveCwd,
+      }, (err, stdout) => {
+        if (err && !stdout) return reject(err);
+        resolve(stdout);
+      });
+    });
+    const json = JSON.parse(result);
+    // sf org list auth returns a flat array in result
+    const rawList = Array.isArray(json.result) ? json.result : [];
+    const seen = new Set();
+    const orgs = [];
+    for (const o of rawList) {
+      const u = o.username || '';
+      if (!u || seen.has(u)) continue;
+      seen.add(u);
+      const hasError = !!(o.error);
+      orgs.push({
+        username: u,
+        alias: o.alias || '',
+        orgId: o.orgId || '',
+        instanceUrl: o.instanceUrl || '',
+        isDefault: false,
+        connectedStatus: hasError ? 'AuthError' : 'Connected',
+        type: 'auth',
+      });
+    }
+    // Get default org from project-local or global config
+    let defaultUsername = null;
+    try {
+      const dResult = execSync('/bin/zsh -l -c "sf config get target-org --json 2>/dev/null"', {
+        timeout: 5000, encoding: 'utf8', cwd: effectiveCwd,
+      });
+      const dJson = JSON.parse(dResult);
+      if (dJson.result && dJson.result[0] && dJson.result[0].value) {
+        defaultUsername = dJson.result[0].value;
+      }
+    } catch { /* no default set */ }
+    if (defaultUsername) {
+      const dl = defaultUsername.toLowerCase();
+      for (const o of orgs) {
+        if (o.username.toLowerCase() === dl || o.alias.toLowerCase() === dl
+          || o.alias.toLowerCase().split(',').some(a => a.trim() === dl)) {
+          o.isDefault = true;
+        }
+      }
+    }
+    return { orgs };
+  } catch {
+    return { orgs: [] };
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
 const DEFAULT_SETTINGS = {
@@ -1320,11 +1486,13 @@ ipcMain.handle('todos:scan', async (e, folderPath) => {
   const { execFile } = require('child_process');
   // Strong tags: always matched anywhere (they're unambiguous as comment markers)
   // Weak tags: NOTE, WARN — only matched when inside comments
-  const STRONG_TAGS = ['TODO', 'FIXME', 'HACK', 'BUG', 'XXX', 'TO-DO'];
+  const STRONG_TAGS = ['TODO', 'FIXME', 'HACK', 'BUG', 'XXX', 'TO-DO', 'DEBUG'];
   const WEAK_TAGS = ['NOTE', 'WARN'];
   const ALL_TAGS = [...STRONG_TAGS, ...WEAK_TAGS];
+  // Also match System.debug() calls in Apex files
+  const SF_PATTERN = 'System\\.debug\\s*\\(';
   // Pattern matches any of these tags (case-insensitive) — filtering happens post-match
-  const pattern = `(${ALL_TAGS.join('|')})[\\s:;\\-]*`;
+  const pattern = `(${ALL_TAGS.join('|')})[\\s:;\\-]*|${SF_PATTERN}`;
   // Regex to detect if a line is inside a comment
   const commentPrefixRegex = /^\s*(\/\/|\/\*+|<!--|\*|#|--|%|@|;|REM\b)/i;
 
@@ -1351,12 +1519,14 @@ ipcMain.handle('todos:scan', async (e, folderPath) => {
          '--include=*.json', '--include=*.yaml', '--include=*.yml',
          '--include=*.md', '--include=*.sh', '--include=*.bash',
          '--include=*.sql', '--include=*.xml',
+         '--include=*.cls', '--include=*.trigger',
          folderPath];
     execFile(cmd, args, { timeout: 15000, maxBuffer: 1024 * 1024 * 10 }, (err, stdout) => {
       if (!stdout) { resolve({ items: [] }); return; }
       const items = [];
       const lines = stdout.split('\n');
       const tagRegex = new RegExp(`\\b(${ALL_TAGS.join('|')})[\\s:;\\-]*(.*)`, 'i');
+      const sfDebugRegex = /\bSystem\.debug\s*\(/i;
       const weakSet = new Set(WEAK_TAGS.map(t => t.toLowerCase()));
       for (const line of lines) {
         const m = line.match(/^(.+?):(\d+):(.*)$/);
@@ -1364,6 +1534,17 @@ ipcMain.handle('todos:scan', async (e, folderPath) => {
         const filePath = m[1];
         const lineNum = parseInt(m[2], 10);
         const text = m[3];
+        // Check for System.debug() calls
+        if (sfDebugRegex.test(text)) {
+          items.push({
+            tag: 'DEBUG',
+            text: text.trim().replace(/^.*System\.debug\s*\(/i, 'System.debug(').replace(/;\s*$/, ''),
+            file: require('path').basename(filePath),
+            filePath,
+            line: lineNum,
+          });
+          continue;
+        }
         const tagMatch = text.match(tagRegex);
         if (!tagMatch) continue;
         const rawTag = tagMatch[1].toUpperCase().replace('-', '');

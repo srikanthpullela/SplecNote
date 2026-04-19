@@ -9,7 +9,7 @@
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => [...document.querySelectorAll(s)];
 
-  const TAGS = ['TODO', 'FIXME', 'HACK', 'BUG', 'NOTE', 'XXX', 'WARN'];
+  const TAGS = ['TODO', 'FIXME', 'HACK', 'BUG', 'NOTE', 'XXX', 'WARN', 'DEBUG'];
   const TAG_COLORS = {
     'TODO': '#3498db',
     'FIXME': '#e74c3c',
@@ -19,6 +19,7 @@
     'XXX': '#9b59b6',
     'WARN': '#f39c12',
     'TO-DO': '#3498db',
+    'DEBUG': '#ff6b35',
   };
 
   let todoItems = [];
@@ -75,7 +76,9 @@
     for (const tab of state.tabs) {
       const text = tab.model.getValue();
       const lines = text.split('\n');
+      const isApex = tab.filePath && (tab.filePath.endsWith('.cls') || tab.filePath.endsWith('.trigger'));
       lines.forEach((line, i) => {
+        // Standard TODO/FIXME tags
         const lineRegex = new RegExp(`\\b(${TAGS.join('|')})[:\\s](.*)`, 'gi');
         let m;
         while ((m = lineRegex.exec(line)) !== null) {
@@ -86,6 +89,18 @@
             filePath: tab.filePath || tab.title,
             line: i + 1,
           });
+        }
+        // Salesforce debug items in Apex files
+        if (isApex) {
+          if (/\bSystem\.debug\s*\(/i.test(line)) {
+            todoItems.push({
+              tag: 'DEBUG',
+              text: line.trim().replace(/^.*System\.debug\s*\(/i, 'System.debug(').replace(/;\s*$/, ''),
+              file: tab.title,
+              filePath: tab.filePath || tab.title,
+              line: i + 1,
+            });
+          }
         }
       });
     }

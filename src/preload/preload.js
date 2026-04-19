@@ -65,6 +65,12 @@ contextBridge.exposeInMainWorld('congacode', {
   terminalKill: () => ipcRenderer.invoke('terminal:kill'),
   terminalSetCwd: (cwd) => ipcRenderer.invoke('terminal:set-cwd', cwd),
 
+  // Salesforce CLI
+  sfExec: (command, cwd, timeoutMs) => ipcRenderer.invoke('sf:exec', command, cwd, timeoutMs),
+  sfCheckCli: () => ipcRenderer.invoke('sf:check-cli'),
+  sfOrgInfo: (cwd) => ipcRenderer.invoke('sf:org-info', cwd),
+  sfOrgList: (cwd) => ipcRenderer.invoke('sf:org-list', cwd),
+
   // Settings
   readSettings: () => ipcRenderer.invoke('settings:read'),
   writeSettings: (s) => ipcRenderer.invoke('settings:write', s),
@@ -104,6 +110,7 @@ contextBridge.exposeInMainWorld('congacode', {
       'view:bookmarks', 'view:screenshot', 'view:db-client',
       'view:snippets', 'view:color-picker', 'view:todo-tracker', 'view:pomodoro',
       'view:diff-checker',
+      'view:salesforce',
       'selection:select-all', 'selection:expand', 'selection:duplicate-line',
       'selection:move-line-up', 'selection:move-line-down',
       'selection:cursor-above', 'selection:cursor-below',
