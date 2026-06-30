@@ -1,0 +1,360 @@
+/* ===========================================================================
+   Splec Note — design system & app chrome
+   Light is the default theme; dark uses the #06070d Splec canvas.
+   =========================================================================== */
+
+@import "./fonts.css";
+
+/* ---- Design tokens --------------------------------------------------------- */
+:root {
+  /* Brand */
+  --splec-accent: #7c5cff;
+  --splec-accent-strong: #6a48f5;
+  --splec-periwinkle: #9db4ff;
+  --splec-gradient: linear-gradient(135deg, #9db4ff 0%, #7c5cff 100%);
+
+  /* Typography */
+  --font-script: "Dancing Script", "Segoe Script", cursive;
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code",
+    Menlo, Consolas, monospace;
+
+  /* Radii & depth */
+  --radius-lg: 16px;
+  --radius-md: 12px;
+  --radius-sm: 9px;
+
+  /* Light theme (default) */
+  --bg-app: #f4f2fb;
+  --bg-app-2: #ece8f8;
+  --bg-panel: #ffffff;
+  --bg-editor: #ffffff;
+  --bg-tab: #ffffff;
+  --bg-tab-inactive: transparent;
+  --bg-elevated: #ffffff;
+  --bg-hover: rgba(124, 92, 255, 0.08);
+
+  --text-strong: #1c1830;
+  --text: #2c2740;
+  --text-muted: #6b6680;
+  --text-faint: #9a95ad;
+
+  --border: #e6e1f2;
+  --border-strong: #d8d1ec;
+
+  --shadow-sm: 0 1px 2px rgba(28, 24, 48, 0.06);
+  --shadow-md: 0 6px 20px rgba(46, 35, 92, 0.10);
+  --shadow-lg: 0 18px 50px rgba(46, 35, 92, 0.16);
+
+  --titlebar-h: 52px;
+  --statusbar-h: 30px;
+
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg-app: #06070d; /* the Splec canvas */
+  --bg-app-2: #090b14;
+  --bg-panel: #0f1220;
+  --bg-editor: #0b0d16;
+  --bg-tab: #141826;
+  --bg-tab-inactive: transparent;
+  --bg-elevated: #141826;
+  --bg-hover: rgba(157, 180, 255, 0.10);
+
+  --text-strong: #f1f0f8;
+  --text: #e7e6f0;
+  --text-muted: #9a96b3;
+  --text-faint: #6b6788;
+
+  --border: #1b1e2e;
+  --border-strong: #262a3d;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.55);
+
+  --splec-accent: #8e72ff;
+
+  color-scheme: dark;
+}
+
+/* ---- Reset ----------------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-ui);
+  color: var(--text);
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+/* ---- App shell ------------------------------------------------------------- */
+.app {
+  display: grid;
+  grid-template-rows: var(--titlebar-h) auto 1fr var(--statusbar-h);
+  height: 100vh;
+  background:
+    radial-gradient(1200px 600px at 100% -10%, var(--bg-app-2), transparent 60%),
+    var(--bg-app);
+}
+
+/* ---- Title bar ------------------------------------------------------------- */
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  height: var(--titlebar-h);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.titlebar button,
+.titlebar select {
+  -webkit-app-region: no-drag;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 4px;
+  border-radius: 9px;
+  background: linear-gradient(160deg, #10131f 0%, #06070d 100%);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px rgba(157, 180, 255, 0.18);
+}
+
+.brand-mark svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  line-height: 1;
+}
+
+.wordmark-splec {
+  font-family: var(--font-script);
+  font-weight: 700;
+  font-size: 26px;
+  background: var(--splec-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  padding-right: 1px;
+}
+
+.wordmark-note {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: 0.2px;
+  color: var(--text-strong);
+}
+
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---- Buttons --------------------------------------------------------------- */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.12s ease, border-color 0.16s ease,
+    background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.icon-btn:hover {
+  border-color: var(--splec-accent);
+  background: var(--bg-hover);
+}
+
+.icon-btn:active {
+  transform: translateY(1px);
+}
+
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+  stroke: var(--splec-accent);
+}
+
+.icon-slot {
+  display: inline-flex;
+}
+
+/* ---- Tab strip ------------------------------------------------------------- */
+.tabstrip {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 0 16px;
+  height: 40px;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: var(--bg-tab-inactive);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: default;
+}
+
+.tab.is-active {
+  background: var(--bg-editor);
+  color: var(--text-strong);
+  box-shadow: 0 -2px 0 0 var(--splec-accent) inset;
+}
+
+.tab-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--splec-gradient);
+  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.16);
+}
+
+/* ---- Editor surface -------------------------------------------------------- */
+.editor-wrap {
+  margin: 0 16px 8px;
+  border: 1px solid var(--border);
+  border-radius: 0 var(--radius-lg) var(--radius-lg) var(--radius-lg);
+  background: var(--bg-editor);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  min-height: 0;
+}
+
+.editor {
+  height: 100%;
+}
+
+.cm-editor {
+  height: 100%;
+}
+
+.cm-editor.cm-focused {
+  outline: none;
+}
+
+.cm-gutters {
+  font-family: var(--font-mono);
+}
+
+/* ---- Status bar ------------------------------------------------------------ */
+.statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 18px;
+  height: var(--statusbar-h);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.status-left,
+.status-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-brand {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.status-sep {
+  color: var(--text-faint);
+}
+
+.cursor-pos {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.lang-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lang-picker-label {
+  color: var(--text-faint);
+}
+
+.lang-picker select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 22px 3px 9px;
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--splec-accent) 50%),
+    linear-gradient(135deg, var(--splec-accent) 50%, transparent 50%);
+  background-position: right 11px center, right 7px center;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+  transition: border-color 0.16s ease;
+}
+
+.lang-picker select:hover,
+.lang-picker select:focus {
+  border-color: var(--splec-accent);
+  outline: none;
+}

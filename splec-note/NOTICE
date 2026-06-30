@@ -1,0 +1,69 @@
+Splec Note
+==========
+
+This product bundles third-party fonts and uses third-party icon assets.
+Their licenses and attributions are listed below.
+
+
+-------------------------------------------------------------------------------
+Fonts (bundled locally under src/assets/fonts/)
+-------------------------------------------------------------------------------
+
+All bundled fonts are licensed under the SIL Open Font License, Version 1.1.
+License text: https://scripts.sil.org/OFL
+
+1. Dancing Script
+   Copyright (c) Pablo Impallari (impallari@gmail.com), Impallari Type.
+   Used for the "Splec" logotype / wordmark.
+   https://fonts.google.com/specimen/Dancing+Script
+
+2. Space Grotesk
+   Copyright (c) Florian Karsten.
+   Used for display / UI headings (and the "Note" wordmark).
+   https://fonts.google.com/specimen/Space+Grotesk
+
+3. Inter
+   Copyright (c) The Inter Project Authors (https://github.com/rsms/inter).
+   Used for UI body text.
+   https://fonts.google.com/specimen/Inter
+
+4. JetBrains Mono
+   Copyright (c) 2020 JetBrains s.r.o. (https://www.jetbrains.com).
+   Used for the code editor (with SF Mono / Cascadia Code fallbacks).
+   https://fonts.google.com/specimen/JetBrains+Mono
+
+
+-------------------------------------------------------------------------------
+Icons
+-------------------------------------------------------------------------------
+
+Lucide (https://lucide.dev)
+   Licensed under the ISC License.
+   Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022
+   as part of Feather (MIT License). All other copyright (c) for Lucide
+   are held by the Lucide Contributors 2022.
+
+   ISC License:
+   Permission to use, copy, modify, and/or distribute this software for any
+   purpose with or without fee is hereby granted, provided that the above
+   copyright notice and this permission notice appear in all copies.
+
+   THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+   WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+   MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+   SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+   OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+   CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+   (Tabler Icons — https://tabler.io/icons, MIT License — is an approved
+   alternative icon set should it be adopted later.)
+
+
+-------------------------------------------------------------------------------
+Brand assets
+-------------------------------------------------------------------------------
+
+The Splec "S" mark and the "Splec" / "Splec Note" wordmarks are brand assets of
+Splec Developers (https://splecdevelopers.com) and are not covered by the
+open-source license of this repository.

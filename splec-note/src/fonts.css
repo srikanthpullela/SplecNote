@@ -1,0 +1,6 @@
+/* Splec Note bundled fonts — locally hosted, no hot-linking. */
+/* Licenses: SIL Open Font License 1.1. See the NOTICE file in the splec-note project root. */
+@font-face{font-family:'Dancing Script';font-style:normal;font-weight:700;font-display:swap;src:url('./assets/fonts/dancing-script.woff2') format('woff2');}
+@font-face{font-family:'Space Grotesk';font-style:normal;font-weight:400 700;font-display:swap;src:url('./assets/fonts/space-grotesk.woff2') format('woff2');}
+@font-face{font-family:'Inter';font-style:normal;font-weight:400 700;font-display:swap;src:url('./assets/fonts/inter.woff2') format('woff2');}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400 700;font-display:swap;src:url('./assets/fonts/jetbrains-mono.woff2') format('woff2');}

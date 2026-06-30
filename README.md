@@ -1,3 +1,17 @@
+# Splec Note + CongaCode
+
+This repository now hosts two editors:
+
+- **[Splec Note](./splec-note/)** — a fresh, lightweight cross-platform editor
+  (Tauri 2 + TypeScript/Vite + CodeMirror 6) for both note-taking and coding,
+  with a distinctive Splec design system and Light/Dark/System theming. This is
+  the actively developed app. See **[`splec-note/README.md`](./splec-note/README.md)**
+  to build and run it.
+- **CongaCode** *(legacy, below)* — the original Electron + Monaco app, kept
+  in place for reference.
+
+---
+
 # CongaCode
 
 A modern, Sublime Text–inspired notepad application for macOS with **auto-save**, **session persistence**, and powerful editing features.

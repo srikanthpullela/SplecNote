@@ -1,0 +1,37 @@
+{
+  "name": "splec-note",
+  "productName": "Splec Note",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Splec Note — a lightweight, distinctive cross-platform text & code editor for notes and code.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.6.0",
+    "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/lang-json": "^6.0.1",
+    "@codemirror/lang-markdown": "^6.3.0",
+    "@codemirror/language": "^6.10.2",
+    "@codemirror/state": "^6.4.1",
+    "@codemirror/view": "^6.30.0",
+    "@lezer/highlight": "^1.2.1",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-fs": "^2",
+    "@tauri-apps/plugin-store": "^2",
+    "@tauri-apps/plugin-window-state": "^2",
+    "codemirror": "^6.0.1",
+    "lucide": "^0.456.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3"
+  }
+}

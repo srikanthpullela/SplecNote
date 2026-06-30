@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en" data-theme="light" data-theme-mode="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Splec Note</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div class="app">
+      <header class="titlebar">
+        <div class="brand" title="Splec Note">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <linearGradient id="brandStroke" x1="150" y1="120" x2="360" y2="400" gradientUnits="userSpaceOnUse">
+                  <stop offset="0" stop-color="#9db4ff" />
+                  <stop offset="1" stop-color="#7c5cff" />
+                </linearGradient>
+              </defs>
+              <path
+                d="M338 168 C300 132 232 130 204 160 C176 190 196 232 246 252 C306 276 332 308 318 344 C302 384 226 392 182 356"
+                fill="none" stroke="url(#brandStroke)" stroke-width="34"
+                stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+          <span class="wordmark">
+            <span class="wordmark-splec">Splec</span><span class="wordmark-note">Note</span>
+          </span>
+        </div>
+
+        <div class="titlebar-actions">
+          <button id="theme-toggle" class="icon-btn" type="button" aria-label="Toggle theme">
+            <span class="icon-slot" aria-hidden="true"></span>
+            <span id="theme-label" class="icon-btn-label">Light</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="tabstrip" role="tablist">
+        <div class="tab is-active" role="tab" aria-selected="true">
+          <span class="tab-dot" aria-hidden="true"></span>
+          <span class="tab-title">welcome.md</span>
+        </div>
+      </div>
+
+      <main class="editor-wrap">
+        <div id="editor" class="editor"></div>
+      </main>
+
+      <footer class="statusbar">
+        <div class="status-left">
+          <span class="status-brand">Splec&nbsp;Note</span>
+          <span class="status-sep">·</span>
+          <span id="status-msg">Ready</span>
+        </div>
+        <div class="status-right">
+          <label class="lang-picker">
+            <span class="lang-picker-label">Language</span>
+            <select id="lang-select" aria-label="Editor language">
+              <option value="markdown">Markdown</option>
+              <option value="javascript">JavaScript</option>
+              <option value="typescript">TypeScript</option>
+              <option value="json">JSON</option>
+            </select>
+          </label>
+          <span class="status-sep">·</span>
+          <span id="cursor-pos" class="cursor-pos">Ln 1, Col 1</span>
+        </div>
+      </footer>
+    </div>
+  </body>
+</html>
