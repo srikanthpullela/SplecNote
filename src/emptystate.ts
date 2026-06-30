@@ -24,13 +24,14 @@ export function renderEmptyState(
       <span class="brand-mark empty-mark">
         <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
           <defs>
-            <linearGradient id="emptyStroke" x1="150" y1="120" x2="360" y2="400" gradientUnits="userSpaceOnUse">
+            <linearGradient id="emptyStroke" x1="130" y1="110" x2="390" y2="410" gradientUnits="userSpaceOnUse">
               <stop offset="0" stop-color="#9db4ff" />
               <stop offset="1" stop-color="#7c5cff" />
             </linearGradient>
           </defs>
-          <path d="M338 168 C300 132 232 130 204 160 C176 190 196 232 246 252 C306 276 332 308 318 344 C302 384 226 392 182 356"
-            fill="none" stroke="url(#emptyStroke)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" />
+          <text x="262" y="372" text-anchor="middle"
+            font-family="'Dancing Script', cursive" font-weight="700" font-size="430"
+            fill="url(#emptyStroke)">S</text>
         </svg>
       </span>
     </div>
