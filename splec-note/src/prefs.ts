@@ -18,6 +18,8 @@ export interface Prefs {
   restoreSession: boolean;
   /** Launch Splec Note automatically when you log in. */
   openAtLogin: boolean;
+  /** Editor color theme id ("auto" follows the app light/dark chrome). */
+  editorTheme: string;
 }
 
 export const DEFAULT_PREFS: Prefs = {
@@ -30,6 +32,7 @@ export const DEFAULT_PREFS: Prefs = {
   autosave: true,
   restoreSession: true,
   openAtLogin: false,
+  editorTheme: "auto",
 };
 
 const STORE_FILE = "splec-settings.json";
@@ -66,6 +69,7 @@ function sanitize(p: Partial<Prefs> | null | undefined): Prefs {
     merged.restoreSession === undefined ? true : Boolean(merged.restoreSession);
   merged.openAtLogin = Boolean(merged.openAtLogin);
   if (typeof merged.defaultLanguage !== "string") merged.defaultLanguage = "plaintext";
+  if (typeof merged.editorTheme !== "string" || !merged.editorTheme) merged.editorTheme = "auto";
   return merged;
 }
 

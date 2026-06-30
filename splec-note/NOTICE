@@ -77,3 +77,18 @@ tauri-plugin-autostart (https://github.com/tauri-apps/plugins-workspace)
    Copyright (c) 2017 - Present Tauri Apps Contributors.
    Dual-licensed under the Apache License 2.0 and the MIT License.
    Used to implement the "Open at login" preference (launch at sign-in).
+
+
+-------------------------------------------------------------------------------
+Editor libraries
+-------------------------------------------------------------------------------
+
+CodeMirror 6 (https://codemirror.net)
+   Copyright (c) by Marijn Haverbeke and others.
+   Licensed under the MIT License.
+   Provides the core editing engine, language packs, and search.
+
+@replit/codemirror-minimap (https://github.com/replit/codemirror-minimap)
+   Copyright (c) Replit.
+   Licensed under the MIT License.
+   Used for the optional editor minimap / document map.

@@ -85,7 +85,14 @@
               <button class="menu-item menu-item-check" data-act="wrap" role="menuitemcheckbox"><span class="menu-check">✓</span>Word Wrap</button>
               <button class="menu-item menu-item-check" data-act="whitespace" role="menuitemcheckbox"><span class="menu-check">✓</span>Show Whitespace</button>
               <button class="menu-item menu-item-check" data-act="indentGuides" role="menuitemcheckbox"><span class="menu-check">✓</span>Indent Guides</button>
+              <button class="menu-item menu-item-check" data-act="toggleOutline" role="menuitemcheckbox"><span class="menu-check">✓</span>Outline Panel</button>
+              <button class="menu-item menu-item-check" data-act="toggleMinimap" role="menuitemcheckbox"><span class="menu-check">✓</span>Minimap</button>
+              <button class="menu-item menu-item-check" data-act="toggleSplit" role="menuitemcheckbox"><span class="menu-check">✓</span>Split Editor</button>
+              <button class="menu-item" data-act="splitOrientation" role="menuitem">Toggle Split Orientation</button>
+              <button class="menu-item" data-act="cloneToOther" role="menuitem">Clone to Other Pane</button>
+              <button class="menu-item menu-item-check" data-act="toggleZen" role="menuitemcheckbox"><span class="menu-check">✓</span>Distraction-Free<span class="menu-key">⌃⌘F</span></button>
               <div class="menu-sep"></div>
+              <button class="menu-item" data-act="commandPalette" role="menuitem">Command Palette…<span class="menu-key">⇧⌘P</span></button>
               <button class="menu-item" data-act="newWindow" role="menuitem">New Window<span class="menu-key">⇧⌘N</span></button>
               <div class="menu-sep"></div>
               <div class="menu-label">Recent Files</div>
@@ -103,7 +110,23 @@
       </div>
 
       <main class="editor-wrap">
-        <div id="editor" class="editor"></div>
+        <div class="editor-stage">
+          <aside id="outline-panel" class="outline-panel" hidden aria-label="Outline">
+            <div class="outline-head">
+              <span class="outline-title">Outline</span>
+              <button id="outline-close" class="outline-x" type="button" aria-label="Close outline">✕</button>
+            </div>
+            <div id="outline-list" class="outline-list"></div>
+          </aside>
+          <div id="editor-panes" class="editor-panes">
+            <div class="editor-pane" data-pane="0">
+              <div id="editor" class="editor"></div>
+            </div>
+            <div id="editor-pane-2" class="editor-pane" data-pane="1" hidden>
+              <div id="editor-2" class="editor"></div>
+            </div>
+          </div>
+        </div>
         <div id="empty-state" class="empty-state" hidden></div>
 
         <!-- Find / Replace panel (custom Splec-styled, driven by CodeMirror search) -->
@@ -220,6 +243,21 @@
                   <button class="seg" type="button" data-mode="system" role="radio">System</button>
                 </div>
               </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">
+                  Editor theme
+                  <span class="prefs-row-help">Color theme of the editor surface, independent of the app light/dark chrome.</span>
+                </span>
+                <select id="pref-editor-theme" class="prefs-input"></select>
+              </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">
+                  Import theme
+                  <span class="prefs-row-help">Load a simple JSON of token colors as a custom editor theme.</span>
+                </span>
+                <button id="pref-import-theme" class="prefs-btn" type="button">Import JSON…</button>
+                <input id="pref-theme-file" type="file" accept="application/json,.json" hidden />
+              </div>
             </div>
           </section>
 
@@ -258,6 +296,20 @@
           </section>
 
           <section class="prefs-group">
+            <h3 class="prefs-group-title">Languages</h3>
+            <div class="prefs-card">
+              <div class="prefs-row">
+                <span class="prefs-row-label">
+                  User-defined languages
+                  <span class="prefs-row-help">Define your own keyword sets and comment/string rules for custom syntax highlighting.</span>
+                </span>
+                <button id="udl-add" class="prefs-btn" type="button">New language…</button>
+              </div>
+              <div id="udl-list" class="udl-list"></div>
+            </div>
+          </section>
+
+          <section class="prefs-group">
             <h3 class="prefs-group-title">Session</h3>
             <div class="prefs-card">
               <div class="prefs-row">
@@ -290,6 +342,74 @@
             </div>
           </section>
         </div>
+      </div>
+    </div>
+
+    <!-- User-Defined Language editor -->
+    <div id="udl-overlay" class="modal-overlay" hidden>
+      <div class="prefs udl-editor" role="dialog" aria-modal="true" aria-labelledby="udl-title">
+        <div class="prefs-head">
+          <h2 id="udl-title" class="prefs-title">User-Defined Language</h2>
+          <button id="udl-close" class="prefs-close" type="button" aria-label="Close">✕</button>
+        </div>
+        <div class="prefs-body">
+          <section class="prefs-group">
+            <div class="prefs-card">
+              <div class="prefs-row">
+                <span class="prefs-row-label">Name</span>
+                <input id="udl-name" class="prefs-input" type="text" placeholder="My Language" />
+              </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">Line comment</span>
+                <input id="udl-line" class="prefs-input" type="text" placeholder="//" />
+              </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">Block comment start</span>
+                <input id="udl-blockstart" class="prefs-input" type="text" placeholder="/*" />
+              </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">Block comment end</span>
+                <input id="udl-blockend" class="prefs-input" type="text" placeholder="*/" />
+              </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">
+                  String delimiters
+                  <span class="prefs-row-help">Space-separated, e.g. <code>" '</code></span>
+                </span>
+                <input id="udl-strings" class="prefs-input" type="text" placeholder="&quot; '" />
+              </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">Case-insensitive keywords</span>
+                <label class="switch"><input id="udl-ci" type="checkbox" /><span class="switch-track"></span></label>
+              </div>
+            </div>
+          </section>
+          <section class="prefs-group">
+            <h3 class="prefs-group-title">Keywords</h3>
+            <div class="prefs-card">
+              <textarea id="udl-keywords" class="udl-textarea" rows="4" placeholder="if else for while return func class…"></textarea>
+            </div>
+          </section>
+          <section class="prefs-group">
+            <h3 class="prefs-group-title">Types / secondary keywords</h3>
+            <div class="prefs-card">
+              <textarea id="udl-types" class="udl-textarea" rows="3" placeholder="int string bool float…"></textarea>
+            </div>
+          </section>
+          <div class="udl-actions">
+            <button id="udl-delete" class="prefs-btn prefs-btn-danger" type="button">Delete</button>
+            <span class="udl-actions-spacer"></span>
+            <button id="udl-cancel" class="prefs-btn" type="button">Cancel</button>
+            <button id="udl-save" class="prefs-btn prefs-btn-primary" type="button">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Command palette -->
+    <div id="palette-overlay" class="modal-overlay palette-overlay" hidden>
+      <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+        <input id="palette-input" class="palette-input" type="text" placeholder="Type a command…" spellcheck="false" autocomplete="off" />
+        <div id="palette-list" class="palette-list" role="listbox"></div>
       </div>
     </div>
   </body>

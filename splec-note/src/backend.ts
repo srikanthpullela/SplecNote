@@ -48,10 +48,16 @@ export interface ManifestTab {
   diskMtimeMs: number | null;
   diskSize: number | null;
 }
+export interface SessionSplit {
+  enabled: boolean;
+  orientation: "vertical" | "horizontal";
+}
+
 export interface SessionManifest {
   version: number;
   activeId: string | null;
   tabs: ManifestTab[];
+  split?: SessionSplit;
 }
 
 export async function readTextFile(path: string): Promise<FileRead> {

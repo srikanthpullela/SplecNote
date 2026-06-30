@@ -1,7 +1,7 @@
 // Status bar: line/col, selection, language picker, encoding, EOL, whitespace,
 // word/char counts. Encoding and EOL open small popup menus to convert.
 
-import { PICKER_ORDER, languageLabel } from "./languages";
+import { pickerEntries } from "./languages";
 
 export interface StatusInfo {
   line: number;
@@ -36,13 +36,7 @@ export class StatusBar {
   private msg = document.querySelector<HTMLElement>("#status-msg")!;
 
   constructor(handlers: StatusHandlers) {
-    this.langSelect.replaceChildren();
-    for (const id of PICKER_ORDER) {
-      const opt = document.createElement("option");
-      opt.value = id;
-      opt.textContent = languageLabel(id);
-      this.langSelect.append(opt);
-    }
+    this.rebuildLanguages();
     this.langSelect.addEventListener("change", () =>
       handlers.onLanguageChange(this.langSelect.value),
     );
@@ -55,6 +49,19 @@ export class StatusBar {
     );
 
     document.addEventListener("click", () => this.closeMenus());
+  }
+
+  /** (Re)populate the language picker, e.g. after User-Defined Languages load. */
+  rebuildLanguages(): void {
+    const current = this.langSelect.value;
+    this.langSelect.replaceChildren();
+    for (const { id, label } of pickerEntries()) {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = label;
+      this.langSelect.append(opt);
+    }
+    if (current) this.langSelect.value = current;
   }
 
   private wireMenu(

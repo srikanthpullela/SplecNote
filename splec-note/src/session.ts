@@ -113,6 +113,10 @@ export class SessionManager {
       version: 1,
       activeId: this.app.store.activeIdValue(),
       tabs,
+      split: {
+        enabled: this.app.split?.isEnabled() ?? false,
+        orientation: this.app.split?.orientation ?? "vertical",
+      },
     };
   }
 
@@ -158,6 +162,11 @@ export class SessionManager {
         : this.app.store.list()[0]?.id ?? null;
     if (activeId) await this.app.activate(activeId);
     else this.app.refreshAll();
+
+    // Restore split layout after the active tab is shown.
+    if (manifest.split?.enabled) {
+      this.app.split.enable(manifest.split.orientation === "horizontal" ? "horizontal" : "vertical");
+    }
 
     this.app.setMessage(`Restored ${manifest.tabs.length} tab${manifest.tabs.length === 1 ? "" : "s"}`);
 

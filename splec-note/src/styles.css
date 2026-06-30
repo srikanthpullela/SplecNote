@@ -1632,3 +1632,277 @@ body {
 .cm-bookmark-mark::after {
   content: "●";
 }
+
+/* ===========================================================================
+   Phase 5 — editor stage layout, outline, minimap, split, palette, UDL, buttons
+   =========================================================================== */
+
+/* Editor stage: outline panel + editor panes side by side. */
+.editor-stage {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+.editor-panes {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+.editor-panes.split-horizontal {
+  flex-direction: column;
+}
+.editor-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+.editor-panes.is-split .editor-pane[data-pane="1"] {
+  border-left: 1px solid var(--border);
+}
+.editor-panes.is-split.split-horizontal .editor-pane[data-pane="1"] {
+  border-left: none;
+  border-top: 1px solid var(--border);
+}
+.editor-pane .editor,
+.editor-pane .cm-editor {
+  height: 100%;
+}
+
+/* Outline / function-list panel. */
+.outline-panel {
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.outline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.outline-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+.outline-x {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+}
+.outline-x:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.outline-list {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 0;
+}
+.outline-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.outline-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+.outline-empty {
+  padding: 10px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+/* Minimap (right gutter). */
+.cm-minimap-gutter {
+  border-left: 1px solid var(--border);
+}
+
+/* Distraction-free / zen mode. */
+body.zen-mode .titlebar,
+body.zen-mode .tabstrip-wrap,
+body.zen-mode .statusbar {
+  display: none !important;
+}
+body.zen-mode .editor-wrap {
+  margin: 0;
+  border-radius: 0;
+  border: none;
+}
+
+/* Command palette. */
+.palette-overlay {
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+.palette {
+  width: min(560px, 92vw);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.palette-input {
+  height: 46px;
+  padding: 0 16px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-strong);
+  font-family: var(--font-ui);
+  font-size: 15px;
+}
+.palette-input:focus {
+  outline: none;
+}
+.palette-list {
+  overflow: auto;
+  padding: 6px;
+}
+.palette-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.palette-item.is-active {
+  background: var(--splec-accent);
+  color: #fff;
+}
+.palette-item-title {
+  font-size: 13.5px;
+}
+.palette-item-hint {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.75;
+}
+.palette-item.is-active .palette-item-hint {
+  opacity: 0.9;
+}
+
+/* Preferences buttons (shared). */
+.prefs-btn {
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  color: var(--text-strong);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.prefs-btn:hover {
+  border-color: var(--splec-accent);
+  background: var(--bg-hover);
+}
+.prefs-btn-primary {
+  background: var(--splec-accent);
+  border-color: var(--splec-accent);
+  color: #fff;
+}
+.prefs-btn-primary:hover {
+  filter: brightness(1.06);
+  background: var(--splec-accent);
+}
+.prefs-btn-danger {
+  border-color: transparent;
+  color: #e0567a;
+  background: transparent;
+}
+.prefs-btn-danger:hover {
+  background: rgba(224, 86, 122, 0.12);
+  border-color: rgba(224, 86, 122, 0.4);
+}
+
+/* User-Defined Language manager. */
+.udl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.udl-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+}
+.udl-item-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.udl-empty {
+  margin: 8px 0 0;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.udl-editor {
+  width: min(560px, 94vw);
+}
+.udl-textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.udl-textarea:focus {
+  outline: none;
+  border-color: var(--splec-accent);
+}
+.udl-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px 2px;
+}
+.udl-actions-spacer {
+  flex: 1;
+}
