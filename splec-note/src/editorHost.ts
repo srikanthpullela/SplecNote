@@ -5,11 +5,13 @@
 import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import {
   EditorView,
+  crosshairCursor,
   drawSelection,
   dropCursor,
   highlightActiveLine,
   highlightActiveLineGutter,
   highlightSpecialChars,
+  highlightWhitespace,
   keymap,
   lineNumbers,
   rectangularSelection,
@@ -30,7 +32,16 @@ import {
   indentUnit,
   syntaxHighlighting,
 } from "@codemirror/language";
+import {
+  search,
+  highlightSelectionMatches,
+  selectNextOccurrence,
+  selectSelectionMatches,
+} from "@codemirror/search";
+import { indentationMarkers } from "@replit/codemirror-indentation-markers";
 import { tags as t } from "@lezer/highlight";
+import { bookmarks, initialBookmarks, toggleBookmark, jumpBookmark } from "./bookmarks";
+import { toggleComment, jumpToMatchingBracket } from "./transforms";
 import type { ResolvedTheme } from "./theme";
 
 const fontStack =
@@ -140,9 +151,13 @@ export class EditorHost {
   private langC = new Compartment();
   private wrapC = new Compartment();
   private tabC = new Compartment();
+  private wsC = new Compartment();
+  private guideC = new Compartment();
   private theme: ResolvedTheme;
   private wrap: boolean;
   private tabSize: number;
+  private showWhitespace: boolean;
+  private indentGuides: boolean;
   private cb: HostCallbacks;
 
   constructor(parent: HTMLElement, opts: {
@@ -150,11 +165,15 @@ export class EditorHost {
     wrap: boolean;
     tabSize: number;
     fontSize: number;
+    showWhitespace?: boolean;
+    indentGuides?: boolean;
     callbacks: HostCallbacks;
   }) {
     this.theme = opts.theme;
     this.wrap = opts.wrap;
     this.tabSize = opts.tabSize;
+    this.showWhitespace = opts.showWhitespace ?? false;
+    this.indentGuides = opts.indentGuides ?? true;
     this.cb = opts.callbacks;
     this.view = new EditorView({
       parent,
@@ -171,6 +190,7 @@ export class EditorHost {
     doc: string,
     langExt: Extension,
     selection?: { anchor: number; head: number },
+    bookmarkLines?: number[],
   ): EditorState {
     const updateListener = EditorView.updateListener.of((u) => {
       if (u.docChanged) this.cb.onDocChanged();
@@ -187,18 +207,34 @@ export class EditorHost {
         this.langC.of(langExt),
         this.wrapC.of(this.wrap ? EditorView.lineWrapping : []),
         this.tabC.of(tabSizeExtension(this.tabSize)),
+        this.wsC.of(this.showWhitespace ? highlightWhitespace() : []),
+        this.guideC.of(this.indentGuides ? indentationMarkers() : []),
+        initialBookmarks.of(bookmarkLines ?? []),
         lineNumbers(),
         highlightActiveLineGutter(),
         highlightSpecialChars(),
         history(),
         foldGutter(),
+        bookmarks(),
         drawSelection(),
         dropCursor(),
         EditorState.allowMultipleSelections.of(true),
         indentOnInput(),
         bracketMatching(),
         rectangularSelection(),
+        crosshairCursor(),
         highlightActiveLine(),
+        highlightSelectionMatches(),
+        search(),
+        keymap.of([
+          { key: "Mod-d", run: selectNextOccurrence, preventDefault: true },
+          { key: "Mod-Shift-l", run: selectSelectionMatches, preventDefault: true },
+          { key: "Mod-/", run: toggleComment, preventDefault: true },
+          { key: "Mod-Shift-\\", run: jumpToMatchingBracket, preventDefault: true },
+          { key: "Mod-b", run: (v) => toggleBookmark(v), preventDefault: true },
+          { key: "F2", run: (v) => jumpBookmark(v, 1), preventDefault: true },
+          { key: "Shift-F2", run: (v) => jumpBookmark(v, -1), preventDefault: true },
+        ]),
         keymap.of([...defaultKeymap, ...historyKeymap, ...foldKeymap, indentWithTab]),
         updateListener,
       ],
@@ -214,6 +250,8 @@ export class EditorHost {
         this.langC.reconfigure(langExt),
         this.wrapC.reconfigure(this.wrap ? EditorView.lineWrapping : []),
         this.tabC.reconfigure(tabSizeExtension(this.tabSize)),
+        this.wsC.reconfigure(this.showWhitespace ? highlightWhitespace() : []),
+        this.guideC.reconfigure(this.indentGuides ? indentationMarkers() : []),
       ],
     });
     requestAnimationFrame(() => {
@@ -238,6 +276,20 @@ export class EditorHost {
   setTabSize(n: number): void {
     this.tabSize = n;
     this.view.dispatch({ effects: this.tabC.reconfigure(tabSizeExtension(n)) });
+  }
+
+  setShowWhitespace(on: boolean): void {
+    this.showWhitespace = on;
+    this.view.dispatch({ effects: this.wsC.reconfigure(on ? highlightWhitespace() : []) });
+  }
+
+  setIndentGuides(on: boolean): void {
+    this.indentGuides = on;
+    this.view.dispatch({ effects: this.guideC.reconfigure(on ? indentationMarkers() : []) });
+  }
+
+  isShowWhitespace(): boolean {
+    return this.showWhitespace;
   }
 
   setFontSize(px: number): void {

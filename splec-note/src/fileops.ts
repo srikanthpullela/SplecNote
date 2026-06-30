@@ -37,7 +37,8 @@ export class FileOps {
         title: baseName(path),
         language,
         content: read.content,
-        eol: read.eol === "CRLF" ? "CRLF" : "LF",
+        encoding: read.encoding || "UTF-8",
+        eol: read.eol === "CRLF" ? "CRLF" : read.eol === "CR" ? "CR" : "LF",
         dirty: false,
         diskMtimeMs: read.mtime_ms,
         diskSize: read.size,
@@ -59,7 +60,7 @@ export class FileOps {
     if (!buf.path) return this.saveAs(buf.id);
     this.app.syncActiveState();
     try {
-      const res = await writeTextFile(buf.path, this.app.docText(buf), buf.eol);
+      const res = await writeTextFile(buf.path, this.app.docText(buf), buf.eol, buf.encoding);
       buf.dirty = false;
       buf.diskMtimeMs = res.mtime_ms;
       buf.diskSize = res.size;
@@ -81,7 +82,7 @@ export class FileOps {
     if (!target) return false;
     this.app.syncActiveState();
     try {
-      const res = await writeTextFile(target, this.app.docText(buf), buf.eol);
+      const res = await writeTextFile(target, this.app.docText(buf), buf.eol, buf.encoding);
       buf.path = target;
       buf.title = baseName(target);
       buf.language = languageIdForFilename(buf.title);

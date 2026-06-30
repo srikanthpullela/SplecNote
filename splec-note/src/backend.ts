@@ -13,6 +13,7 @@ export function isTauri(): boolean {
 export interface FileRead {
   content: string;
   eol: string;
+  encoding: string;
   mtime_ms: number | null;
   size: number;
 }
@@ -43,6 +44,7 @@ export interface ManifestTab {
   selAnchor: number;
   selHead: number;
   scrollTop: number;
+  bookmarks: number[];
   diskMtimeMs: number | null;
   diskSize: number | null;
 }
@@ -59,8 +61,9 @@ export async function writeTextFile(
   path: string,
   content: string,
   eol: string,
+  encoding?: string,
 ): Promise<WriteResult> {
-  return invoke<WriteResult>("write_text_file", { path, content, eol });
+  return invoke<WriteResult>("write_text_file", { path, content, eol, encoding });
 }
 export async function statFile(path: string): Promise<FileStat> {
   return invoke<FileStat>("stat_file", { path });
@@ -84,6 +87,36 @@ export async function cleanupBackups(keep: string[], retentionDays: number): Pro
   return invoke<number>("cleanup_backups", { keep, retentionDays });
 }
 
+// ---- Find in Files --------------------------------------------------------
+
+export interface FindArgs {
+  root: string;
+  query: string;
+  isRegex: boolean;
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  includeGlob: string | null;
+  maxResults: number;
+  maxFileSizeBytes: number;
+}
+export interface FileMatch {
+  file: string;
+  line: number;
+  col: number;
+  preview: string;
+  matchStart: number;
+  matchEnd: number;
+}
+export interface FindResult {
+  matches: FileMatch[];
+  filesScanned: number;
+  truncated: boolean;
+}
+
+export async function findInFiles(args: FindArgs): Promise<FindResult> {
+  return invoke<FindResult>("find_in_files", { args });
+}
+
 // ---- Native dialogs (via plugin-dialog) ----------------------------------
 
 export async function openFileDialog(): Promise<string[]> {
@@ -99,6 +132,14 @@ export async function saveFileDialog(defaultName?: string): Promise<string | nul
   const { save } = await import("@tauri-apps/plugin-dialog");
   const result = await save({ defaultPath: defaultName });
   return result ?? null;
+}
+
+export async function pickDirectory(): Promise<string | null> {
+  if (!isTauri()) return null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const result = await open({ multiple: false, directory: true });
+  if (!result) return null;
+  return Array.isArray(result) ? result[0] ?? null : result;
 }
 
 export async function confirmDialog(message: string, title = "Splec Note"): Promise<boolean> {

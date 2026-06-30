@@ -1,6 +1,7 @@
 // Splec Note — Tauri backend entry point.
 // Wires core plugins (store, fs, dialog, window-state) and the session/backup engine.
 
+mod search;
 mod session;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -34,6 +35,7 @@ pub fn run() {
             session::write_session,
             session::load_session,
             session::cleanup_backups,
+            search::find_in_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Splec Note");

@@ -8,6 +8,10 @@ export interface Prefs {
   tabSize: number;
   wordWrap: boolean;
   defaultLanguage: string;
+  /** Show whitespace markers (spaces/tabs) in the editor. */
+  showWhitespace: boolean;
+  /** Show indent guides in the editor. */
+  indentGuides: boolean;
   /** Continuously mirror buffers to backups (the "never lose work" engine). */
   autosave: boolean;
   /** Reopen the previous session (incl. unsaved untitled tabs) on launch. */
@@ -21,6 +25,8 @@ export const DEFAULT_PREFS: Prefs = {
   tabSize: 2,
   wordWrap: false,
   defaultLanguage: "plaintext",
+  showWhitespace: false,
+  indentGuides: true,
   autosave: true,
   restoreSession: true,
   openAtLogin: false,
@@ -53,6 +59,8 @@ function sanitize(p: Partial<Prefs> | null | undefined): Prefs {
   merged.fontSize = Math.min(28, Math.max(10, Math.round(merged.fontSize)));
   merged.tabSize = Math.min(8, Math.max(1, Math.round(merged.tabSize)));
   merged.wordWrap = Boolean(merged.wordWrap);
+  merged.showWhitespace = Boolean(merged.showWhitespace);
+  merged.indentGuides = merged.indentGuides === undefined ? true : Boolean(merged.indentGuides);
   merged.autosave = merged.autosave === undefined ? true : Boolean(merged.autosave);
   merged.restoreSession =
     merged.restoreSession === undefined ? true : Boolean(merged.restoreSession);

@@ -449,6 +449,8 @@ body {
   right: 0;
   z-index: 40;
   min-width: 240px;
+  max-height: min(78vh, 660px);
+  overflow-y: auto;
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -1196,4 +1198,437 @@ body {
 .btn-danger:hover {
   background: #cf3a3f;
   border-color: #cf3a3f;
+}
+
+/* ============================================================
+   Phase 3 / 4 — Find, Find in Files, Go to line, status menus,
+   menu submenus + checks, bookmark gutter
+   ============================================================ */
+
+/* ---- Menu submenu + checkmarks ---- */
+.menu-submenu {
+  position: relative;
+}
+.menu-item-parent {
+  /* caret pushed to the right by space-between */
+}
+.menu-caret {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+.menu-sub {
+  position: absolute;
+  top: -6px;
+  right: calc(100% + 4px);
+  z-index: 50;
+  min-width: 200px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(4px);
+  transition: opacity 0.1s ease, transform 0.1s ease, visibility 0.1s;
+}
+.menu-submenu:hover .menu-sub,
+.menu-sub:hover {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(0);
+}
+.menu-check {
+  width: 14px;
+  margin-right: 2px;
+  color: var(--splec-accent);
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0;
+}
+.menu-item-check {
+  justify-content: flex-start;
+  gap: 8px;
+}
+.menu-item-check.is-checked .menu-check {
+  opacity: 1;
+}
+
+/* ---- Find / Replace panel ---- */
+.find-panel {
+  position: absolute;
+  top: 10px;
+  right: 16px;
+  z-index: 30;
+  width: min(560px, calc(100% - 32px));
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+.find-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.find-icon {
+  width: 18px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 14px;
+}
+.find-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+.find-field:focus {
+  outline: none;
+  border-color: var(--splec-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--splec-accent) 30%, transparent);
+}
+.find-count {
+  flex: 0 0 auto;
+  min-width: 64px;
+  text-align: right;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.find-count.is-error {
+  color: #e5484d;
+}
+.find-toggles {
+  display: flex;
+  gap: 2px;
+}
+.find-toggle {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+.find-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+.find-toggle.is-on {
+  border-color: color-mix(in srgb, var(--splec-accent) 50%, transparent);
+  background: color-mix(in srgb, var(--splec-accent) 18%, transparent);
+  color: var(--splec-accent);
+}
+.find-nav {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.find-nav:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+.find-btn {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.find-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+.find-btn-primary {
+  border-color: transparent;
+  background: var(--splec-accent);
+  color: #fff;
+}
+.find-btn-primary:hover {
+  background: color-mix(in srgb, var(--splec-accent) 88%, #000);
+  color: #fff;
+}
+
+/* ---- Go to line ---- */
+.goto-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 35;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 14vh;
+  background: color-mix(in srgb, var(--bg-app) 35%, transparent);
+}
+.goto-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(320px, 80%);
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+.goto-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.goto-input {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+}
+.goto-input:focus {
+  outline: none;
+  border-color: var(--splec-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--splec-accent) 30%, transparent);
+}
+
+/* ---- Find in Files side panel ---- */
+.fif-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 28;
+  width: min(420px, 75%);
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--bg-elevated);
+  box-shadow: -8px 0 24px color-mix(in srgb, var(--bg-app) 55%, transparent);
+}
+.fif-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.fif-title {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.fif-x {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.fif-x:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+.fif-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.fif-inputrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.fif-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+.fif-input:focus {
+  outline: none;
+  border-color: var(--splec-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--splec-accent) 30%, transparent);
+}
+.fif-folderrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fif-folder-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+}
+.fif-summary {
+  padding: 8px 14px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+.fif-results {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0 6px 12px;
+}
+.fif-group {
+  margin-bottom: 6px;
+}
+.fif-file {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  cursor: default;
+}
+.fif-file-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text-strong);
+}
+.fif-file-path {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+.fif-file-count {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.fif-match {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px 4px 16px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.fif-match:hover {
+  background: var(--bg-hover);
+}
+.fif-line {
+  flex: 0 0 auto;
+  min-width: 34px;
+  text-align: right;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.fif-preview {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+.fif-preview mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--splec-accent) 35%, transparent);
+  color: var(--text-strong);
+}
+
+/* ---- Status bar popup menus (encoding / EOL) ---- */
+.status-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 170px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+.status-menu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.status-menu-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+
+/* ---- Bookmark gutter ---- */
+.cm-bookmark-gutter {
+  width: 12px;
+}
+.cm-bookmark-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--splec-accent);
+  font-size: 11px;
+}
+.cm-bookmark-mark::after {
+  content: "●";
 }

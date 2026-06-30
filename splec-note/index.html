@@ -50,6 +50,42 @@
               <button class="menu-item" data-act="saveAs" role="menuitem">Save As…<span class="menu-key">⇧⌘S</span></button>
               <button class="menu-item" data-act="close" role="menuitem">Close Tab<span class="menu-key">⌘W</span></button>
               <div class="menu-sep"></div>
+              <div class="menu-label">Search</div>
+              <button class="menu-item" data-act="find" role="menuitem">Find…<span class="menu-key">⌘F</span></button>
+              <button class="menu-item" data-act="replace" role="menuitem">Replace…<span class="menu-key">⌘H</span></button>
+              <button class="menu-item" data-act="findInFiles" role="menuitem">Find in Files…<span class="menu-key">⇧⌘F</span></button>
+              <button class="menu-item" data-act="gotoLine" role="menuitem">Go to Line…<span class="menu-key">⌘G</span></button>
+              <div class="menu-sep"></div>
+              <div class="menu-label">Edit</div>
+              <button class="menu-item" data-act="toggleComment" role="menuitem">Toggle Comment<span class="menu-key">⌘/</span></button>
+              <button class="menu-item" data-act="selectNext" role="menuitem">Select Next Occurrence<span class="menu-key">⌘D</span></button>
+              <button class="menu-item" data-act="duplicateLine" role="menuitem">Duplicate Line</button>
+              <button class="menu-item" data-act="moveLineUp" role="menuitem">Move Line Up<span class="menu-key">⌥↑</span></button>
+              <button class="menu-item" data-act="moveLineDown" role="menuitem">Move Line Down<span class="menu-key">⌥↓</span></button>
+              <button class="menu-item" data-act="toggleBookmark" role="menuitem">Toggle Bookmark<span class="menu-key">⌘B</span></button>
+              <button class="menu-item" data-act="nextBookmark" role="menuitem">Next Bookmark<span class="menu-key">F2</span></button>
+              <button class="menu-item" data-act="clearBookmarks" role="menuitem">Clear All Bookmarks</button>
+              <div class="menu-submenu">
+                <button class="menu-item menu-item-parent" role="menuitem">Transform Text<span class="menu-caret">▸</span></button>
+                <div class="menu-sub">
+                  <button class="menu-item" data-act="upper" role="menuitem">UPPERCASE</button>
+                  <button class="menu-item" data-act="lower" role="menuitem">lowercase</button>
+                  <button class="menu-item" data-act="title" role="menuitem">Title Case</button>
+                  <div class="menu-sep"></div>
+                  <button class="menu-item" data-act="sortAsc" role="menuitem">Sort Lines (A→Z)</button>
+                  <button class="menu-item" data-act="sortDesc" role="menuitem">Sort Lines (Z→A)</button>
+                  <button class="menu-item" data-act="sortUnique" role="menuitem">Sort &amp; Remove Duplicates</button>
+                  <div class="menu-sep"></div>
+                  <button class="menu-item" data-act="trim" role="menuitem">Trim Trailing Whitespace</button>
+                  <button class="menu-item" data-act="join" role="menuitem">Join Lines</button>
+                </div>
+              </div>
+              <div class="menu-sep"></div>
+              <div class="menu-label">View</div>
+              <button class="menu-item menu-item-check" data-act="wrap" role="menuitemcheckbox"><span class="menu-check">✓</span>Word Wrap</button>
+              <button class="menu-item menu-item-check" data-act="whitespace" role="menuitemcheckbox"><span class="menu-check">✓</span>Show Whitespace</button>
+              <button class="menu-item menu-item-check" data-act="indentGuides" role="menuitemcheckbox"><span class="menu-check">✓</span>Indent Guides</button>
+              <div class="menu-sep"></div>
               <button class="menu-item" data-act="newWindow" role="menuitem">New Window<span class="menu-key">⇧⌘N</span></button>
               <div class="menu-sep"></div>
               <div class="menu-label">Recent Files</div>
@@ -69,6 +105,64 @@
       <main class="editor-wrap">
         <div id="editor" class="editor"></div>
         <div id="empty-state" class="empty-state" hidden></div>
+
+        <!-- Find / Replace panel (custom Splec-styled, driven by CodeMirror search) -->
+        <div id="find-panel" class="find-panel" role="search" hidden>
+          <div class="find-row">
+            <span class="find-icon" aria-hidden="true">⌕</span>
+            <input id="find-input" class="find-field" type="text" placeholder="Find" aria-label="Find" spellcheck="false" />
+            <span id="find-count" class="find-count" aria-live="polite"></span>
+            <div class="find-toggles" role="group" aria-label="Find options">
+              <button id="find-case" class="find-toggle" type="button" title="Match case" aria-label="Match case">Aa</button>
+              <button id="find-word" class="find-toggle" type="button" title="Whole word" aria-label="Whole word">⌶</button>
+              <button id="find-regex" class="find-toggle" type="button" title="Regular expression" aria-label="Use regular expression">.*</button>
+              <button id="find-insel" class="find-toggle" type="button" title="In selection" aria-label="Search in selection">⌖</button>
+            </div>
+            <button id="find-prev" class="find-nav" type="button" title="Previous match (⇧⏎)" aria-label="Previous match">↑</button>
+            <button id="find-next" class="find-nav" type="button" title="Next match (⏎)" aria-label="Next match">↓</button>
+            <button id="find-close" class="find-nav" type="button" title="Close (Esc)" aria-label="Close find">✕</button>
+          </div>
+          <div id="find-replace-row" class="find-row" hidden>
+            <span class="find-icon" aria-hidden="true">⇄</span>
+            <input id="replace-input" class="find-field" type="text" placeholder="Replace" aria-label="Replace with" spellcheck="false" />
+            <button id="replace-one" class="find-btn" type="button" title="Replace">Replace</button>
+            <button id="replace-all" class="find-btn" type="button" title="Replace all">All</button>
+          </div>
+        </div>
+
+        <!-- Go to line -->
+        <div id="goto-overlay" class="goto-overlay" hidden>
+          <div class="goto-box">
+            <label class="goto-label" for="goto-input">Go to line</label>
+            <input id="goto-input" class="goto-input" type="number" min="1" placeholder="Line" />
+          </div>
+        </div>
+
+        <!-- Find in Files side panel -->
+        <aside id="fif-panel" class="fif-panel" aria-label="Find in Files" hidden>
+          <div class="fif-head">
+            <span class="fif-title"><span class="wordmark-splec">Find</span> in Files</span>
+            <button id="fif-close" class="fif-x" type="button" aria-label="Close">✕</button>
+          </div>
+          <div class="fif-controls">
+            <div class="fif-inputrow">
+              <input id="fif-input" class="fif-input" type="text" placeholder="Search text or regex" spellcheck="false" />
+              <div class="find-toggles" role="group" aria-label="Search options">
+                <button id="fif-case" class="find-toggle" type="button" title="Match case">Aa</button>
+                <button id="fif-word" class="find-toggle" type="button" title="Whole word">⌶</button>
+                <button id="fif-regex" class="find-toggle" type="button" title="Regular expression">.*</button>
+              </div>
+            </div>
+            <input id="fif-glob" class="fif-input" type="text" placeholder="Files to include — e.g. *.ts,*.md" spellcheck="false" />
+            <div class="fif-folderrow">
+              <button id="fif-folder" class="find-btn" type="button">Choose Folder…</button>
+              <span id="fif-folder-label" class="fif-folder-label">No folder chosen</span>
+            </div>
+            <button id="fif-run" class="find-btn find-btn-primary" type="button">Search</button>
+          </div>
+          <div id="fif-summary" class="fif-summary"></div>
+          <div id="fif-results" class="fif-results"></div>
+        </aside>
       </main>
 
       <footer class="statusbar">
@@ -87,12 +181,25 @@
             <select id="lang-select" aria-label="Editor language"></select>
           </label>
           <span class="status-sep">·</span>
-          <button id="encoding-btn" class="status-btn" type="button" title="Encoding">UTF-8</button>
-          <button id="eol-btn" class="status-btn" type="button" title="Toggle line endings">LF</button>
+          <button id="ws-toggle" class="status-btn" type="button" title="Show whitespace">¶</button>
+          <button id="encoding-btn" class="status-btn" type="button" title="Encoding" aria-haspopup="true">UTF-8</button>
+          <button id="eol-btn" class="status-btn" type="button" title="Line endings" aria-haspopup="true">LF</button>
           <span class="status-sep">·</span>
           <span id="cursor-pos" class="cursor-pos">Ln 1, Col 1</span>
         </div>
       </footer>
+
+      <div id="encoding-menu" class="status-menu" hidden>
+        <button class="status-menu-item" data-enc="UTF-8" type="button">UTF-8</button>
+        <button class="status-menu-item" data-enc="UTF-8-BOM" type="button">UTF-8 with BOM</button>
+        <button class="status-menu-item" data-enc="UTF-16LE" type="button">UTF-16 LE</button>
+        <button class="status-menu-item" data-enc="UTF-16BE" type="button">UTF-16 BE</button>
+      </div>
+      <div id="eol-menu" class="status-menu" hidden>
+        <button class="status-menu-item" data-eol="LF" type="button">LF — Unix / macOS</button>
+        <button class="status-menu-item" data-eol="CRLF" type="button">CRLF — Windows</button>
+        <button class="status-menu-item" data-eol="CR" type="button">CR — Classic Mac</button>
+      </div>
     </div>
 
     <div id="prefs-overlay" class="modal-overlay" hidden>
@@ -134,6 +241,14 @@
               <div class="prefs-row">
                 <span class="prefs-row-label">Word wrap</span>
                 <label class="switch"><input id="pref-wrap" type="checkbox" /><span class="switch-track"></span></label>
+              </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">Show whitespace</span>
+                <label class="switch"><input id="pref-whitespace" type="checkbox" /><span class="switch-track"></span></label>
+              </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">Indent guides</span>
+                <label class="switch"><input id="pref-guides" type="checkbox" /><span class="switch-track"></span></label>
               </div>
               <div class="prefs-row">
                 <span class="prefs-row-label">Default new-file language</span>

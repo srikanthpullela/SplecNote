@@ -56,11 +56,16 @@ pub mod core {
         }
     }
 
-    /// Detect the dominant line ending of `s`. Returns "crlf" or "lf".
+    /// Detect the dominant line ending of `s`. Returns "CRLF", "CR" or "LF".
     pub fn detect_eol(s: &str) -> &'static str {
-        match s.find('\n') {
-            Some(i) if i > 0 && s.as_bytes()[i - 1] == b'\r' => "crlf",
-            _ => "lf",
+        if s.contains("\r\n") {
+            "CRLF"
+        } else if s.contains('\n') {
+            "LF"
+        } else if s.contains('\r') {
+            "CR"
+        } else {
+            "LF"
         }
     }
 
@@ -69,13 +74,106 @@ pub mod core {
         s.replace("\r\n", "\n").replace('\r', "\n")
     }
 
-    /// Convert LF text to the requested EOL ("crlf" => CRLF, anything else => LF).
+    /// Convert LF text to the requested EOL ("CRLF" => CRLF, "CR" => CR, else LF).
     pub fn apply_eol(s: &str, eol: &str) -> String {
         let lf = normalize_to_lf(s);
         if eol.eq_ignore_ascii_case("crlf") {
             lf.replace('\n', "\r\n")
+        } else if eol.eq_ignore_ascii_case("cr") {
+            lf.replace('\n', "\r")
         } else {
             lf
+        }
+    }
+
+    /// Canonical encoding labels understood by Splec Note.
+    pub fn canonical_encoding(enc: &str) -> &'static str {
+        match enc.to_ascii_uppercase().replace('_', "-").as_str() {
+            "UTF-8-BOM" | "UTF8-BOM" => "UTF-8-BOM",
+            "UTF-16LE" | "UTF16LE" => "UTF-16LE",
+            "UTF-16BE" | "UTF16BE" => "UTF-16BE",
+            _ => "UTF-8",
+        }
+    }
+
+    /// Decode raw file bytes to a UTF-8 string, detecting the encoding from a BOM
+    /// (or a light heuristic for BOM-less UTF-16). Returns (text, encoding label).
+    pub fn decode_bytes(raw: &[u8]) -> (String, &'static str) {
+        // BOM sniffing first — unambiguous.
+        if raw.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            return (String::from_utf8_lossy(&raw[3..]).into_owned(), "UTF-8-BOM");
+        }
+        if raw.starts_with(&[0xFF, 0xFE]) {
+            return (decode_utf16(&raw[2..], false), "UTF-16LE");
+        }
+        if raw.starts_with(&[0xFE, 0xFF]) {
+            return (decode_utf16(&raw[2..], true), "UTF-16BE");
+        }
+        // BOM-less UTF-16 heuristic: scan a window for NUL bytes biased to one side.
+        let window = &raw[..raw.len().min(4096)];
+        if window.len() >= 2 {
+            let mut zero_even = 0usize; // NUL at even index => UTF-16BE (hi byte 0)
+            let mut zero_odd = 0usize; //  NUL at odd index  => UTF-16LE (hi byte 0)
+            for (i, &b) in window.iter().enumerate() {
+                if b == 0 {
+                    if i % 2 == 0 {
+                        zero_even += 1;
+                    } else {
+                        zero_odd += 1;
+                    }
+                }
+            }
+            let total = window.len();
+            if zero_odd * 4 > total && zero_odd > zero_even * 4 {
+                return (decode_utf16(raw, false), "UTF-16LE");
+            }
+            if zero_even * 4 > total && zero_even > zero_odd * 4 {
+                return (decode_utf16(raw, true), "UTF-16BE");
+            }
+        }
+        (String::from_utf8_lossy(raw).into_owned(), "UTF-8")
+    }
+
+    /// Decode UTF-16 bytes (already past any BOM) in the given endianness.
+    fn decode_utf16(bytes: &[u8], big_endian: bool) -> String {
+        let mut units: Vec<u16> = Vec::with_capacity(bytes.len() / 2);
+        let mut i = 0;
+        while i + 1 < bytes.len() {
+            let unit = if big_endian {
+                u16::from_be_bytes([bytes[i], bytes[i + 1]])
+            } else {
+                u16::from_le_bytes([bytes[i], bytes[i + 1]])
+            };
+            units.push(unit);
+            i += 2;
+        }
+        String::from_utf16_lossy(&units)
+    }
+
+    /// Encode LF text into the target encoding + EOL, including any BOM.
+    pub fn encode_bytes(text_lf: &str, encoding: &str, eol: &str) -> Vec<u8> {
+        let s = apply_eol(text_lf, eol);
+        match canonical_encoding(encoding) {
+            "UTF-8-BOM" => {
+                let mut out = vec![0xEF, 0xBB, 0xBF];
+                out.extend_from_slice(s.as_bytes());
+                out
+            }
+            "UTF-16LE" => {
+                let mut out = vec![0xFF, 0xFE];
+                for u in s.encode_utf16() {
+                    out.extend_from_slice(&u.to_le_bytes());
+                }
+                out
+            }
+            "UTF-16BE" => {
+                let mut out = vec![0xFE, 0xFF];
+                for u in s.encode_utf16() {
+                    out.extend_from_slice(&u.to_be_bytes());
+                }
+                out
+            }
+            _ => s.into_bytes(),
         }
     }
 
@@ -232,6 +330,7 @@ pub struct SessionPaths {
 pub struct FileRead {
     pub content: String,
     pub eol: String,
+    pub encoding: String,
     pub mtime_ms: Option<u64>,
     pub size: u64,
 }
@@ -265,31 +364,41 @@ pub fn session_paths(app: AppHandle) -> Result<SessionPaths, String> {
     })
 }
 
-/// Read a real file from disk, normalizing EOL to LF and reporting the detected EOL.
+/// Read a real file from disk, normalizing EOL to LF and reporting the detected
+/// EOL + encoding (BOM-aware, with a light BOM-less UTF-16 heuristic).
 #[tauri::command]
 pub fn read_text_file(path: String) -> Result<FileRead, String> {
     let raw = fs::read(&path).map_err(|e| e.to_string())?;
     let size = raw.len() as u64;
-    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (text, encoding) = core::decode_bytes(&raw);
     let eol = core::detect_eol(&text).to_string();
     let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
     Ok(FileRead {
         content: core::normalize_to_lf(&text),
         eol,
+        encoding: encoding.to_string(),
         mtime_ms: mtime_ms(&meta),
         size,
     })
 }
 
-/// Atomically write a real file. `content` is LF text; it is converted to `eol` first.
+/// Atomically write a real file. `content` is LF text; it is converted to `eol`
+/// and encoded as `encoding` (with any BOM) before writing.
 #[tauri::command]
-pub fn write_text_file(path: String, content: String, eol: String) -> Result<WriteResult, String> {
-    let out = core::apply_eol(&content, &eol);
-    core::atomic_write(Path::new(&path), out.as_bytes()).map_err(|e| e.to_string())?;
+pub fn write_text_file(
+    path: String,
+    content: String,
+    eol: String,
+    encoding: Option<String>,
+) -> Result<WriteResult, String> {
+    let enc = encoding.unwrap_or_else(|| "UTF-8".to_string());
+    let out = core::encode_bytes(&content, &enc, &eol);
+    let len = out.len() as u64;
+    core::atomic_write(Path::new(&path), &out).map_err(|e| e.to_string())?;
     let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
     Ok(WriteResult {
         mtime_ms: mtime_ms(&meta),
-        size: out.len() as u64,
+        size: len,
     })
 }
 
@@ -414,12 +523,43 @@ mod tests {
 
     #[test]
     fn eol_detection_and_roundtrip() {
-        assert_eq!(detect_eol("a\r\nb"), "crlf");
-        assert_eq!(detect_eol("a\nb"), "lf");
-        assert_eq!(detect_eol("no newline"), "lf");
+        assert_eq!(detect_eol("a\r\nb"), "CRLF");
+        assert_eq!(detect_eol("a\nb"), "LF");
+        assert_eq!(detect_eol("a\rb"), "CR");
+        assert_eq!(detect_eol("no newline"), "LF");
         assert_eq!(normalize_to_lf("a\r\nb\rc"), "a\nb\nc");
         assert_eq!(apply_eol("a\nb", "crlf"), "a\r\nb");
         assert_eq!(apply_eol("a\r\nb", "lf"), "a\nb");
+        assert_eq!(apply_eol("a\nb", "cr"), "a\rb");
+    }
+
+    #[test]
+    fn encoding_detect_and_roundtrip() {
+        // UTF-8 (no BOM)
+        let (t, e) = decode_bytes("héllo".as_bytes());
+        assert_eq!(t, "héllo");
+        assert_eq!(e, "UTF-8");
+        // UTF-8 BOM
+        let mut bom8 = vec![0xEF, 0xBB, 0xBF];
+        bom8.extend_from_slice("hi".as_bytes());
+        let (t, e) = decode_bytes(&bom8);
+        assert_eq!(t, "hi");
+        assert_eq!(e, "UTF-8-BOM");
+        // UTF-16LE with BOM
+        let le = encode_bytes("hi\nx", "UTF-16LE", "LF");
+        assert_eq!(&le[..2], &[0xFF, 0xFE]);
+        let (t, e) = decode_bytes(&le);
+        assert_eq!(t, "hi\nx");
+        assert_eq!(e, "UTF-16LE");
+        // UTF-16BE with BOM
+        let be = encode_bytes("hi", "UTF-16BE", "LF");
+        assert_eq!(&be[..2], &[0xFE, 0xFF]);
+        let (t, e) = decode_bytes(&be);
+        assert_eq!(t, "hi");
+        assert_eq!(e, "UTF-16BE");
+        // UTF-8-BOM encode prepends BOM
+        let b = encode_bytes("z", "UTF-8-BOM", "LF");
+        assert_eq!(&b[..3], &[0xEF, 0xBB, 0xBF]);
     }
 
     #[test]

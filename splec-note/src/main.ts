@@ -21,7 +21,18 @@ import {
   type IconNode,
 } from "lucide";
 import { redo, undo } from "@codemirror/commands";
+import { selectNextOccurrence } from "@codemirror/search";
 import { EditorHost, countText } from "./editorHost";
+import * as T from "./transforms";
+import { goToLine } from "./transforms";
+import {
+  toggleBookmark,
+  jumpBookmark,
+  clearAllBookmarks,
+  bookmarkLines,
+} from "./bookmarks";
+import { FindController } from "./findController";
+import { FindInFilesController } from "./findInFiles";
 import {
   BufferStore,
   baseName,
@@ -64,10 +75,12 @@ export interface NewBufferOptions {
   title?: string;
   language?: string;
   content?: string;
-  eol?: "LF" | "CRLF";
+  encoding?: string;
+  eol?: "LF" | "CRLF" | "CR";
   dirty?: boolean;
   cursor?: { anchor: number; head: number };
   scrollTop?: number;
+  bookmarks?: number[];
   diskMtimeMs?: number | null;
   diskSize?: number | null;
   backup?: string | null;
@@ -80,6 +93,8 @@ export class SplecApp {
   statusBar!: StatusBar;
   fileOps!: FileOps;
   session!: SessionManager;
+  find!: FindController;
+  findFiles!: FindInFilesController;
   recent: string[] = [];
 
   private mode: ThemeMode = "light";
@@ -98,6 +113,8 @@ export class SplecApp {
       wrap: this.prefs.wordWrap,
       tabSize: this.prefs.tabSize,
       fontSize: this.prefs.fontSize,
+      showWhitespace: this.prefs.showWhitespace,
+      indentGuides: this.prefs.indentGuides,
       callbacks: {
         onDocChanged: () => this.handleDocChanged(),
         onSelectionChanged: () => this.refreshStatus(),
@@ -107,18 +124,26 @@ export class SplecApp {
 
     this.statusBar = new StatusBar({
       onLanguageChange: (id) => void this.setActiveLanguage(id),
-      onEolToggle: () => this.toggleEol(),
+      onEolChange: (eol) => this.setEol(eol),
+      onEncodingChange: (enc) => this.setEncoding(enc),
       onWrapToggle: () => this.toggleWrap(),
+      onWhitespaceToggle: () => this.toggleWhitespace(),
     });
 
     this.fileOps = new FileOps(this);
     this.session = new SessionManager(this);
+    this.find = new FindController(() => this.host.view, (m) => this.setMessage(m));
+    this.findFiles = new FindInFilesController(
+      (file, line, col) => void this.openAtLocation(file, line, col),
+      (m) => this.setMessage(m),
+    );
 
     this.renderThemeButton(this.mode);
     this.renderToolbarIcons();
     this.wireChrome();
     this.wireKeyboard();
     this.wirePrefsModal();
+    this.statusBar.setWhitespaceOn(this.prefs.showWhitespace);
 
     // Restore previous session unless launched as a clean window or disabled.
     const cleanWindow = new URLSearchParams(location.search).get("new") === "1";
@@ -148,10 +173,10 @@ export class SplecApp {
       path: opts.path ?? null,
       title: opts.title ?? nextUntitledTitle(),
       language: opts.language ?? "plaintext",
-      encoding: "UTF-8",
+      encoding: opts.encoding ?? "UTF-8",
       eol: opts.eol ?? "LF",
       dirty: opts.dirty ?? false,
-      state: this.host.createState(content, [], opts.cursor),
+      state: this.host.createState(content, [], opts.cursor, opts.bookmarks),
       scrollTop: opts.scrollTop ?? 0,
       diskMtimeMs: opts.diskMtimeMs ?? null,
       diskSize: opts.diskSize ?? null,
@@ -190,6 +215,7 @@ export class SplecApp {
     this.host.show(buf.state, langExt, buf.scrollTop);
     this.host.focus();
     this.refreshAll();
+    this.find?.refresh();
   }
 
   /**
@@ -209,6 +235,7 @@ export class SplecApp {
     this.host.show(buf.state, langExt, buf.scrollTop);
     this.host.focus();
     this.refreshAll();
+    this.find?.refresh();
   }
 
   /** Live EditorState for a buffer (the active one lives in the view). */
@@ -229,6 +256,22 @@ export class SplecApp {
     return this.store.activeIdValue() === buf.id
       ? this.host.view.scrollDOM.scrollTop
       : buf.scrollTop;
+  }
+
+  bookmarksOf(buf: Buffer): number[] {
+    return bookmarkLines(this.liveState(buf));
+  }
+
+  /** Open a file (if needed) and move the cursor to a 1-based line/column. */
+  async openAtLocation(path: string, line: number, col: number): Promise<void> {
+    await this.fileOps.openPath(path);
+    const buf = this.store.list().find((b) => b.path === path);
+    if (!buf || this.store.activeIdValue() !== buf.id) return;
+    const view = this.host.view;
+    const lineInfo = view.state.doc.line(Math.max(1, Math.min(view.state.doc.lines, line)));
+    const pos = Math.min(lineInfo.to, lineInfo.from + Math.max(0, col - 1));
+    view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+    view.focus();
   }
 
   async setActiveLanguage(id: string): Promise<void> {
@@ -355,18 +398,56 @@ export class SplecApp {
   toggleWrap(): void {
     this.prefs.wordWrap = !this.prefs.wordWrap;
     this.host.setWrap(this.prefs.wordWrap);
+    this.syncViewMenuChecks();
     this.refreshStatus();
     void savePrefs(this.prefs);
   }
 
   toggleEol(): void {
+    const order: Array<"LF" | "CRLF" | "CR"> = ["LF", "CRLF", "CR"];
     const buf = this.store.active();
     if (!buf) return;
-    buf.eol = buf.eol === "LF" ? "CRLF" : "LF";
+    const next = order[(order.indexOf(buf.eol) + 1) % order.length];
+    this.setEol(next);
+  }
+
+  setEol(eol: "LF" | "CRLF" | "CR"): void {
+    const buf = this.store.active();
+    if (!buf || buf.eol === eol) return;
+    buf.eol = eol;
     buf.dirty = true;
     this.refreshTabs();
     this.refreshStatus();
+    this.setMessage(`Line endings: ${eol}`);
     this.scheduleAutosave();
+  }
+
+  setEncoding(encoding: string): void {
+    const buf = this.store.active();
+    if (!buf || buf.encoding === encoding) return;
+    buf.encoding = encoding;
+    buf.dirty = true;
+    this.refreshTabs();
+    this.refreshStatus();
+    this.setMessage(`Encoding: ${encoding} (applied on next save)`);
+    this.scheduleAutosave();
+  }
+
+  toggleWhitespace(): void {
+    const on = !this.host.isShowWhitespace();
+    this.host.setShowWhitespace(on);
+    this.prefs.showWhitespace = on;
+    this.statusBar.setWhitespaceOn(on);
+    this.syncViewMenuChecks();
+    void savePrefs(this.prefs);
+  }
+
+  toggleIndentGuides(): void {
+    const on = !this.prefs.indentGuides;
+    this.prefs.indentGuides = on;
+    this.host.setIndentGuides(on);
+    this.syncViewMenuChecks();
+    void savePrefs(this.prefs);
   }
 
   applyPrefs(next: Prefs): void {
@@ -374,8 +455,24 @@ export class SplecApp {
     this.host.setFontSize(next.fontSize);
     this.host.setTabSize(next.tabSize);
     this.host.setWrap(next.wordWrap);
+    this.host.setShowWhitespace(next.showWhitespace);
+    this.host.setIndentGuides(next.indentGuides);
+    this.statusBar.setWhitespaceOn(next.showWhitespace);
+    this.syncViewMenuChecks();
     this.refreshStatus();
     void savePrefs(next);
+  }
+
+  /** Reflect View-menu checkbox state for the toggle items. */
+  syncViewMenuChecks(): void {
+    const set = (act: string, on: boolean) => {
+      document
+        .querySelector<HTMLElement>(`.menu-item-check[data-act="${act}"]`)
+        ?.classList.toggle("is-checked", on);
+    };
+    set("wrap", this.prefs.wordWrap);
+    set("whitespace", this.prefs.showWhitespace);
+    set("indentGuides", this.prefs.indentGuides);
   }
 
   // ---- Theme ---------------------------------------------------------------
@@ -454,6 +551,47 @@ export class SplecApp {
     document.querySelector("#settings-toggle")?.addEventListener("click", () => this.openPrefs());
 
     this.wireMenu();
+    this.wireGotoLine();
+    this.syncViewMenuChecks();
+  }
+
+  // ---- Go to line ----------------------------------------------------------
+
+  private openGotoLine(): void {
+    const overlay = document.querySelector<HTMLElement>("#goto-overlay");
+    const input = document.querySelector<HTMLInputElement>("#goto-input");
+    if (!overlay || !input) return;
+    const info = this.host.cursorInfo();
+    input.value = "";
+    input.placeholder = `Line (1–${this.host.view.state.doc.lines}) — current ${info.line}`;
+    overlay.hidden = false;
+    input.focus();
+  }
+
+  private closeGotoLine(): void {
+    const overlay = document.querySelector<HTMLElement>("#goto-overlay");
+    if (overlay) overlay.hidden = true;
+    this.host.focus();
+  }
+
+  private wireGotoLine(): void {
+    const input = document.querySelector<HTMLInputElement>("#goto-input");
+    const overlay = document.querySelector<HTMLElement>("#goto-overlay");
+    if (!input || !overlay) return;
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const n = Number(input.value);
+        if (Number.isFinite(n) && n >= 1) goToLine(this.host.view, n);
+        this.closeGotoLine();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        this.closeGotoLine();
+      }
+    });
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) this.closeGotoLine();
+    });
   }
 
   private chooseMode(mode: ThemeMode): void {
@@ -489,6 +627,10 @@ export class SplecApp {
   }
 
   private runMenuAction(act: string): void {
+    const run = (fn: (v: import("@codemirror/view").EditorView) => boolean) => {
+      fn(this.host.view);
+      this.host.focus();
+    };
     switch (act) {
       case "new": this.newBuffer(); break;
       case "open": void this.fileOps.openDialog(); break;
@@ -501,6 +643,32 @@ export class SplecApp {
       }
       case "newWindow": void this.session.openCleanWindow(); break;
       case "prefs": this.openPrefs(); break;
+      // Search
+      case "find": this.find.open("find"); break;
+      case "replace": this.find.open("replace"); break;
+      case "findInFiles": this.findFiles.open(); break;
+      case "gotoLine": this.openGotoLine(); break;
+      // Edit
+      case "toggleComment": run(T.toggleComment); break;
+      case "selectNext": run(selectNextOccurrence); break;
+      case "duplicateLine": run(T.duplicateLine); break;
+      case "moveLineUp": run(T.moveLineUp); break;
+      case "moveLineDown": run(T.moveLineDown); break;
+      case "toggleBookmark": run(toggleBookmark); break;
+      case "nextBookmark": run((v) => jumpBookmark(v, 1)); break;
+      case "clearBookmarks": run(clearAllBookmarks); break;
+      case "upper": run(T.toUpperCase); break;
+      case "lower": run(T.toLowerCase); break;
+      case "title": run(T.toTitleCase); break;
+      case "sortAsc": run(T.sortLinesAsc); break;
+      case "sortDesc": run(T.sortLinesDesc); break;
+      case "sortUnique": run(T.sortLinesUnique); break;
+      case "trim": run(T.trimTrailingWhitespace); break;
+      case "join": run(T.joinLines); break;
+      // View
+      case "wrap": this.toggleWrap(); break;
+      case "whitespace": this.toggleWhitespace(); break;
+      case "indentGuides": this.toggleIndentGuides(); break;
     }
   }
 
@@ -557,6 +725,8 @@ export class SplecApp {
     const font = document.querySelector<HTMLInputElement>("#pref-font");
     const tab = document.querySelector<HTMLSelectElement>("#pref-tab");
     const wrap = document.querySelector<HTMLInputElement>("#pref-wrap");
+    const whitespace = document.querySelector<HTMLInputElement>("#pref-whitespace");
+    const guides = document.querySelector<HTMLInputElement>("#pref-guides");
     const restore = document.querySelector<HTMLInputElement>("#pref-restore");
     const autosave = document.querySelector<HTMLInputElement>("#pref-autosave");
     const apply = () => {
@@ -565,6 +735,8 @@ export class SplecApp {
         fontSize: Number(font?.value ?? this.prefs.fontSize),
         tabSize: Number(tab?.value ?? this.prefs.tabSize),
         wordWrap: Boolean(wrap?.checked),
+        showWhitespace: whitespace ? whitespace.checked : this.prefs.showWhitespace,
+        indentGuides: guides ? guides.checked : this.prefs.indentGuides,
         defaultLanguage: langSel?.value ?? this.prefs.defaultLanguage,
         restoreSession: restore ? restore.checked : this.prefs.restoreSession,
         autosave: autosave ? autosave.checked : this.prefs.autosave,
@@ -573,6 +745,8 @@ export class SplecApp {
     font?.addEventListener("change", apply);
     tab?.addEventListener("change", apply);
     wrap?.addEventListener("change", apply);
+    whitespace?.addEventListener("change", apply);
+    guides?.addEventListener("change", apply);
     langSel?.addEventListener("change", apply);
     restore?.addEventListener("change", apply);
     autosave?.addEventListener("change", apply);
@@ -595,6 +769,8 @@ export class SplecApp {
     document.querySelector<HTMLInputElement>("#pref-font")!.value = String(this.prefs.fontSize);
     document.querySelector<HTMLSelectElement>("#pref-tab")!.value = String(this.prefs.tabSize);
     document.querySelector<HTMLInputElement>("#pref-wrap")!.checked = this.prefs.wordWrap;
+    document.querySelector<HTMLInputElement>("#pref-whitespace")!.checked = this.prefs.showWhitespace;
+    document.querySelector<HTMLInputElement>("#pref-guides")!.checked = this.prefs.indentGuides;
     document.querySelector<HTMLSelectElement>("#pref-lang")!.value = this.prefs.defaultLanguage;
     document.querySelector<HTMLInputElement>("#pref-restore")!.checked = this.prefs.restoreSession;
     document.querySelector<HTMLInputElement>("#pref-autosave")!.checked = this.prefs.autosave;
@@ -647,6 +823,18 @@ export class SplecApp {
         e.preventDefault();
         const a = this.store.active();
         if (a) void this.fileOps.close(a.id);
+      } else if (key === "f" && e.shiftKey) {
+        e.preventDefault();
+        this.findFiles.open();
+      } else if (key === "f") {
+        e.preventDefault();
+        this.find.open("find");
+      } else if (key === "h") {
+        e.preventDefault();
+        this.find.open("replace");
+      } else if (key === "g") {
+        e.preventDefault();
+        this.openGotoLine();
       } else if (key === ",") {
         e.preventDefault();
         this.openPrefs();

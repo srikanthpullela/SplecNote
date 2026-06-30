@@ -14,8 +14,8 @@ export interface Buffer {
   title: string;
   /** Language id (see languages.ts). */
   language: string;
-  encoding: string; // "UTF-8"
-  eol: "LF" | "CRLF";
+  encoding: string; // "UTF-8" | "UTF-8-BOM" | "UTF-16LE" | "UTF-16BE"
+  eol: "LF" | "CRLF" | "CR";
   dirty: boolean;
   /** Per-buffer CodeMirror state (null only transiently before first show). */
   state: EditorState | null;

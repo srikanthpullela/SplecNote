@@ -1,4 +1,5 @@
-// Status bar: line/col, selection, language picker, encoding, EOL, word/char counts.
+// Status bar: line/col, selection, language picker, encoding, EOL, whitespace,
+// word/char counts. Encoding and EOL open small popup menus to convert.
 
 import { PICKER_ORDER, languageLabel } from "./languages";
 
@@ -8,7 +9,7 @@ export interface StatusInfo {
   selLen: number;
   language: string;
   encoding: string;
-  eol: "LF" | "CRLF";
+  eol: "LF" | "CRLF" | "CR";
   words: number;
   chars: number;
   wordWrap: boolean;
@@ -16,8 +17,10 @@ export interface StatusInfo {
 
 export interface StatusHandlers {
   onLanguageChange: (id: string) => void;
-  onEolToggle: () => void;
+  onEolChange: (eol: "LF" | "CRLF" | "CR") => void;
+  onEncodingChange: (encoding: string) => void;
   onWrapToggle: () => void;
+  onWhitespaceToggle: () => void;
 }
 
 export class StatusBar {
@@ -27,10 +30,12 @@ export class StatusBar {
   private encodingBtn = document.querySelector<HTMLButtonElement>("#encoding-btn")!;
   private eolBtn = document.querySelector<HTMLButtonElement>("#eol-btn")!;
   private wrapBtn = document.querySelector<HTMLButtonElement>("#wrap-toggle")!;
+  private wsBtn = document.querySelector<HTMLButtonElement>("#ws-toggle")!;
+  private encodingMenu = document.querySelector<HTMLElement>("#encoding-menu")!;
+  private eolMenu = document.querySelector<HTMLElement>("#eol-menu")!;
   private msg = document.querySelector<HTMLElement>("#status-msg")!;
 
   constructor(handlers: StatusHandlers) {
-    // Populate language picker once.
     this.langSelect.replaceChildren();
     for (const id of PICKER_ORDER) {
       const opt = document.createElement("option");
@@ -41,8 +46,46 @@ export class StatusBar {
     this.langSelect.addEventListener("change", () =>
       handlers.onLanguageChange(this.langSelect.value),
     );
-    this.eolBtn.addEventListener("click", () => handlers.onEolToggle());
     this.wrapBtn.addEventListener("click", () => handlers.onWrapToggle());
+    this.wsBtn.addEventListener("click", () => handlers.onWhitespaceToggle());
+
+    this.wireMenu(this.encodingBtn, this.encodingMenu, "enc", (v) => handlers.onEncodingChange(v));
+    this.wireMenu(this.eolBtn, this.eolMenu, "eol", (v) =>
+      handlers.onEolChange(v as "LF" | "CRLF" | "CR"),
+    );
+
+    document.addEventListener("click", () => this.closeMenus());
+  }
+
+  private wireMenu(
+    btn: HTMLButtonElement,
+    menu: HTMLElement,
+    dataKey: string,
+    onPick: (value: string) => void,
+  ): void {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = menu.hidden;
+      this.closeMenus();
+      if (open) {
+        const rect = btn.getBoundingClientRect();
+        menu.style.left = `${Math.min(rect.left, window.innerWidth - 200)}px`;
+        menu.style.bottom = `${window.innerHeight - rect.top + 6}px`;
+        menu.hidden = false;
+      }
+    });
+    menu.addEventListener("click", (e) => e.stopPropagation());
+    menu.querySelectorAll<HTMLButtonElement>(".status-menu-item").forEach((item) => {
+      item.addEventListener("click", () => {
+        menu.hidden = true;
+        onPick(item.dataset[dataKey]!);
+      });
+    });
+  }
+
+  private closeMenus(): void {
+    this.encodingMenu.hidden = true;
+    this.eolMenu.hidden = true;
   }
 
   setMessage(text: string): void {
@@ -62,8 +105,12 @@ export class StatusBar {
     this.wrapBtn.classList.toggle("is-on", info.wordWrap);
   }
 
+  setWhitespaceOn(on: boolean): void {
+    this.wsBtn.classList.toggle("is-on", on);
+  }
+
   setEnabled(enabled: boolean): void {
-    for (const el of [this.langSelect, this.encodingBtn, this.eolBtn]) {
+    for (const el of [this.langSelect, this.encodingBtn, this.eolBtn, this.wsBtn]) {
       el.toggleAttribute("disabled", !enabled);
     }
   }
