@@ -256,6 +256,9 @@ export class SplecApp {
     this.session.startAutosaveLifecycle();
     void this.session.cleanup();
 
+    // Handle files the OS asks us to open ("Open With Splec Note" / double-click).
+    void this.wireOSFileOpen();
+
     // Silent, production-only update check (no-op without a release server).
     void this.checkForUpdates(false);
 
@@ -1722,6 +1725,47 @@ export class SplecApp {
   }
 
   // ---- Native menu (macOS) -------------------------------------------------
+
+  /**
+   * Open files the OS handed us via "Open With Splec Note" or a double-click
+   * on an associated file type. Cold launches are drained from a backend queue
+   * (the open event can fire before the webview is ready); while the app is
+   * already running we receive them live via the "splec-open-files" event.
+   */
+  private async wireOSFileOpen(): Promise<void> {
+    if (!isTauri()) return;
+    // Live opens while the app is already running.
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      void listen<string[]>("splec-open-files", (event) => {
+        void this.openPathsFromOS(event.payload);
+      });
+    });
+    // Cold-launch: drain anything queued before this listener existed.
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const pending = await invoke<string[]>("take_pending_open_files");
+      if (pending && pending.length) await this.openPathsFromOS(pending);
+    } catch {
+      /* command unavailable outside Tauri */
+    }
+  }
+
+  private async openPathsFromOS(paths: string[]): Promise<void> {
+    let opened = false;
+    for (const p of paths) {
+      if (!p) continue;
+      await this.fileOps.openPath(p);
+      opened = true;
+    }
+    if (opened) {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        await getCurrentWindow().setFocus();
+      } catch {
+        /* ignore focus errors */
+      }
+    }
+  }
 
   /** Listen for native menu selections emitted from the Rust backend. */
   private wireNativeMenu(): void {

@@ -7,6 +7,33 @@ mod session;
 #[cfg(target_os = "macos")]
 mod menu;
 
+use std::sync::Mutex;
+use tauri::{Emitter, Manager, RunEvent};
+
+/// Files the OS asked us to open (via "Open With" / double-click) before the
+/// webview was ready to receive them. Drained by the frontend on startup.
+#[derive(Default)]
+struct PendingOpen(Mutex<Vec<String>>);
+
+/// Drain and return any files queued by macOS file-open events.
+#[tauri::command]
+fn take_pending_open_files(state: tauri::State<'_, PendingOpen>) -> Vec<String> {
+    let mut pending = state.0.lock().unwrap();
+    std::mem::take(&mut *pending)
+}
+
+/// Convert the URLs from a macOS open-document event into local file paths.
+fn urls_to_paths(urls: &[tauri::Url]) -> Vec<String> {
+    urls.iter()
+        .map(|u| {
+            u.to_file_path()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| u.as_str().to_string())
+        })
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
@@ -38,6 +65,7 @@ pub fn run() {
     }
 
     builder
+        .manage(PendingOpen::default())
         .invoke_handler(tauri::generate_handler![
             session::session_paths,
             session::read_text_file,
@@ -50,7 +78,23 @@ pub fn run() {
             session::load_session,
             session::cleanup_backups,
             search::find_in_files,
+            take_pending_open_files,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Splec Note");
+        .build(tauri::generate_context!())
+        .expect("error while building Splec Note")
+        .run(|app_handle, event| {
+            // macOS delivers "Open With Splec Note" / double-click as an
+            // open-documents Apple Event. Queue the paths (for cold launch,
+            // before the webview is ready) and also emit them live (for when
+            // the app is already running).
+            if let RunEvent::Opened { urls } = event {
+                let paths = urls_to_paths(&urls);
+                if !paths.is_empty() {
+                    if let Some(state) = app_handle.try_state::<PendingOpen>() {
+                        state.0.lock().unwrap().extend(paths.clone());
+                    }
+                    let _ = app_handle.emit("splec-open-files", paths);
+                }
+            }
+        });
 }

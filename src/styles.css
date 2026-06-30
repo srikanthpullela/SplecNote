@@ -159,8 +159,9 @@ body {
 
 .wordmark {
   display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
   line-height: 1;
 }
 
@@ -171,16 +172,28 @@ body {
   background: var(--splec-gradient);
   -webkit-background-clip: text;
   background-clip: text;
+  -webkit-text-fill-color: transparent;
   color: transparent;
   padding-right: 1px;
 }
 
+/* Header brand: authentic Splec lockup — script "Splec" over a small,
+   letter-spaced "NOTE" subtitle, mirroring the studio wordmark. */
+.brand .wordmark-splec {
+  font-size: 30px;
+  letter-spacing: 0.01em;
+  line-height: 1;
+}
+
 .wordmark-note {
   font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 16px;
-  letter-spacing: 0.2px;
-  color: var(--text-strong);
+  font-weight: 500;
+  font-size: 8.5px;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding-left: 3px;
+  margin-top: 1px;
 }
 
 .titlebar-actions {
@@ -1015,36 +1028,60 @@ body {
 
 .prefs-head {
   position: relative;
-  display: grid;
-  place-items: center;
-  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 14px 16px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
+}
+
+/* Horizontal "Splec Note" brand lockup, used only in the Preferences header. */
+.prefs-wordmark {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.prefs-wordmark .wordmark-splec {
+  font-size: 26px;
+  letter-spacing: 0.01em;
+}
+
+.prefs-wordmark .wordmark-note {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  text-transform: none;
+  color: var(--text-strong);
+  padding-left: 0;
+  margin-top: 0;
 }
 
 .prefs-title {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 14px;
+  font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.2px;
-  color: var(--text-strong);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
 
 .prefs-close {
   position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 30px;
-  height: 30px;
+  right: 12px;
+  top: 12px;
+  width: 28px;
+  height: 28px;
   display: grid;
   place-items: center;
   border: none;
   border-radius: 50%;
   background: var(--bg-hover);
   color: var(--text-muted);
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1;
   cursor: pointer;
   transition: background 0.14s ease, color 0.14s ease, transform 0.12s ease;
@@ -1053,7 +1090,7 @@ body {
 .prefs-close:hover {
   color: var(--text-strong);
   background: var(--border);
-  transform: translateY(-50%) scale(1.06);
+  transform: scale(1.06);
 }
 
 .prefs-body {
