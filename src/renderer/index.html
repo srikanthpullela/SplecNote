@@ -1262,6 +1262,14 @@
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>
       </button>
     </div>
+    <div class="dbg-liveorg" title="When ON, SOQL queries run against the connected Salesforce org so variables hold real data. DML is always simulated (never written to the org).">
+      <label class="dbg-liveorg-toggle">
+        <input type="checkbox" id="dbg-liveorg-checkbox" disabled />
+        <span class="dbg-liveorg-slider"></span>
+        <span class="dbg-liveorg-text">⚡ Live Org</span>
+      </label>
+      <span id="dbg-liveorg-status" class="dbg-liveorg-status disconnected">no org connected</span>
+    </div>
   </div>
 
   <!-- Debug Bottom Panel (Variables, Call Stack, Console, Breakpoints) -->

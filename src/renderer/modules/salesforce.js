@@ -3423,4 +3423,17 @@
 
   window.initSalesforce = init;
   window.refreshSalesforceOrgs = checkOrgConnection;
+
+  /**
+   * Expose the currently selected/connected org so other modules (e.g. the Apex
+   * debugger's Live Org mode) can run CLI queries against it.
+   * @returns {{ org: string|null, connected: boolean, info: object|null }}
+   */
+  window.sfGetActiveOrg = function () {
+    return {
+      org: sfState.selectedOrg || null,
+      connected: !!sfState.orgConnected,
+      info: sfState.orgInfo || null,
+    };
+  };
 })();

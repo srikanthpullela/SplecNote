@@ -50,6 +50,10 @@ const debugState = {
   // UI
   miniEditorInstance: null,    // Monaco mini-editor for request JSON input
   debugPanelVisible: false,
+  // Live Org context — resolve SOQL/data against a connected Salesforce org
+  liveOrgMode: false,          // When true, SOQL runs against the connected org
+  orgFetching: false,          // True while an org call is in flight
+  orgQueryCache: new Map(),    // normalized SOQL string → { records, error, soql }
 };
 
 /* ================================================================
@@ -336,7 +340,7 @@ function parseApexStatements(sourceLines, startLine, endLine) {
     if (trimmed.match(/\[\s*SELECT\b/i)) {
       const soqlAssign = trimmed.match(/^(?:(?:final|static|transient)\s+)*(\w[\w<>,\s]*?)\s+(\w+)\s*=\s*(\[.+)/);
       if (soqlAssign) {
-        statements.push({ line: i + 1, type: 'soql', raw: trimmed, varName: soqlAssign[2], query: soqlAssign[3].replace(/;\s*$/, '') });
+        statements.push({ line: i + 1, type: 'soql', raw: trimmed, varName: soqlAssign[2], declType: (soqlAssign[1] || '').trim(), query: soqlAssign[3].replace(/;\s*$/, '') });
       } else {
         statements.push({ line: i + 1, type: 'soql', raw: trimmed, query: trimmed.replace(/;\s*$/, '') });
       }
@@ -1043,6 +1047,7 @@ async function startDebugSession(filePath, methodName, requestParams) {
   debugState.methodCache.clear();
   debugState.classIndex = null; // refresh on next use
   debugState.classFieldsCache.clear();
+  debugState.orgQueryCache.clear();
 
   // Parse class-level fields
   const classFields = parseClassFields(source);
@@ -1086,6 +1091,7 @@ async function startDebugSession(filePath, methodName, requestParams) {
   // Show debug UI
   showDebugUI();
   updateDebugPanels();
+  updateLiveOrgIndicator();
 
   // Highlight first line
   if (statements.length > 0) {
@@ -1110,6 +1116,142 @@ function stopDebugSession() {
   clearCurrentLineHighlight();
   hideDebugUI();
   addConsoleEntry('info', '⏹ Debug session ended');
+}
+
+/* ================================================================
+   LIVE ORG CONTEXT — resolve SOQL against a connected org
+   ================================================================ */
+
+/** Read the currently selected/connected Salesforce org (from salesforce.js). */
+function getActiveOrg() {
+  try { return (typeof window.sfGetActiveOrg === 'function') ? window.sfGetActiveOrg() : null; }
+  catch { return null; }
+}
+
+/** True when Live Org mode is usable (enabled + an org is connected). */
+function liveOrgAvailable() {
+  const o = getActiveOrg();
+  return !!(o && o.connected && o.org);
+}
+
+/** Format a JS value as a SOQL literal for bind-variable substitution. */
+function toSoqlLiteral(val) {
+  if (val === null || val === undefined) return 'null';
+  if (typeof val === 'number') return String(val);
+  if (typeof val === 'boolean') return String(val);
+  if (Array.isArray(val)) return '(' + val.map(toSoqlLiteral).join(', ') + ')';
+  if (val instanceof Date) return val.toISOString();
+  if (typeof val === 'object') {
+    // sObject-like: bind on Id if present, else stringify
+    if (val.Id) return `'${String(val.Id).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+    return `'${String(val).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  }
+  const s = String(val).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  return `'${s}'`;
+}
+
+/** Strip enclosing [ ] and substitute :bind variables from the current scope. */
+function buildLiveQuery(rawQuery, scope) {
+  let q = (rawQuery || '').trim();
+  const m = q.match(/^\[([\s\S]*)\]\s*;?$/);
+  q = (m ? m[1] : q.replace(/^\[/, '').replace(/\]\s*;?$/, '')).trim();
+  // Replace SOQL bind expressions like :varName or :obj.field with real values.
+  q = q.replace(/:([A-Za-z_]\w*(?:\.\w+)*)/g, (whole, expr) => {
+    const val = resolveProperty(scope, expr);
+    if (val === undefined) return whole; // leave unresolved — surface the error
+    return toSoqlLiteral(val);
+  });
+  return q;
+}
+
+/** Recursively strip Salesforce "attributes" noise from returned records. */
+function cleanSObject(rec) {
+  if (Array.isArray(rec)) return rec.map(cleanSObject);
+  if (rec && typeof rec === 'object') {
+    const out = {};
+    for (const k of Object.keys(rec)) {
+      if (k === 'attributes') continue;
+      const v = rec[k];
+      out[k] = (v && typeof v === 'object') ? cleanSObject(v) : v;
+    }
+    return out;
+  }
+  return rec;
+}
+
+/** True when a SOQL result should be assigned as a List (vs. a single sObject). */
+function soqlIsList(declType) {
+  if (!declType) return true;
+  return /^(List|Set|Iterable)\s*</i.test(declType) || /\[\]\s*$/.test(declType);
+}
+
+/** Run a SOQL query against the connected org via the sf CLI (cached). */
+async function runLiveQuery(rawQuery, scope) {
+  const org = getActiveOrg();
+  const soql = buildLiveQuery(rawQuery, scope);
+  if (debugState.orgQueryCache.has(soql)) return debugState.orgQueryCache.get(soql);
+
+  const folder = window.state?.folderPath;
+  const escaped = soql.replace(/"/g, '\\"');
+  const cmd = `sf data query --query "${escaped}" --json --target-org ${org.org}`;
+  let result = { records: [], error: null, soql };
+  try {
+    const { stdout, stderr } = await window.congacode.sfExec(cmd, folder, 60000);
+    let parsed = null;
+    try { parsed = JSON.parse(stdout); } catch { /* non-JSON output */ }
+    if (parsed && parsed.status === 0 && parsed.result) {
+      result.records = (parsed.result.records || []).map(cleanSObject);
+    } else {
+      result.error = (parsed && parsed.message) || (stderr || stdout || 'Query failed').split('\n')[0];
+    }
+  } catch (e) {
+    result.error = e?.message || String(e);
+  }
+  debugState.orgQueryCache.set(soql, result);
+  return result;
+}
+
+/** Refresh the Live Org toggle/status indicator in the debug toolbar. */
+function updateLiveOrgIndicator() {
+  const checkbox = _$('#dbg-liveorg-checkbox');
+  const status = _$('#dbg-liveorg-status');
+  const org = getActiveOrg();
+  const connected = !!(org && org.connected && org.org);
+  if (checkbox) {
+    checkbox.disabled = !connected;
+    checkbox.checked = debugState.liveOrgMode && connected;
+  }
+  if (status) {
+    if (debugState.orgFetching) {
+      status.textContent = '⏳ querying org…';
+      status.className = 'dbg-liveorg-status fetching';
+    } else if (!connected) {
+      status.textContent = 'no org connected';
+      status.className = 'dbg-liveorg-status disconnected';
+    } else if (debugState.liveOrgMode) {
+      status.textContent = `⚡ ${org.org}`;
+      status.className = 'dbg-liveorg-status connected';
+    } else {
+      status.textContent = `${org.org} (simulated)`;
+      status.className = 'dbg-liveorg-status idle';
+    }
+  }
+}
+
+/** Toggle Live Org mode from the toolbar checkbox. */
+function toggleLiveOrgMode() {
+  if (!liveOrgAvailable()) {
+    debugState.liveOrgMode = false;
+    window.showToast?.('Connect a Salesforce org first (Salesforce panel)', 'warning');
+    updateLiveOrgIndicator();
+    return;
+  }
+  debugState.liveOrgMode = !debugState.liveOrgMode;
+  debugState.orgQueryCache.clear();
+  addConsoleEntry('info', debugState.liveOrgMode
+    ? `⚡ Live Org mode ON — SOQL will query "${getActiveOrg().org}" (DML stays simulated)`
+    : '○ Live Org mode OFF — SOQL returns simulated (empty) results');
+  updateLiveOrgIndicator();
 }
 
 /**
@@ -1389,15 +1531,34 @@ async function executeCurrentStatement() {
       break;
 
     case 'soql':
-      addConsoleEntry('soql', `[SOQL] ${stmt.query}`, stmt.line);
-      if (stmt.varName) {
-        frame.variables[stmt.varName] = []; // Empty result in simulation
+      if (debugState.liveOrgMode && liveOrgAvailable()) {
+        debugState.orgFetching = true;
+        updateLiveOrgIndicator();
+        const res = await runLiveQuery(stmt.query, scope);
+        debugState.orgFetching = false;
+        updateLiveOrgIndicator();
+        if (res.error) {
+          addConsoleEntry('error', `[SOQL·live] ${res.soql} → ${res.error}`, stmt.line);
+          if (stmt.varName) frame.variables[stmt.varName] = soqlIsList(stmt.declType) ? [] : null;
+        } else {
+          addConsoleEntry('soql', `[SOQL·live] ${res.soql} → ${res.records.length} row(s)`, stmt.line);
+          if (stmt.varName) {
+            frame.variables[stmt.varName] = soqlIsList(stmt.declType)
+              ? res.records
+              : (res.records[0] || null);
+          }
+        }
+      } else {
+        addConsoleEntry('soql', `[SOQL] ${stmt.query}`, stmt.line);
+        if (stmt.varName) {
+          frame.variables[stmt.varName] = soqlIsList(stmt.declType) ? [] : null;
+        }
       }
       frame.pc++;
       break;
 
     case 'dml':
-      addConsoleEntry('dml', `[DML] ${stmt.dmlOp} ${stmt.target}`, stmt.line);
+      addConsoleEntry('dml', `[DML] ${stmt.dmlOp} ${stmt.target}${debugState.liveOrgMode ? '  (simulated — not written to org)' : ''}`, stmt.line);
       frame.pc++;
       break;
 
@@ -1921,6 +2082,7 @@ function updateDebugPanels() {
   renderCallStackPanel();
   renderConsolePanel();
   renderBreakpointsPanel();
+  updateLiveOrgIndicator();
 }
 
 function renderVariablesPanel() {
@@ -2739,6 +2901,9 @@ function initApexDebugger() {
   _$('#dbg-btn-step-out')?.addEventListener('click', debugStepOut);
   _$('#dbg-btn-stop')?.addEventListener('click', stopDebugSession);
   _$('#dbg-btn-restart')?.addEventListener('click', debugRestart);
+
+  // Live Org toggle
+  _$('#dbg-liveorg-checkbox')?.addEventListener('change', toggleLiveOrgMode);
 
   // Wire up request modal
   _$('#dbg-modal-start')?.addEventListener('click', startDebugFromModal);
