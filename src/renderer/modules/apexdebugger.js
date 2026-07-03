@@ -112,7 +112,12 @@ function parseApexStatements(sourceLines, startLine, endLine) {
 
     // --- Declaration with method call on right side (MUST come before generic declaration) ---
     const declCallMatch = trimmed.match(/^(?:(?:final|static|transient)\s+)*(\w[\w<>,\s\[\]]*?)\s+(\w+)\s*=\s*([\w.]+)\s*\((.*)\)\s*;?\s*$/);
-    if (declCallMatch && !trimmed.startsWith('if') && !trimmed.startsWith('for') && !trimmed.startsWith('while') && !trimmed.startsWith('return') && !trimmed.startsWith('try')) {
+    // Only treat as a single step-into-able method call when the initializer is
+    // exactly `Class.method(args)`. Chained calls (`Datetime.now().getTime()`) and
+    // constructors (`new List<…>()`) must fall through to the expression evaluator,
+    // otherwise the trailing `.getTime()` gets swallowed and the value comes back null.
+    const declCallChained = declCallMatch && (/\)\s*\./.test(declCallMatch[4]) || /^new\s/.test(declCallMatch[3]));
+    if (declCallMatch && !declCallChained && !trimmed.startsWith('if') && !trimmed.startsWith('for') && !trimmed.startsWith('while') && !trimmed.startsWith('return') && !trimmed.startsWith('try')) {
       const callParts = declCallMatch[3].split('.');
       let cn = null;
       let mn = declCallMatch[3];
@@ -157,7 +162,8 @@ function parseApexStatements(sourceLines, startLine, endLine) {
 
     // --- Assignment with method call (existing var = method()) ---
     const assignCallMatch = trimmed.match(/^(\w[\w.[\]]*)\s*=\s*([\w.]+)\s*\((.*)\)\s*;?\s*$/);
-    if (assignCallMatch && !trimmed.startsWith('if') && !trimmed.startsWith('for') && !trimmed.startsWith('return')) {
+    const assignCallChained = assignCallMatch && (/\)\s*\./.test(assignCallMatch[3]) || /^new\s/.test(assignCallMatch[2]));
+    if (assignCallMatch && !assignCallChained && !trimmed.startsWith('if') && !trimmed.startsWith('for') && !trimmed.startsWith('return')) {
       const callParts = assignCallMatch[2].split('.');
       let cn = null;
       let mn = assignCallMatch[2];
@@ -532,8 +538,12 @@ function evaluateExpression(expr, scope) {
     return obj;
   }
 
-  // new ClassName(...) — create object with class fields if available
-  const newMatch = expr.match(/^new\s+([\w.]+)\s*\((.*)\)$/);
+  // new ClassName(...) — create object with class fields if available.
+  // The type may carry generics, e.g. `new List<LineItem__c>()`,
+  // `new Map<Integer, Integer>()`, `new Map<Id, List<X>>()` — capture the whole
+  // type (non-greedy up to the constructor parens) so the `<…>` isn't later
+  // mistaken for a less-than operator (which returned a bogus Boolean).
+  const newMatch = expr.match(/^new\s+(.+?)\s*\((.*)\)$/s);
   if (newMatch) {
     const typeName = newMatch[1];
     const typeNameLower = typeName.toLowerCase();
@@ -2321,8 +2331,15 @@ async function executeCurrentStatement() {
         const dv = stmt._defaultVal;
         frame.variables[stmt.varName] = dv === '[]' ? [] : dv === '{}' ? {} : dv;
       } else {
-        frame.variables[stmt.varName] = evaluateExpression(stmt.expression, scope);
+        let declVal = evaluateExpression(stmt.expression, scope);
+        // If the initializer couldn't be resolved locally, seed a type-appropriate
+        // empty value (List->[], Map->{}, numeric->0, Boolean->false) from the
+        // declared type instead of leaving it undefined/null.
+        if (declVal === undefined) declVal = defaultForApexType(stmt.varType);
+        frame.variables[stmt.varName] = declVal;
       }
+      // Remember the declared Apex type so hover can label it (e.g. List<LineItem__c>).
+      if (stmt.varType) (frame.varTypes || (frame.varTypes = {}))[stmt.varName] = stmt.varType;
       addConsoleEntry('var', `${stmt.varName} = ${formatValue(frame.variables[stmt.varName])}`, stmt.line);
       frame.pc++;
       break;
@@ -3833,6 +3850,37 @@ function matchCloseParen(text, parenOffset) {
 }
 
 /**
+ * True when an argument list looks like a method-definition parameter list
+ * (each arg is a `Type name` pair) rather than a call's actual arguments.
+ * e.g. "ID priceListID, List<ID> productGroupIds" -> true;
+ *      "priceListId, productGroupIds" or "getId(), 5" -> false.
+ */
+function looksLikeParamList(argsStr) {
+  const inner = (argsStr || '').trim();
+  if (!inner) return false;
+  // Split on top-level commas (ignore commas inside <...> generics or (...) calls).
+  const parts = [];
+  let depth = 0, buf = '';
+  for (const ch of inner) {
+    if (ch === '<' || ch === '(' || ch === '[') depth++;
+    else if (ch === '>' || ch === ')' || ch === ']') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) { parts.push(buf); buf = ''; }
+    else buf += ch;
+  }
+  if (buf.trim()) parts.push(buf);
+  if (!parts.length) return false;
+  for (const raw of parts) {
+    const a = raw.trim();
+    if (!a) return false;
+    // Real arguments contain literals/operators/assignments/calls — reject those.
+    if (/['"]|==|!=|>=|<=|&&|\|\||\?|=|\(|\)/.test(a)) return false;
+    // Must be exactly: Type identifier  (type may carry generics/arrays).
+    if (!/^(?:final\s+)?[A-Za-z_][\w.]*(?:\s*<[^)]*>)?(?:\s*\[\s*\])?\s+[A-Za-z_]\w*$/.test(a)) return false;
+  }
+  return true;
+}
+
+/**
  * Register the hover provider that shows debug info during active sessions.
  * Shows Chrome DevTools-style value tooltips on variable hover.
  */
@@ -3906,6 +3954,8 @@ function registerDebugHoverProvider() {
       // ---- Method call: capture the full (possibly multi-line) call expression. ----
       const exprEndOffset = model.getOffsetAt({ lineNumber: position.lineNumber, column: exprEnd + 1 });
       let callExpr = null;
+      let callArgsInner = null;
+      let callFollowedByBrace = false;
       {
         let j = exprEndOffset;
         while (j < fullText.length && (fullText[j] === ' ' || fullText[j] === '\t')) j++;
@@ -3914,6 +3964,13 @@ function registerDebugHoverProvider() {
           if (close != null) {
             const exprStartOffset = model.getOffsetAt({ lineNumber: position.lineNumber, column: exprStart + 1 });
             callExpr = fullText.slice(exprStartOffset, close).replace(/\s+/g, ' ').trim();
+            callArgsInner = fullText.slice(j + 1, close - 1);
+            // Peek past the close paren: a method *definition* is followed by `{`
+            // (and, for interfaces/abstract, `;`), whereas a real call is followed by
+            // `;`, `.`, `,`, `)`, or an operator.
+            let k = close;
+            while (k < fullText.length && /\s/.test(fullText[k])) k++;
+            callFollowedByBrace = fullText[k] === '{';
           }
         }
       }
@@ -3993,6 +4050,21 @@ function registerDebugHoverProvider() {
 
       // 3) Method call or qualified expression not resolvable locally → org eval.
       const orgExpr = callExpr || fullPath;
+      // A method *definition* / signature is not an evaluable expression. Detect it
+      // (args are `Type name` pairs and/or the call is immediately followed by `{`)
+      // and show an informative hover instead of a bogus "Compilation failed" error.
+      if (callExpr && (callFollowedByBrace || looksLikeParamList(callArgsInner))) {
+        const params = (splitArgs(callArgsInner || '') || [])
+          .map(p => p.trim()).filter(Boolean);
+        const lines = [`**\`${word.word}\`** : *method definition*`];
+        if (params.length) {
+          lines.push('Parameters:\n' + params.map(p => `- \`${p}\``).join('\n'));
+        } else {
+          lines.push('_No parameters._');
+        }
+        lines.push('_Step into this method (F11) to watch it execute with real values._');
+        return { range: wordRange, contents: [{ value: lines.join('\n\n') }] };
+      }
       const canOrgEval = liveOrgAvailable() && topFrame && (callExpr || fullPath.includes('.'));
       if (canOrgEval) {
         const cache = debugState.orgEvalCache;
@@ -4019,7 +4091,20 @@ function registerDebugHoverProvider() {
   });
 }
 
-function getValueTypeName(val) {
+function getValueTypeName(val, declaredType) {
+  // Prefer the declared Apex type for empty-but-typed collections/values so hover
+  // shows e.g. `List<LineItem__c>` instead of the generic `List<Object>[0]`.
+  if (declaredType) {
+    const dt = declaredType.trim();
+    const dtLower = dt.toLowerCase();
+    if (Array.isArray(val)) return `${dt} (${val.length})`;
+    if (val instanceof Set) return `${dt} (${val.size})`;
+    if (val && typeof val === 'object' && dtLower.startsWith('map')) {
+      return `${dt} (${Object.keys(val).filter(k => !k.startsWith('__')).length})`;
+    }
+    if ((val === null || val === undefined) && dt) return dt;
+    if (typeof val !== 'object') return dt;
+  }
   if (val === null) return 'null';
   if (val === undefined) return 'undefined';
   if (typeof val === 'string') return 'String';
@@ -4032,6 +4117,20 @@ function getValueTypeName(val) {
     return `Object{${Object.keys(val).filter(k => !k.startsWith('__')).length}}`;
   }
   return typeof val;
+}
+
+/**
+ * Default value for an Apex type, matching how Apex initializes locals:
+ * List/Set -> [], Map -> {}, numeric -> 0, Boolean -> false, everything else -> null.
+ */
+function defaultForApexType(varType) {
+  if (!varType) return null;
+  const t = varType.trim().toLowerCase();
+  if (t.startsWith('list') || t.startsWith('set') || t.endsWith('[]')) return [];
+  if (t.startsWith('map')) return {};
+  if (t === 'integer' || t === 'int' || t === 'long' || t === 'double' || t === 'decimal') return 0;
+  if (t === 'boolean') return false;
+  return null;
 }
 
 /* ================================================================
@@ -4434,6 +4533,13 @@ async function _runEvalApex(resolvedExpr) {
 async function evaluateInOrg(expr, frame) {
   if (!frame) return { error: 'No active frame' };
   if (!liveOrgAvailable()) return { error: 'Connect an org and enable Live Org first' };
+
+  // A method definition / signature (args are `Type name` pairs) is not an evaluable
+  // expression — don't send it to the compiler, explain instead.
+  const sigCall = expr.match(/^\s*[A-Za-z_][\w.]*\s*\((.*)\)\s*$/s);
+  if (sigCall && looksLikeParamList(sigCall[1])) {
+    return { error: `That's a method definition, not a value. Set a breakpoint inside it or Step Into (F11) to watch it run with real values.`, resolvedExpr: expr };
+  }
 
   // Pure field-access path (no method calls) → resolve from the replay-captured
   // frame directly. After ▶ Run in Org, object variables hold real state, so
