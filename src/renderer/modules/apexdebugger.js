@@ -3060,8 +3060,12 @@ function renderVarEntry(key, val, scopeType = 'local') {
   if (isExpandable) html += `<span class="dbg-var-arrow">▶</span>`;
   html += `<span class="dbg-var-name">${_esc(key)}</span>`;
   if (isNullish) {
-    // Nothing resolved yet — invite the user to supply a value inline.
+    // Nothing resolved yet — invite the user to supply a value inline,
+    // and (when connected) to fetch the real value from the org on demand.
     html += `<span class="dbg-var-setnull" data-raw="" onclick="window._dbgEditVar('${scopeType}', '${_escJs(key)}', event)" title="No value resolved. Click to enter one.">${formatValue(val)} <span class="dbg-var-set-hint">✎ set value</span></span>`;
+    if (liveOrgAvailable() && scopeType !== 'closure') {
+      html += `<span class="dbg-var-orgbtn" onclick="window._dbgFetchVarFromOrg('${scopeType}', '${_escJs(key)}', event)" title="Execute in the connected org and pull the real value">▶ org</span>`;
+    }
   } else {
     html += `<span class="dbg-var-value" data-raw="${rawAttr}">${formatValue(val)}</span>`;
     html += `<span class="dbg-var-editbtn" onclick="window._dbgEditVar('${scopeType}', '${_escJs(key)}', event)" title="Edit value">✎</span>`;
@@ -3569,6 +3573,18 @@ function registerDebugHoverProvider() {
       const rangeStart = exprStart + 1; // back to 1-based
       const rangeEnd = exprEnd + 1;
 
+      // If the path is immediately followed by a call '(', capture the balanced
+      // argument list so we can org-evaluate the whole call (e.g. getConstraintMode(flow)).
+      let callExpr = null, callEnd = exprEnd;
+      if (lineContent[exprEnd] === '(') {
+        let depth = 0, k = exprEnd;
+        for (; k < lineContent.length; k++) {
+          if (lineContent[k] === '(') depth++;
+          else if (lineContent[k] === ')') { depth--; if (depth === 0) { k++; break; } }
+        }
+        if (depth === 0) { callExpr = lineContent.substring(exprStart, k); callEnd = k; }
+      }
+
       // Also try just the hovered word in case fullPath doesn't resolve
       const paths = [fullPath];
       if (fullPath !== word.word) paths.push(word.word);
@@ -3586,41 +3602,67 @@ function registerDebugHoverProvider() {
         if (resolvedPath) break;
       }
 
-      if (value === undefined) return null;
+      const topFrame = debugState.callStack[debugState.callStack.length - 1];
 
-      // Format the tooltip content (Chrome-style)
-      const displayPath = resolvedPath || fullPath;
-      const contents = [];
-      const typeName = getValueTypeName(value);
-      contents.push({ value: `**\`${displayPath}\`** : *${typeName}*` });
+      // Build a Monaco hover payload for a resolved value.
+      const makeHover = (displayPath, val, opts = {}) => {
+        const contents = [];
+        const typeName = getValueTypeName(val);
+        const tag = opts.realOrg ? ' · _real org value_' : '';
+        contents.push({ value: `**\`${displayPath}\`** : *${typeName}*${tag}` });
+        if (val === null) {
+          contents.push({ value: '```\nnull\n```' });
+        } else if (typeof val === 'object') {
+          const cleanValue = Array.isArray(val) ? val : (() => {
+            const o = {}; for (const k of Object.keys(val).filter(k => !k.startsWith('__'))) o[k] = val[k]; return o;
+          })();
+          const jsonStr = JSON.stringify(cleanValue, null, 2);
+          const typeLabel = Array.isArray(val) ? `List (${val.length} items)` : `Object (${Object.keys(cleanValue).length} fields)`;
+          contents.push({ value: `\`${typeLabel}\`\n\n` + '```json\n' + jsonStr + '\n```' });
+        } else {
+          contents.push({ value: '```\n' + String(val) + '\n```' });
+        }
+        const rEnd = opts.rangeEnd || (resolvedPath === word.word ? word.endColumn : rangeEnd);
+        const rStart = opts.rangeStart || (resolvedPath === word.word ? word.startColumn : rangeStart);
+        return { range: new monaco.Range(position.lineNumber, rStart, position.lineNumber, rEnd), contents };
+      };
 
-      if (value === null) {
-        contents.push({ value: '```\nnull\n```' });
-      } else if (typeof value === 'object') {
-        // Object or Array: show full JSON
-        const cleanValue = Array.isArray(value) ? value : (() => {
-          const o = {};
-          for (const k of Object.keys(value).filter(k => !k.startsWith('__'))) o[k] = value[k];
-          return o;
-        })();
-        const jsonStr = JSON.stringify(cleanValue, null, 2);
-        const typeLabel = Array.isArray(value) ? `List (${value.length} items)` : `Object (${Object.keys(cleanValue).length} fields)`;
-        let preview = `\`${typeLabel}\`\n\n`;
-        preview += '```json\n' + jsonStr + '\n```';
-        preview += '\n\n---\n_Ctrl+C to copy selected text from preview_';
-        contents.push({ value: preview });
-      } else {
-        contents.push({ value: '```\n' + String(value) + '\n```' });
+      // The expression we'd evaluate in the org: prefer the full call, else the dotted path.
+      const orgExpr = callExpr || fullPath;
+      const orgRangeEnd = (callExpr ? callEnd : exprEnd) + 1;
+      const canOrgEval = liveOrgAvailable() && topFrame && (callExpr || fullPath.includes('.'));
+
+      // Resolved locally to a concrete (non-null) value → show it immediately.
+      if (value !== undefined && value !== null) {
+        return makeHover(resolvedPath || fullPath, value);
       }
 
-      // Use exact range of the resolved path for highlighting
-      const hoverRangeStart = resolvedPath === word.word ? word.startColumn : rangeStart;
-      const hoverRangeEnd = resolvedPath === word.word ? word.endColumn : rangeEnd;
+      // Not resolved (or null). If we can evaluate it in the org, do so.
+      if (canOrgEval) {
+        const cache = debugState.orgEvalCache;
+        // Try cache synchronously (using the rewritten expr key) for instant repeat hovers.
+        const rw = (() => { try { return rewriteExprForOrg(orgExpr, topFrame); } catch { return null; } })();
+        if (rw && cache && cache.has(rw.resolvedExpr)) {
+          const cached = cache.get(rw.resolvedExpr);
+          if (cached.error) {
+            return { range: new monaco.Range(position.lineNumber, rangeStart, position.lineNumber, orgRangeEnd),
+              contents: [{ value: `**\`${orgExpr}\`**\n\n_org eval:_ ${cached.error}` }] };
+          }
+          return makeHover(orgExpr, cached.value, { realOrg: true, rangeStart, rangeEnd: orgRangeEnd });
+        }
+        // Not cached — evaluate asynchronously; Monaco awaits the returned promise.
+        return evaluateInOrg(orgExpr, topFrame).then((r) => {
+          if (r.error) {
+            return { range: new monaco.Range(position.lineNumber, rangeStart, position.lineNumber, orgRangeEnd),
+              contents: [{ value: `**\`${orgExpr}\`**\n\n_org eval:_ ${r.error}` }] };
+          }
+          return makeHover(orgExpr, r.value, { realOrg: true, rangeStart, rangeEnd: orgRangeEnd });
+        }).catch(() => null);
+      }
 
-      return {
-        range: new monaco.Range(position.lineNumber, hoverRangeStart, position.lineNumber, hoverRangeEnd),
-        contents
-      };
+      // Local null with no org available → still show the null.
+      if (value === null) return makeHover(resolvedPath || fullPath, null);
+      return null;
     }
   });
 }
@@ -3899,6 +3941,215 @@ function initConsoleInput() {
   });
 }
 
+/* ================================================================
+   LIVE ORG EXPRESSION EVALUATION
+   Evaluate an arbitrary Apex expression (method call, custom setting,
+   label, describe, SOQL, etc.) against the connected org using the
+   CURRENT frame's real variable values as bindings. This is what makes
+   the debugger behave like a real engine: by the time you reach a line,
+   any org-dependent value can be resolved on demand with real data.
+   Read-only: wrapped in a savepoint + rollback so the org is untouched.
+   ================================================================ */
+
+const APEX_TYPE_NAMES = new Set([
+  'string','integer','long','double','decimal','boolean','date','datetime','time',
+  'id','blob','object','list','set','map','sobject','database','system','test',
+  'schema','math','json','limits','userinfo','type','label','cache','featuremanagement'
+]);
+
+/** Convert a JS scalar to an Apex literal for inline substitution. Returns null for non-scalars. */
+function toApexLiteral(val) {
+  if (val === null || val === undefined) return 'null';
+  if (typeof val === 'boolean') return String(val);
+  if (typeof val === 'number') return String(val);
+  if (typeof val === 'string') {
+    // Unresolved heap ref → can't substitute meaningfully.
+    if (ADDR_RE.test(val)) return null;
+    return `'${escapeApexString(val)}'`;
+  }
+  return null; // objects / arrays / collections not inline-substitutable
+}
+
+/** Whether an identifier is a built-in Apex type/namespace (so we don't class-qualify it). */
+function isApexTypeName(name) {
+  return APEX_TYPE_NAMES.has(String(name).toLowerCase());
+}
+
+/**
+ * Rewrite an expression so it can run as anonymous Apex:
+ *  - substitute in-scope scalar variables with their real literal values,
+ *  - qualify a leading bare method call with the current frame's class.
+ * Returns { resolvedExpr, unresolved: [names of object/ref vars we couldn't inline] }.
+ */
+function rewriteExprForOrg(expr, frame) {
+  const scope = { ...(frame.classFields || {}), ...frame.variables };
+  const unresolved = [];
+  const resolvedExpr = expr.replace(/(?<![.\w$])([A-Za-z_]\w*)\b/g, (m, id, offset, str) => {
+    // Skip method-call names (identifier immediately followed by '(').
+    if (/^\s*\(/.test(str.slice(offset + id.length))) return m;
+    if (isApexTypeName(id)) return m;
+    if (!(id in scope)) return m;
+    const lit = toApexLiteral(scope[id]);
+    if (lit != null) return lit;
+    unresolved.push(id); // in scope but a complex object we can't inline
+    return m;
+  });
+  // Qualify a leading bare method call (e.g. getConstraintMode(...)) with the frame's class.
+  let out = resolvedExpr;
+  const bareCall = out.match(/^([A-Za-z_]\w*)\s*\(/);
+  if (bareCall && frame.className && !isApexTypeName(bareCall[1])) {
+    out = `${frame.className}.${out}`;
+  }
+  return { resolvedExpr: out, unresolved };
+}
+
+/** Build the anonymous Apex that evaluates a single expression read-only. */
+function buildEvalApex(resolvedExpr) {
+  return [
+    `Savepoint ccEvSp = Database.setSavepoint();`,
+    `Object ccEvVal;`,
+    `String ccEvErr = '';`,
+    `try {`,
+    `    ccEvVal = (Object)( ${resolvedExpr} );`,
+    `} catch (Exception ccEvE) {`,
+    `    ccEvErr = ccEvE.getTypeName() + ': ' + ccEvE.getMessage();`,
+    `} finally {`,
+    `    try { Database.rollback(ccEvSp); } catch (Exception ccEvRe) {}`,
+    `}`,
+    `String ccEvOut;`,
+    `try { ccEvOut = JSON.serialize(ccEvVal); } catch (Exception ccEvSe) { ccEvOut = '"<unserializable: ' + String.valueOf(ccEvVal) + '>"'; }`,
+    `System.debug(LoggingLevel.ERROR, '__CC_EVAL__' + ccEvOut);`,
+    `System.debug(LoggingLevel.ERROR, '__CC_EVALERR__' + ccEvErr);`,
+  ].join('\n');
+}
+
+/**
+ * Evaluate an expression against the connected org using the given frame's
+ * bindings. Cached per resolved-expression. Returns { value?, error?, resolvedExpr }.
+ */
+async function evaluateInOrg(expr, frame) {
+  if (!frame) return { error: 'No active frame' };
+  if (!liveOrgAvailable()) return { error: 'Connect an org and enable Live Org first' };
+
+  const { resolvedExpr, unresolved } = rewriteExprForOrg(expr, frame);
+  if (unresolved.length) {
+    return { error: `Can't inline object variable(s): ${[...new Set(unresolved)].join(', ')}. Try an expression using scalar values.`, resolvedExpr };
+  }
+
+  if (!debugState.orgEvalCache) debugState.orgEvalCache = new Map();
+  if (debugState.orgEvalCache.has(resolvedExpr)) {
+    return debugState.orgEvalCache.get(resolvedExpr);
+  }
+
+  const org = getActiveOrg();
+  const apex = buildEvalApex(resolvedExpr);
+  let result;
+  try {
+    const paths = await window.congacode.getPaths?.();
+    const dir = paths?.congacodeDir || paths?.home || '.';
+    const tmpFile = `${dir}/.cc_debug_eval.apex`;
+    await window.congacode.writeFile(tmpFile, apex);
+    const cmd = `sf apex run --file "${tmpFile}" --json --target-org ${org.org}`;
+    const { stdout, stderr } = await window.congacode.sfExec(cmd, window.state?.folderPath, 60000);
+    let cli = null;
+    try { cli = JSON.parse(stdout); } catch { /* non-JSON */ }
+    const res = (cli && (cli.result || cli.data)) || {};
+    const log = res.logs || '';
+    if (res.compiled === false) {
+      result = { error: `Compile failed: ${res.compileProblem || (cli && cli.message) || 'unknown'}`, resolvedExpr };
+    } else {
+      let raw = null, evalErr = '';
+      for (const line of log.split('\n')) {
+        const pipe = line.split('|');
+        const msg = pipe.length >= 5 ? pipe.slice(4).join('|') : '';
+        if (msg.startsWith('__CC_EVAL__')) raw = msg.slice('__CC_EVAL__'.length);
+        else if (msg.startsWith('__CC_EVALERR__')) evalErr = msg.slice('__CC_EVALERR__'.length);
+      }
+      if (evalErr) {
+        result = { error: evalErr, resolvedExpr };
+      } else if (raw != null) {
+        let value;
+        try { value = JSON.parse(raw); } catch { value = raw; }
+        result = { value, resolvedExpr };
+      } else {
+        result = { error: (stderr || 'Org returned no result (log may be truncated or logging disabled)').split('\n')[0], resolvedExpr };
+      }
+    }
+  } catch (e) {
+    result = { error: e?.message || String(e), resolvedExpr };
+  }
+  debugState.orgEvalCache.set(resolvedExpr, result);
+  return result;
+}
+
+/** Console-triggered org evaluation: runs the expression in the org and prints the result. */
+async function evaluateExpressionInOrg(expr) {
+  const frame = debugState.callStack[debugState.callStack.length - 1];
+  addConsoleEntry('info', `⚙ Evaluating in org: ${expr} …`);
+  const r = await evaluateInOrg(expr, frame);
+  if (r.error) {
+    addConsoleEntry('error', `Org eval error: ${r.error}`);
+  } else {
+    if (r.resolvedExpr && r.resolvedExpr !== expr) addConsoleEntry('info', `↳ ran: ${r.resolvedExpr}`);
+    if (typeof r.value === 'object' && r.value !== null) {
+      addConsoleEntry('result-json', JSON.stringify(r.value, null, 2));
+    } else {
+      addConsoleEntry('result', `${expr} → ${formatValue(r.value)}  (real org value)`);
+    }
+  }
+}
+
+/** Clickable affordance handler: evaluate an expression in the org and inject it as a variable. */
+window._dbgEvalInOrg = async function (varName, expr) {
+  const frame = debugState.callStack[debugState.callStack.length - 1];
+  if (!frame) return;
+  addConsoleEntry('info', `⚙ Fetching real value of "${expr}" from org…`);
+  const r = await evaluateInOrg(expr, frame);
+  if (r.error) {
+    addConsoleEntry('error', `Org eval error for ${expr}: ${r.error}`);
+    window.showToast?.(`Org eval failed: ${r.error}`, 'error');
+    return;
+  }
+  if (varName) frame.variables[varName] = r.value;
+  addConsoleEntry('result', `${expr} → ${formatValue(r.value)}  (real org value)`);
+  updateDebugPanels();
+};
+
+/**
+ * Derive the best org-evaluable expression for a variable in a frame.
+ * Prefers the variable's initializer from source (e.g. `flow = getFlow(configReq)`),
+ * then a class-qualified reference for class fields, else the bare name.
+ */
+function deriveOrgExprForVar(scopeType, key, frame) {
+  // 1) Try to find an initializer for this variable in the source.
+  try {
+    const model = window.state?.editor?.getModel?.();
+    const src = model ? model.getValue() : '';
+    if (src) {
+      // Match `... key = <rhs>;` (declaration or reassignment), capture the RHS.
+      const re = new RegExp('(?:^|[;{}\\s])' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*=\\s*([^;]+);');
+      const m = src.match(re);
+      if (m && m[1] && !/^\s*new\s/i.test(m[1])) {
+        return m[1].trim();
+      }
+    }
+  } catch (_) { /* ignore */ }
+  // 2) Class field → qualify with the class name (works for statics/constants).
+  if (scopeType === 'field' && frame && frame.className) {
+    return `${frame.className}.${key}`;
+  }
+  // 3) Fallback: the bare name (rewriteExprForOrg may still class-qualify calls).
+  return key;
+}
+
+window._dbgFetchVarFromOrg = async function (scopeType, key, ev) {
+  if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+  const frame = debugState.callStack[debugState.callStack.length - 1];
+  if (!frame) return;
+  const expr = deriveOrgExprForVar(scopeType, key, frame);
+  await window._dbgEvalInOrg(key, expr);
+};
+
 function evaluateConsoleExpression(expr) {
   addConsoleEntry('eval', `> ${expr}`);
 
@@ -3912,6 +4163,10 @@ function evaluateConsoleExpression(expr) {
     addConsoleEntry('error', 'No active frame');
     return;
   }
+
+  // Explicit org-eval prefix: ">>expr" or "org: expr" forces live org evaluation.
+  const orgForced = expr.match(/^(?:>>|org:)\s*(.+)$/i);
+  if (orgForced) { evaluateExpressionInOrg(orgForced[1].trim()); return; }
 
   try {
     // Check for assignment: varName = value  or  obj.prop = value
@@ -3958,9 +4213,20 @@ function evaluateConsoleExpression(expr) {
     }
 
     if (value === undefined) {
-      addConsoleEntry('result', 'undefined');
+      if (liveOrgAvailable()) {
+        addConsoleEntry('info', `(not resolved locally — evaluating in org)`);
+        evaluateExpressionInOrg(expr);
+      } else {
+        addConsoleEntry('result', 'undefined');
+      }
     } else if (value === null) {
-      addConsoleEntry('result', 'null');
+      // A local null may just mean "not executed yet" — offer the real org value.
+      if (liveOrgAvailable() && /[.(]/.test(expr)) {
+        addConsoleEntry('info', `(local value is null — evaluating in org for the real value)`);
+        evaluateExpressionInOrg(expr);
+      } else {
+        addConsoleEntry('result', 'null');
+      }
     } else if (typeof value === 'object') {
       addConsoleEntry('result-json', JSON.stringify(value, null, 2));
     } else {

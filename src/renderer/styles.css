@@ -4340,6 +4340,20 @@ body.zen-mode #editor-container { border-radius: 0; }
 }
 .dbg-var-header:hover .dbg-var-editbtn { opacity: 0.7; }
 .dbg-var-editbtn:hover { opacity: 1; color: #e2b341; }
+.dbg-var-orgbtn {
+  font-size: 10px;
+  color: #4ec9b0;
+  cursor: pointer;
+  opacity: 0.55;
+  padding: 0 5px;
+  margin-left: 4px;
+  border: 1px solid rgba(78, 201, 176, 0.35);
+  border-radius: 3px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.dbg-var-header:hover .dbg-var-orgbtn { opacity: 0.9; }
+.dbg-var-orgbtn:hover { opacity: 1; color: #6fe3c9; border-color: #4ec9b0; background: rgba(78, 201, 176, 0.12); }
 .dbg-var-edit {
   margin-left: auto;
   display: flex;
