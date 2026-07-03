@@ -1150,6 +1150,9 @@ function stopDebugSession() {
   debugState.replayIndex = 0;
   debugState.replayFatalError = null;
   debugState.userOverrides = {};
+  if (debugState.orgEvalCache) debugState.orgEvalCache.clear();
+  if (debugState.orgQueryCache) debugState.orgQueryCache.clear();
+  debugState._soqlHoverLogged = null;
   clearCurrentLineHighlight();
   hideDebugUI();
   addConsoleEntry('info', '⏹ Debug session ended');
@@ -1246,6 +1249,112 @@ async function runLiveQuery(rawQuery, scope) {
   }
   debugState.orgQueryCache.set(soql, result);
   return result;
+}
+
+/** Execute a fully-resolved SOQL string against the org via `sf data query` (cached). */
+async function execSoql(soql) {
+  const org = getActiveOrg();
+  if (!org) return { records: [], error: 'No org connected', soql };
+  if (debugState.orgQueryCache.has(soql)) return debugState.orgQueryCache.get(soql);
+
+  let result = await _runSoqlOnce(soql);
+  // Managed-package objects/fields need their namespace prefix when queried via the
+  // CLI (which runs outside the package namespace). Retry with the prefix on failure.
+  if (result.error && /not supported|INVALID_TYPE|INVALID_FIELD|No such column|did.?n.?t understand/i.test(result.error)) {
+    const ns = await getPackageNamespace();
+    const nsSoql = applyNamespaceToSoql(soql, ns);
+    if (ns && nsSoql !== soql) {
+      const r2 = await _runSoqlOnce(nsSoql);
+      if (!r2.error) result = { ...r2, soql: nsSoql };
+      else result = { ...result, error: `${result.error} (also tried ${ns} namespace: ${r2.error})` };
+    }
+  }
+  debugState.orgQueryCache.set(soql, result);
+  return result;
+}
+
+/** Single `sf data query` invocation (no caching, no retry). */
+async function _runSoqlOnce(soql) {
+  const org = getActiveOrg();
+  const folder = window.state?.folderPath;
+  const escaped = soql.replace(/"/g, '\\"');
+  const cmd = `sf data query --query "${escaped}" --json --target-org ${org.org}`;
+  let result = { records: [], error: null, soql };
+  try {
+    const { stdout, stderr } = await window.congacode.sfExec(cmd, folder, 60000);
+    let parsed = null;
+    try { parsed = JSON.parse(stdout); } catch { /* non-JSON */ }
+    if (parsed && parsed.status === 0 && parsed.result) {
+      result.records = (parsed.result.records || []).map(cleanSObject);
+    } else {
+      result.error = (parsed && parsed.message) || (stderr || stdout || 'Query failed').split('\n')[0];
+    }
+  } catch (e) {
+    result.error = e?.message || String(e);
+  }
+  return result;
+}
+
+/** Read the package namespace from the open folder's sfdx-project.json (cached). */
+async function getPackageNamespace() {
+  if (debugState._nsResolved) return debugState._namespace;
+  debugState._nsResolved = true;
+  debugState._namespace = null;
+  try {
+    const folder = window.state?.folderPath;
+    if (folder && window.congacode?.readFile) {
+      const txt = await window.congacode.readFile(`${folder}/sfdx-project.json`);
+      const j = JSON.parse(txt);
+      if (j && j.namespace) debugState._namespace = j.namespace;
+    }
+  } catch (_) { /* no namespace / not an sfdx project */ }
+  return debugState._namespace;
+}
+
+/** Prefix unqualified custom (__c/__r/__mdt/…) API names in a SOQL string with the namespace. */
+function applyNamespaceToSoql(soql, ns) {
+  if (!ns) return soql;
+  const nsPrefix = ns.toLowerCase() + '__';
+  return soql.replace(/\b(\w+?)__(c|r|mdt|e|b|x|share|history|kav)\b/gi, (full) => {
+    if (full.toLowerCase().startsWith(nsPrefix)) return full; // already namespaced
+    return ns + '__' + full;
+  });
+}
+
+/**
+ * Resolve a SOQL query's bind variables using the current frame and run it in the org.
+ * Scalar binds are inlined from scope; binds not in scope (e.g. static constants like
+ * SObjectConstants.LIMIT_ROWS) are resolved by evaluating them in the org.
+ * Returns { records, error, soql, unresolved }.
+ */
+async function evaluateSoqlInOrg(rawQuery, frame) {
+  if (!liveOrgAvailable()) return { error: 'Connect an org and enable Live Org first' };
+  const scope = { ...(frame?.classFields || {}), ...(frame?.variables || {}) };
+
+  // Strip enclosing [ ] and trailing ; .
+  let q = (rawQuery || '').trim();
+  const m = q.match(/^\[([\s\S]*)\]\s*;?$/);
+  q = (m ? m[1] : q.replace(/^\[/, '').replace(/\]\s*;?$/, '')).trim();
+
+  const binds = [...new Set([...q.matchAll(/:([A-Za-z_]\w*(?:\.\w+)*)/g)].map(x => x[1]))];
+  const unresolved = [];
+  for (const b of binds) {
+    let val = resolveProperty(scope, b);
+    if (val === undefined && frame) {
+      // Not a local var — could be a static constant / expression. Ask the org.
+      const r = await evaluateInOrg(b, frame);
+      if (!r.error) val = r.value;
+    }
+    if (val === undefined) { unresolved.push(b); continue; }
+    const lit = toSoqlLiteral(val);
+    if (lit == null) { unresolved.push(b); continue; }
+    q = q.replace(new RegExp(':' + escapeRegex(b) + '\\b', 'g'), lit);
+  }
+  if (unresolved.length) {
+    return { error: `Can't resolve bind variable(s): ${unresolved.join(', ')}. They reference runtime objects — set a value in the Console or run the whole method with ▶ Run in Org.`, soql: q, unresolved };
+  }
+  const res = await execSoql(q);
+  return { ...res, unresolved: [] };
 }
 
 /** Refresh the Live Org toggle/status indicator in the debug toolbar. */
@@ -3511,6 +3620,47 @@ function registerDebugProviders() {
 }
 
 /**
+ * If the given absolute offset in `text` sits inside a `[ SELECT ... ]` SOQL
+ * literal, return that literal (including brackets); otherwise null.
+ * Works across newlines so multi-line queries are captured whole.
+ */
+function extractSoqlAtOffset(text, offset) {
+  let open = -1, depth = 0;
+  for (let i = offset; i >= 0; i--) {
+    const c = text[i];
+    if (c === ';' || c === '{' || c === '}') break;
+    if (c === ']') depth++;
+    else if (c === '[') { if (depth === 0) { open = i; break; } depth--; }
+  }
+  if (open < 0) return null;
+  let d = 0, close = -1;
+  for (let i = open; i < text.length; i++) {
+    const c = text[i];
+    if (c === '[') d++;
+    else if (c === ']') { d--; if (d === 0) { close = i; break; } }
+  }
+  if (close < 0 || offset > close) return null;
+  const inner = text.slice(open + 1, close);
+  if (!/^\s*SELECT\b/i.test(inner)) return null;
+  return text.slice(open, close + 1);
+}
+
+/**
+ * Starting at `parenOffset` (which should point at a '('), return the offset
+ * just past the matching ')'. Scans across newlines. Null if unbalanced.
+ */
+function matchCloseParen(text, parenOffset) {
+  if (text[parenOffset] !== '(') return null;
+  let d = 0;
+  for (let i = parenOffset; i < text.length; i++) {
+    const c = text[i];
+    if (c === '(') d++;
+    else if (c === ')') { d--; if (d === 0) return i + 1; }
+  }
+  return null;
+}
+
+/**
  * Register the hover provider that shows debug info during active sessions.
  * Shows Chrome DevTools-style value tooltips on variable hover.
  */
@@ -3573,16 +3723,27 @@ function registerDebugHoverProvider() {
       const rangeStart = exprStart + 1; // back to 1-based
       const rangeEnd = exprEnd + 1;
 
-      // If the path is immediately followed by a call '(', capture the balanced
-      // argument list so we can org-evaluate the whole call (e.g. getConstraintMode(flow)).
-      let callExpr = null, callEnd = exprEnd;
-      if (lineContent[exprEnd] === '(') {
-        let depth = 0, k = exprEnd;
-        for (; k < lineContent.length; k++) {
-          if (lineContent[k] === '(') depth++;
-          else if (lineContent[k] === ')') { depth--; if (depth === 0) { k++; break; } }
+      // Work against the full document text so multi-line calls / SOQL are captured.
+      const fullText = model.getValue();
+      const cursorOffset = model.getOffsetAt(position);
+      const wordRange = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
+
+      // ---- SOQL: if the cursor is inside a [SELECT ...] literal, run it in the org. ----
+      const soqlLiteral = extractSoqlAtOffset(fullText, cursorOffset);
+
+      // ---- Method call: capture the full (possibly multi-line) call expression. ----
+      const exprEndOffset = model.getOffsetAt({ lineNumber: position.lineNumber, column: exprEnd + 1 });
+      let callExpr = null;
+      {
+        let j = exprEndOffset;
+        while (j < fullText.length && (fullText[j] === ' ' || fullText[j] === '\t')) j++;
+        if (fullText[j] === '(') {
+          const close = matchCloseParen(fullText, j);
+          if (close != null) {
+            const exprStartOffset = model.getOffsetAt({ lineNumber: position.lineNumber, column: exprStart + 1 });
+            callExpr = fullText.slice(exprStartOffset, close).replace(/\s+/g, ' ').trim();
+          }
         }
-        if (depth === 0) { callExpr = lineContent.substring(exprStart, k); callEnd = k; }
       }
 
       // Also try just the hovered word in case fullPath doesn't resolve
@@ -3622,45 +3783,64 @@ function registerDebugHoverProvider() {
         } else {
           contents.push({ value: '```\n' + String(val) + '\n```' });
         }
-        const rEnd = opts.rangeEnd || (resolvedPath === word.word ? word.endColumn : rangeEnd);
-        const rStart = opts.rangeStart || (resolvedPath === word.word ? word.startColumn : rangeStart);
-        return { range: new monaco.Range(position.lineNumber, rStart, position.lineNumber, rEnd), contents };
+        if (opts.realOrg) contents.push({ value: '_↳ also saved to the Console tab_' });
+        const range = opts.range || (resolvedPath === word.word
+          ? wordRange
+          : new monaco.Range(position.lineNumber, rangeStart, position.lineNumber, rangeEnd));
+        return { range, contents };
       };
 
-      // The expression we'd evaluate in the org: prefer the full call, else the dotted path.
-      const orgExpr = callExpr || fullPath;
-      const orgRangeEnd = (callExpr ? callEnd : exprEnd) + 1;
-      const canOrgEval = liveOrgAvailable() && topFrame && (callExpr || fullPath.includes('.'));
+      const errHover = (title, msg) => ({ range: wordRange, contents: [{ value: `**\`${title}\`**\n\n_org eval:_ ${msg}` }] });
 
-      // Resolved locally to a concrete (non-null) value → show it immediately.
-      if (value !== undefined && value !== null) {
+      // 1) Resolved locally to a concrete (non-null) value → show it immediately.
+      if (value !== undefined && value !== null && !soqlLiteral) {
         return makeHover(resolvedPath || fullPath, value);
       }
 
-      // Not resolved (or null). If we can evaluate it in the org, do so.
-      if (canOrgEval) {
-        const cache = debugState.orgEvalCache;
-        // Try cache synchronously (using the rewritten expr key) for instant repeat hovers.
-        const rw = (() => { try { return rewriteExprForOrg(orgExpr, topFrame); } catch { return null; } })();
-        if (rw && cache && cache.has(rw.resolvedExpr)) {
-          const cached = cache.get(rw.resolvedExpr);
-          if (cached.error) {
-            return { range: new monaco.Range(position.lineNumber, rangeStart, position.lineNumber, orgRangeEnd),
-              contents: [{ value: `**\`${orgExpr}\`**\n\n_org eval:_ ${cached.error}` }] };
+      // 2) SOQL literal under the cursor → run it against the org.
+      if (soqlLiteral && liveOrgAvailable()) {
+        return evaluateSoqlInOrg(soqlLiteral, topFrame).then((r) => {
+          if (r.error) return errHover('SOQL', r.error + (r.soql ? `\n\n\`\`\`sql\n${r.soql}\n\`\`\`` : ''));
+          const preview = r.records.slice(0, 15);
+          const body = [
+            `**SOQL** · _${r.records.length} row(s) from the org_`,
+            '```sql\n' + r.soql + '\n```',
+            '```json\n' + JSON.stringify(preview, null, 2) + '\n```',
+            '_↳ also saved to the Console tab_'
+          ].join('\n\n');
+          // Persist once per unique query so repeat hovers don't spam the console.
+          if (!debugState._soqlHoverLogged) debugState._soqlHoverLogged = new Set();
+          if (!debugState._soqlHoverLogged.has(r.soql)) {
+            debugState._soqlHoverLogged.add(r.soql);
+            addConsoleEntry('soql', `[SOQL] ${r.soql} → ${r.records.length} row(s)`);
+            if (r.records.length) addConsoleEntry('result-json', JSON.stringify(preview, null, 2));
           }
-          return makeHover(orgExpr, cached.value, { realOrg: true, rangeStart, rangeEnd: orgRangeEnd });
-        }
-        // Not cached — evaluate asynchronously; Monaco awaits the returned promise.
-        return evaluateInOrg(orgExpr, topFrame).then((r) => {
-          if (r.error) {
-            return { range: new monaco.Range(position.lineNumber, rangeStart, position.lineNumber, orgRangeEnd),
-              contents: [{ value: `**\`${orgExpr}\`**\n\n_org eval:_ ${r.error}` }] };
-          }
-          return makeHover(orgExpr, r.value, { realOrg: true, rangeStart, rangeEnd: orgRangeEnd });
+          return { range: wordRange, contents: [{ value: body }] };
         }).catch(() => null);
       }
 
-      // Local null with no org available → still show the null.
+      // 3) Method call or qualified expression not resolvable locally → org eval.
+      const orgExpr = callExpr || fullPath;
+      const canOrgEval = liveOrgAvailable() && topFrame && (callExpr || fullPath.includes('.'));
+      if (canOrgEval) {
+        const cache = debugState.orgEvalCache;
+        const rw = (() => { try { return rewriteExprForOrg(orgExpr, topFrame); } catch { return null; } })();
+        if (rw && cache && cache.has(rw.resolvedExpr)) {
+          const cached = cache.get(rw.resolvedExpr);
+          if (cached.error) return errHover(orgExpr, cached.error);
+          return makeHover(orgExpr, cached.value, { realOrg: true, range: wordRange });
+        }
+        return evaluateInOrg(orgExpr, topFrame).then((r) => {
+          if (r.error) {
+            addConsoleEntry('info', `${orgExpr} → (org eval) ${r.error}`);
+            return errHover(orgExpr, r.error);
+          }
+          addConsoleEntry('result', `${orgExpr} → ${formatValue(r.value)}  (real org value)`);
+          return makeHover(orgExpr, r.value, { realOrg: true, range: wordRange });
+        }).catch(() => null);
+      }
+
+      // 4) Local null with no org available → still show the null.
       if (value === null) return makeHover(resolvedPath || fullPath, null);
       return null;
     }
@@ -4099,6 +4279,17 @@ async function evaluateExpressionInOrg(expr) {
   }
 }
 
+/** Console-triggered SOQL: resolves binds from the frame, runs the query in the org, prints rows. */
+async function runConsoleSoql(rawQuery) {
+  const frame = debugState.callStack[debugState.callStack.length - 1];
+  addConsoleEntry('info', `⚙ Running SOQL in org…`);
+  const r = await evaluateSoqlInOrg(rawQuery, frame);
+  if (r.soql) addConsoleEntry('info', `↳ ${r.soql}`);
+  if (r.error) { addConsoleEntry('error', `SOQL error: ${r.error}`); return; }
+  addConsoleEntry('soql', `${r.records.length} row(s) returned`);
+  if (r.records.length) addConsoleEntry('result-json', JSON.stringify(r.records.slice(0, 25), null, 2));
+}
+
 /** Clickable affordance handler: evaluate an expression in the org and inject it as a variable. */
 window._dbgEvalInOrg = async function (varName, expr) {
   const frame = debugState.callStack[debugState.callStack.length - 1];
@@ -4167,6 +4358,10 @@ function evaluateConsoleExpression(expr) {
   // Explicit org-eval prefix: ">>expr" or "org: expr" forces live org evaluation.
   const orgForced = expr.match(/^(?:>>|org:)\s*(.+)$/i);
   if (orgForced) { evaluateExpressionInOrg(orgForced[1].trim()); return; }
+
+  // SOQL: `[SELECT ...]`, `SELECT ...`, or `soql: SELECT ...` runs against the org.
+  const soqlMatch = expr.match(/^(?:soql:\s*)?(\[?\s*SELECT\b[\s\S]*)$/i);
+  if (soqlMatch) { runConsoleSoql(soqlMatch[1].trim()); return; }
 
   try {
     // Check for assignment: varName = value  or  obj.prop = value
