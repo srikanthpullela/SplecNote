@@ -4306,6 +4306,57 @@ body.zen-mode #editor-container { border-radius: 0; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Inline value entry for null / unresolved variables */
+.dbg-var-setnull {
+  margin-left: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.dbg-var-setnull:hover {
+  color: var(--text-primary, #eee);
+  background: var(--bg-hover, #2a2d2e);
+}
+.dbg-var-set-hint {
+  font-size: 10px;
+  color: #e2b341;
+  opacity: 0.55;
+  white-space: nowrap;
+}
+.dbg-var-setnull:hover .dbg-var-set-hint { opacity: 1; }
+.dbg-var-editbtn {
+  font-size: 10px;
+  color: var(--text-muted, #888);
+  cursor: pointer;
+  opacity: 0;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+.dbg-var-header:hover .dbg-var-editbtn { opacity: 0.7; }
+.dbg-var-editbtn:hover { opacity: 1; color: #e2b341; }
+.dbg-var-edit {
+  margin-left: auto;
+  display: flex;
+  flex: 1;
+  justify-content: flex-end;
+}
+.dbg-var-edit-input {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  background: var(--bg-input, #1e1e1e);
+  color: var(--text-primary, #eee);
+  border: 1px solid #e2b341;
+  border-radius: 3px;
+  padding: 1px 5px;
+  width: 62%;
+  outline: none;
+}
 .dbg-var-children {
   margin-left: 16px;
   border-left: 1px solid var(--border, #333);

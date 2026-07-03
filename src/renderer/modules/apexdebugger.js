@@ -61,6 +61,10 @@ const debugState = {
   replayTimeline: [],          // Array of recorded steps { file, line, depth, frames }
   replayIndex: 0,              // Current position in the timeline
   replayFatalError: null,      // Uncatchable error that ended the recorded run, if any
+  // User-provided variable overrides — when the engine/org can't resolve a value
+  // (shows null/undefined), the user may inject a value inline. Keyed by
+  // `${className}::${scope}::${varName}` so overrides survive stepping/replay navigation.
+  userOverrides: {},
 };
 
 /* ================================================================
@@ -1145,6 +1149,7 @@ function stopDebugSession() {
   debugState.replayTimeline = [];
   debugState.replayIndex = 0;
   debugState.replayFatalError = null;
+  debugState.userOverrides = {};
   clearCurrentLineHighlight();
   hideDebugUI();
   addConsoleEntry('info', '⏹ Debug session ended');
@@ -2768,6 +2773,7 @@ function hideDebugUI() {
 }
 
 function updateDebugPanels() {
+  applyUserOverridesToStack();
   renderVariablesPanel();
   renderWatchPanel();
   renderCallStackPanel();
@@ -2776,6 +2782,97 @@ function updateDebugPanels() {
   renderOrgActivityPanel();
   updateLiveOrgIndicator();
 }
+
+/* --- User variable overrides (inline value entry for null/unresolved vars) --- */
+
+/** Interpret a user-typed string as an Apex-ish literal value. */
+function parseUserInputValue(raw) {
+  const s = (raw ?? '').trim();
+  if (s === '' || s.toLowerCase() === 'null') return null;
+  if (s.toLowerCase() === 'true') return true;
+  if (s.toLowerCase() === 'false') return false;
+  if (/^-?\d+$/.test(s)) return parseInt(s, 10);
+  if (/^-?\d*\.\d+$/.test(s)) return parseFloat(s);
+  // Quoted string
+  if ((s.startsWith("'") && s.endsWith("'")) || (s.startsWith('"') && s.endsWith('"'))) {
+    return s.slice(1, -1);
+  }
+  // JSON object / array
+  if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
+    try { return JSON.parse(s); } catch { /* fall through to raw string */ }
+  }
+  return s;
+}
+
+function overrideKey(className, scopeType, varName) {
+  return `${className || '?'}::${scopeType}::${varName}`;
+}
+
+/** Re-apply stored user overrides onto the live call stack, but only where the
+ *  current value is null/undefined — real engine/org values always take precedence. */
+function applyUserOverridesToStack() {
+  const overrides = debugState.userOverrides;
+  if (!overrides || !Object.keys(overrides).length) return;
+  for (const frame of debugState.callStack) {
+    if (!frame) continue;
+    for (const [k, v] of Object.entries(overrides)) {
+      const [cls, scopeType, varName] = k.split('::');
+      if (cls !== (frame.className || '?')) continue;
+      const target = scopeType === 'field' ? (frame.classFields || (frame.classFields = {})) : frame.variables;
+      if (!target) continue;
+      const cur = target[varName];
+      if (cur === null || cur === undefined) target[varName] = v;
+    }
+  }
+}
+
+/** Commit a user-entered value for a variable, update the live context, refresh UI. */
+window._dbgCommitVar = function (scopeType, key, rawValue) {
+  const frame = scopeType === 'closure'
+    ? debugState.callStack[debugState.callStack.length - 2]
+    : debugState.callStack[debugState.callStack.length - 1];
+  if (!frame) return;
+  const value = parseUserInputValue(rawValue);
+  const target = scopeType === 'field' ? (frame.classFields || (frame.classFields = {})) : frame.variables;
+  target[key] = value;
+  // Persist so it survives stepping/replay navigation (applied while value stays null).
+  const storeScope = scopeType === 'field' ? 'field' : 'local';
+  debugState.userOverrides[overrideKey(frame.className, storeScope, key)] = value;
+  addConsoleEntry('var', `✎ ${key} = ${formatValue(value)}  (you set this value)`, debugState.currentLine);
+  updateDebugPanels();
+};
+
+/** Clear a user override for a variable and re-render. */
+window._dbgClearVarOverride = function (scopeType, key) {
+  const frame = scopeType === 'closure'
+    ? debugState.callStack[debugState.callStack.length - 2]
+    : debugState.callStack[debugState.callStack.length - 1];
+  if (!frame) return;
+  const storeScope = scopeType === 'field' ? 'field' : 'local';
+  delete debugState.userOverrides[overrideKey(frame.className, storeScope, key)];
+  updateDebugPanels();
+};
+
+/** Swap a variable row into an inline text input for editing. */
+window._dbgEditVar = function (scopeType, key, ev) {
+  if (ev) ev.stopPropagation();
+  const entry = document.querySelector(`.dbg-var-entry[data-var="${CSS.escape(key)}"][data-scope="${scopeType}"]`);
+  if (!entry) return;
+  const valEl = entry.querySelector('.dbg-var-value, .dbg-var-setnull');
+  if (!valEl) return;
+  const current = valEl.getAttribute('data-raw') || '';
+  valEl.outerHTML = `<span class="dbg-var-edit"><input type="text" class="dbg-var-edit-input" spellcheck="false" autocomplete="off" placeholder="value…" value="${_esc(current)}" /></span>`;
+  const input = entry.querySelector('.dbg-var-edit-input');
+  if (!input) return;
+  input.focus();
+  input.select();
+  const commit = () => window._dbgCommitVar(scopeType, key, input.value);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); updateDebugPanels(); }
+  });
+  input.addEventListener('blur', () => { updateDebugPanels(); });
+};
 
 function renderVariablesPanel() {
   const container = _$('#dbg-variables-body');
@@ -2798,7 +2895,7 @@ function renderVariablesPanel() {
     html += '<div class="dbg-empty" style="padding-left:16px">No local variables</div>';
   } else {
     for (const key of localKeys) {
-      html += renderVarEntry(key, vars[key]);
+      html += renderVarEntry(key, vars[key], 'local');
     }
   }
   html += '</div>';
@@ -2808,7 +2905,7 @@ function renderVariablesPanel() {
     html += '<div class="dbg-scope-section">';
     html += `<div class="dbg-scope-header" onclick="this.parentElement.classList.toggle('collapsed')">▼ Class Fields (${_esc(frame.className)})</div>`;
     for (const key of Object.keys(frame.classFields)) {
-      html += renderVarEntry(key, frame.classFields[key]);
+      html += renderVarEntry(key, frame.classFields[key], 'field');
     }
     html += '</div>';
   }
@@ -2819,7 +2916,7 @@ function renderVariablesPanel() {
     html += '<div class="dbg-scope-section collapsed">';
     html += `<div class="dbg-scope-header" onclick="this.parentElement.classList.toggle('collapsed')">▶ Closure (${_esc(parentFrame.className)}.${_esc(parentFrame.methodName)})</div>`;
     for (const key of Object.keys(parentFrame.variables)) {
-      html += renderVarEntry(key, parentFrame.variables[key]);
+      html += renderVarEntry(key, parentFrame.variables[key], 'closure');
     }
     html += '</div>';
   }
@@ -2893,19 +2990,40 @@ window._dbgRemoveWatch = function(watchId) {
   renderWatchPanel();
 };
 
-function renderVarEntry(key, val) {
+function renderVarEntry(key, val, scopeType = 'local') {
   const isExpandable = val !== null && typeof val === 'object';
-  let html = `<div class="dbg-var-entry${isExpandable ? ' expandable' : ''}" data-var="${_esc(key)}">`;
+  const isNullish = val === null || val === undefined;
+  const rawAttr = _esc(rawValueString(val));
+  let html = `<div class="dbg-var-entry${isExpandable ? ' expandable' : ''}" data-var="${_esc(key)}" data-scope="${scopeType}">`;
   html += `<div class="dbg-var-header" onclick="window._dbgToggleVar(this)">`;
   if (isExpandable) html += `<span class="dbg-var-arrow">▶</span>`;
   html += `<span class="dbg-var-name">${_esc(key)}</span>`;
-  html += `<span class="dbg-var-value">${formatValue(val)}</span>`;
+  if (isNullish) {
+    // Nothing resolved yet — invite the user to supply a value inline.
+    html += `<span class="dbg-var-setnull" data-raw="" onclick="window._dbgEditVar('${scopeType}', '${_escJs(key)}', event)" title="No value resolved. Click to enter one.">${formatValue(val)} <span class="dbg-var-set-hint">✎ set value</span></span>`;
+  } else {
+    html += `<span class="dbg-var-value" data-raw="${rawAttr}">${formatValue(val)}</span>`;
+    html += `<span class="dbg-var-editbtn" onclick="window._dbgEditVar('${scopeType}', '${_escJs(key)}', event)" title="Edit value">✎</span>`;
+  }
   html += `</div>`;
   if (isExpandable) {
     html += `<div class="dbg-var-expand hidden">${renderVariableTree(val, 0, 4)}</div>`;
   }
   html += `</div>`;
   return html;
+}
+
+/** Render a value as an editable raw string for the inline input. */
+function rawValueString(val) {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'string') return val;
+  if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+  try { return JSON.stringify(val); } catch { return String(val); }
+}
+
+/** Escape a string for safe embedding inside a single-quoted JS attribute handler. */
+function _escJs(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
 window._dbgToggleVar = function(headerEl) {
