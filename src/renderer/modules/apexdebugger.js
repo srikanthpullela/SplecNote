@@ -1385,6 +1385,12 @@ async function evaluateSoqlInOrg(rawQuery, frame) {
   const binds = [...new Set([...q.matchAll(/:\s*([A-Za-z_]\w*(?:\.\w+)*)/g)].map(x => x[1]))];
   const unresolved = [];
   for (const b of binds) {
+    // Detect the SOQL context of the bind: IN/INCLUDES/EXCLUDES expect a
+    // collection; comparison operators expect a scalar. This lets us reject
+    // placeholder values (e.g. an uninitialised Set logged as `false`).
+    const opM = q.match(new RegExp('(\\bIN\\b|\\bINCLUDES\\b|\\bEXCLUDES\\b|<=|>=|!=|<>|=|<|>|\\bLIKE\\b)\\s*:\\s*' + escapeRegex(b) + '\\b', 'i'));
+    const collectionCtx = opM ? /^(IN|INCLUDES|EXCLUDES)$/i.test(opM[1]) : false;
+
     let val = resolveProperty(scope, b);
     if (val === undefined && frame) {
       // Not a local var — could be a static constant / expression. Ask the org.
@@ -1392,12 +1398,15 @@ async function evaluateSoqlInOrg(rawQuery, frame) {
       if (!r.error) val = r.value;
     }
     if (val === undefined) { unresolved.push(b); continue; }
+    // A collection bind (IN …) must be an array. A runtime Set/List that hasn't
+    // been populated yet is logged as a scalar placeholder — don't inline it.
+    if (collectionCtx && !Array.isArray(val)) { unresolved.push(b); continue; }
     const lit = toSoqlLiteral(val);
     if (lit == null) { unresolved.push(b); continue; }
     q = q.replace(new RegExp(':\\s*' + escapeRegex(b) + '\\b', 'g'), lit);
   }
   if (unresolved.length) {
-    return { error: `Can't resolve bind variable(s): ${unresolved.join(', ')}. They reference runtime objects — set a value in the Console or run the whole method with ▶ Run in Org.`, soql: q, unresolved };
+    return { error: `Can't resolve bind variable(s): ${unresolved.join(', ')}. They're runtime collections/objects built inside the method — enable Live Org and use ▶ Run in Org, then step to this line so they're populated (or set a value in the Console, e.g. \`${unresolved[0]} = ['id1','id2']\`).`, soql: q, unresolved };
   }
   const res = await execSoql(q);
   return { ...res, unresolved: [] };
@@ -4318,9 +4327,19 @@ async function evaluateInOrg(expr, frame) {
   if (!frame) return { error: 'No active frame' };
   if (!liveOrgAvailable()) return { error: 'Connect an org and enable Live Org first' };
 
+  // Pure field-access path (no method calls) → resolve from the replay-captured
+  // frame directly. After ▶ Run in Org, object variables hold real state, so
+  // `configSO.PriceListId__c` etc. return real values with no org round-trip.
+  if (/^[A-Za-z_][\w.]*$/.test(expr) && expr.includes('.')) {
+    const scope = { ...(frame.classFields || {}), ...frame.variables };
+    const local = resolveProperty(scope, expr);
+    if (local !== undefined) return { value: local, resolvedExpr: expr, fromFrame: true };
+  }
+
   const { resolvedExpr, unresolved } = rewriteExprForOrg(expr, frame);
   if (unresolved.length) {
-    return { error: `Can't inline object variable(s): ${[...new Set(unresolved)].join(', ')}. Try an expression using scalar values.`, resolvedExpr };
+    const names = [...new Set(unresolved)].join(', ');
+    return { error: `Can't evaluate: ${names} ${unresolved.length > 1 ? 'are' : 'is'} a runtime object built inside the method, and anonymous Apex can't call methods on it or rebuild it (private helpers/state aren't reachable). Use ▶ Run in Org to replay the whole method, then hover the variable itself for its real value — or set a value in the Console (e.g. \`${unresolved[0]} = …\`).`, resolvedExpr };
   }
 
   if (!debugState.orgEvalCache) debugState.orgEvalCache = new Map();
