@@ -1768,13 +1768,16 @@ function showQuickOpen() {
 }
 
 async function getRecentFilePaths() {
-  // Gather recently opened files: currently-open tabs first (most relevant), then
-  // the PERSISTENT recent-files store (files opened earlier, across sessions) so the
-  // finder always surfaces recents even when the sidebar list is collapsed/empty.
+  // Gather recently opened files scoped to the CURRENT project/repo: open tabs
+  // first (most relevant), then the persistent recent-files store. The store holds
+  // plain path strings (and some folder paths), so we intersect with the project's
+  // file list to keep only real files that belong to the open folder.
   const seen = new Set();
   const result = [];
+  const inProject = state.folderPath && quickOpenFiles.length ? new Set(quickOpenFiles) : null;
+  const belongs = (fp) => !inProject || inProject.has(fp) || fp.startsWith(state.folderPath + '/');
   for (const t of state.tabs) {
-    if (t.filePath && !seen.has(t.filePath)) {
+    if (t.filePath && !seen.has(t.filePath) && belongs(t.filePath)) {
       seen.add(t.filePath);
       result.push(t.filePath);
     }
@@ -1782,22 +1785,14 @@ async function getRecentFilePaths() {
   try {
     const recents = await window.congacode.getRecent();
     for (const entry of (recents || [])) {
-      const fp = (entry && entry.type !== 'directory' && entry.type !== 'folder-group') ? entry.path : null;
-      if (fp && !seen.has(fp)) {
-        seen.add(fp);
-        result.push(fp);
-      }
-    }
-  } catch (_) { /* store unavailable — fall back to tabs only */ }
-  // Also fold in any sidebar recent-list entries not already covered.
-  const recentItems = document.querySelectorAll('#recent-list .recent-item');
-  recentItems.forEach(el => {
-    const fp = el.dataset?.path;
-    if (fp && !seen.has(fp)) {
+      const fp = typeof entry === 'string' ? entry : (entry && entry.path);
+      if (!fp || seen.has(fp)) continue;
+      if (!belongs(fp)) continue;                 // scope to the current project/repo
+      if (inProject && !inProject.has(fp)) continue; // and only real files in the project
       seen.add(fp);
       result.push(fp);
     }
-  });
+  } catch (_) { /* store unavailable — fall back to tabs only */ }
   return result.slice(0, 50);
 }
 

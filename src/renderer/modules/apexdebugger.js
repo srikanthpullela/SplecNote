@@ -4247,7 +4247,10 @@ function loadRequestHistory() {
 
 function saveRequestHistoryEntry(filePath, methodName, jsonText) {
   const text = (jsonText || '').trim();
-  if (!text || /^\/\/|^\{\s*\}$/.test(text) && text.length < 6) return;
+  if (!text) return;
+  // Skip the default placeholder / empty payloads (strip // comments + whitespace).
+  const stripped = text.replace(/\/\/.*$/gm, '').replace(/\s+/g, '');
+  if (!stripped || stripped === '{}') return;
   const className = (filePath || '').split('/').pop().replace(/\.(cls|trigger)$/, '');
   const hist = loadRequestHistory().filter(e => !(e.json === text && e.method === methodName && e.className === className));
   hist.unshift({ json: text, method: methodName, className, filePath, ts: Date.now() });
