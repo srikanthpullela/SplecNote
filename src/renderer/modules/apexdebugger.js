@@ -1528,7 +1528,19 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
           addConsoleEntry('error', `SOQL error: ${res.error}`);
           throw Object.assign(new E.ApexError('System.QueryException', res.error, 0), {});
         }
-        addConsoleEntry('info', `✓ ${res.records.length} row(s) from org`);
+        if (res.records.length === 0) {
+          // Truthful diagnostics: report an empty result like a 404 so the user
+          // knows the record isn't in the org (rather than silently returning []
+          // and surfacing a confusing downstream NPE). We do NOT fabricate data.
+          const info = describeEmptyQuery(soql);
+          addConsoleEntry('warn', `🔎 0 rows from org — ${info.subject} not found in org${info.org ? ' ' + info.org : ''}.`);
+          if (info.byId) {
+            addConsoleEntry('warn', `↳ This record does not exist in the connected org (it may be a transient record that was already cleaned up). Any code that dereferences this empty result will get null — and will throw a NullPointerException, exactly as it would in real Apex. No data is being generated to hide this.`);
+          }
+          renderConsolePanel();
+        } else {
+          addConsoleEntry('info', `✓ ${res.records.length} row(s) from org`);
+        }
         return res.records;
       } finally {
         debugState.orgFetching = false;
@@ -1827,6 +1839,18 @@ async function runLiveQuery(rawQuery, scope) {
   }
   debugState.orgQueryCache.set(soql, result);
   return result;
+}
+
+/** Summarize an empty SOQL result for a truthful, API-404-style diagnostic. */
+function describeEmptyQuery(soql) {
+  const org = getActiveOrg();
+  const orgName = org ? `(${org.org})` : '';
+  const flat = String(soql || '').replace(/\s+/g, ' ').trim();
+  const fromM = flat.match(/\bFROM\s+([A-Za-z0-9_.]+)/i);
+  const obj = fromM ? fromM[1] : 'record';
+  const idM = flat.match(/\bWHERE\b[\s\S]*?\bId\s*=\s*'([^']+)'/i);
+  if (idM) return { subject: `${obj} with Id '${idM[1]}'`, byId: true, org: orgName };
+  return { subject: `${obj} matching the query`, byId: false, org: orgName };
 }
 
 /** Execute a fully-resolved SOQL string against the org via `sf data query` (cached). */
