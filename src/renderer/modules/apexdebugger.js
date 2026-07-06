@@ -65,6 +65,11 @@ const debugState = {
   // (shows null/undefined), the user may inject a value inline. Keyed by
   // `${className}::${scope}::${varName}` so overrides survive stepping/replay navigation.
   userOverrides: {},
+  // Live interpreter (V8-style) engine mode — the editor executes Apex itself,
+  // statement by statement, fetching real org data on demand (SOQL/eval).
+  engineMode: false,           // When true, step controls drive the live interpreter
+  engineSession: null,         // Active ApexEngine instance
+  engineRunning: false,        // True while the engine is executing (not paused)
 };
 
 /* ================================================================
@@ -1328,6 +1333,24 @@ async function startDebugSession(filePath, methodName, requestParams) {
   // The local statement simulator set up above is only a FALLBACK PREVIEW for
   // when no org is connected (it can only guess values/branches).
   // ─────────────────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
+  // PRIMARY ENGINE = LIVE INTERPRETER ("V8 for Apex").
+  // The editor executes the Apex source itself — real call stack, scope chain,
+  // step into/over/out/continue and conditional breakpoints — while SOQL and
+  // org-dependent values are fetched from the connected org ON DEMAND, pausing
+  // execution while the data loads (exactly like awaiting I/O in Chrome).
+  // If the source can't be parsed by the interpreter, we fall back to the
+  // org-replay path, then to the local statement simulator.
+  // ─────────────────────────────────────────────────────────────────────────
+  const engineStarted = await startEngineSession(filePath, methodName, requestParams, source);
+  if (engineStarted) {
+    addConsoleEntry('info', '⚡ Live interpreter active — the editor is executing this method like a JS engine. Step buttons walk real execution; SOQL lines fetch REAL data from the org on demand.');
+    if (!liveOrgAvailable()) {
+      addConsoleEntry('warn', 'No org connected — SOQL will return 0 rows. Connect an org for live data.');
+    }
+    return;
+  }
+
   if (liveOrgAvailable()) {
     debugState.liveOrgMode = true;
     updateLiveOrgIndicator();
@@ -1344,6 +1367,12 @@ async function startDebugSession(filePath, methodName, requestParams) {
 }
 
 function stopDebugSession() {
+  if (debugState.engineSession) {
+    try { debugState.engineSession.stop(); } catch (_) {}
+    debugState.engineSession = null;
+  }
+  debugState.engineMode = false;
+  debugState.engineRunning = false;
   debugState.active = false;
   debugState.paused = false;
   debugState.callStack = [];
@@ -1359,6 +1388,242 @@ function stopDebugSession() {
   clearCurrentLineHighlight();
   hideDebugUI();
   addConsoleEntry('info', '⏹ Debug session ended');
+}
+
+/* ================================================================
+   LIVE INTERPRETER ENGINE MODE — "V8 for Apex"
+   The editor executes the Apex source itself (apexlang.js parser +
+   apexengine.js async interpreter): real call stack, scope chain,
+   step into/over/out/continue, conditional breakpoints, and REAL org
+   data fetched on demand — execution pauses while SOQL runs against
+   the connected org, exactly like awaiting I/O in Chrome DevTools.
+   ================================================================ */
+
+/** Convert an engine runtime value into a plain JS value for the UI panels. */
+function engineValToPlain(v, depth = 0) {
+  if (v === null || v === undefined) return null;
+  if (depth > 6) return '…';
+  const t = typeof v;
+  if (t === 'string' || t === 'number' || t === 'boolean') return v;
+  const E = window.ApexEngine;
+  if (Array.isArray(v)) return v.map(x => engineValToPlain(x, depth + 1));
+  if (E && v instanceof E.ApexMap) {
+    const o = {};
+    for (const e of v.m.values()) o[typeof e.k === 'string' ? e.k : E.toApexString(e.k)] = engineValToPlain(e.v, depth + 1);
+    return o;
+  }
+  if (E && v instanceof E.ApexSet) return v.items().map(x => engineValToPlain(x, depth + 1));
+  if (E && (v instanceof E.ApexDate || v instanceof E.ApexDatetime)) return v.toString();
+  if (E && v instanceof E.ApexError) return `${v.apexType}: ${v.apexMessage}`;
+  if (E && v instanceof E.ApexObject) {
+    const o = {};
+    for (const e of v.fields.values()) o[e.name] = engineValToPlain(e.value, depth + 1);
+    return o;
+  }
+  if (t === 'object') {
+    const o = {};
+    for (const k of Object.keys(v)) { if (k === 'attributes') continue; o[k] = engineValToPlain(v[k], depth + 1); }
+    return o;
+  }
+  return String(v);
+}
+
+/** Mirror the engine's call stack into debugState.callStack so every existing
+    panel (variables, call stack, hover, watch) keeps working unchanged. */
+function mirrorEngineStack(engineStack) {
+  const frames = [];
+  // engine stack is top-first; debugState.callStack is bottom-first
+  for (let i = engineStack.length - 1; i >= 0; i--) {
+    const f = engineStack[i];
+    const variables = {};
+    const classFields = {};
+    for (const v of f.variables || []) {
+      if (v.name === 'this') continue;
+      if (v.scope && String(v.scope).startsWith('static')) classFields[v.name] = engineValToPlain(v.value);
+      else variables[v.name] = engineValToPlain(v.value);
+    }
+    if (f.thisRef && f.thisRef.fields) {
+      for (const e of f.thisRef.fields.values()) classFields[e.name] = engineValToPlain(e.value);
+    }
+    frames.push({
+      file: f.file, className: f.className, methodName: f.methodName,
+      line: f.line, variables, classFields, statements: [], pc: 0,
+    });
+  }
+  debugState.callStack = frames;
+}
+
+/** Inline resolved bind values into a SOQL string so it can run via the CLI. */
+function engineBuildSoql(raw, binds) {
+  let q = String(raw || '').trim().replace(/^\[/, '').replace(/\]\s*;?$/, '').trim();
+  const entries = Object.entries(binds || {}).sort((a, b) => b[0].length - a[0].length);
+  for (const [expr, val] of entries) {
+    const plain = engineValToPlain(val);
+    const lit = toSoqlLiteral(plain);
+    if (lit == null) continue;
+    q = q.replace(new RegExp(':\\s*' + escapeRegex(expr) + '(?![\\w.])', 'g'), lit);
+  }
+  return q;
+}
+
+/** Called when the engine pauses (step / breakpoint). Sync the whole UI. */
+async function onEnginePause(info) {
+  debugState.paused = true;
+  debugState.engineRunning = false;
+  mirrorEngineStack(info.stack || []);
+  debugState.currentLine = info.line;
+  // Cross-file step-into: open the paused file if it isn't the current one
+  if (info.file && info.file !== debugState.currentFile && /\.(cls|trigger)$/.test(info.file)) {
+    try {
+      const content = await window.congacode.readFile(info.file);
+      if (content != null) { await window.openFile(info.file, content); }
+      debugState.currentFile = info.file;
+    } catch (_) { /* keep current file */ }
+  } else if (info.file) {
+    debugState.currentFile = info.file;
+  }
+  highlightCurrentLine();
+  navigateToLine(info.line);
+  updateDebugPanels();
+}
+
+/**
+ * Boot a live-interpreter debug session. Returns true when the engine
+ * successfully parsed the source and started (paused on the first statement).
+ */
+async function startEngineSession(filePath, methodName, requestParams, source) {
+  if (!window.ApexEngine || !window.ApexLang) return false;
+  const E = window.ApexEngine;
+
+  const host = {
+    log: (msg, level) => {
+      const map = { debug: 'log', soql: 'info', dml: 'info', system: 'info' };
+      addConsoleEntry(map[level] || 'log', level === 'debug' ? `USER_DEBUG: ${msg}` : msg);
+      renderConsolePanel();
+    },
+    query: async (rawSoql, binds) => {
+      if (!liveOrgAvailable()) {
+        addConsoleEntry('warn', 'SOQL needs a connected org — returning 0 rows. Connect an org for real data.');
+        return [];
+      }
+      const soql = engineBuildSoql(rawSoql, binds);
+      debugState.orgFetching = true;
+      updateLiveOrgIndicator();
+      addConsoleEntry('info', `⏳ Fetching from org: ${soql.replace(/\s+/g, ' ').slice(0, 180)}`);
+      renderConsolePanel();
+      try {
+        const res = await execSoql(soql);
+        if (res.error) {
+          addConsoleEntry('error', `SOQL error: ${res.error}`);
+          throw Object.assign(new E.ApexError('System.QueryException', res.error, 0), {});
+        }
+        addConsoleEntry('info', `✓ ${res.records.length} row(s) from org`);
+        return res.records;
+      } finally {
+        debugState.orgFetching = false;
+        updateLiveOrgIndicator();
+        renderConsolePanel();
+      }
+    },
+    dml: async (op, value) => {
+      const records = Array.isArray(value) ? value : [value];
+      addConsoleEntry('warn', `DML ${op.toUpperCase()} simulated locally (${records.length} record(s)) — the org is never modified by the debugger.`);
+      renderConsolePanel();
+    },
+    loadClassSource: async (className) => {
+      const file = await resolveClassFile(className);
+      if (!file) return null;
+      try {
+        const src = await window.congacode.readFile(file);
+        if (src) addConsoleEntry('info', `↳ Loaded ${className} from ${file.split('/').pop()} (step-into available)`);
+        return src ? { source: src, path: file } : null;
+      } catch (_) { return null; }
+    },
+    getBreakpoint: (file, line) => {
+      const bps = debugState.breakpoints.get(file);
+      if (!bps || !bps.has(line)) return null;
+      return bps.get(line) || {};
+    },
+    onPause: (info) => { onEnginePause(info); },
+    onDone: (result) => {
+      if (!debugState.active) return;
+      debugState.paused = false;
+      debugState.engineRunning = false;
+      clearCurrentLineHighlight();
+      if (result !== undefined && result !== null) {
+        const plain = engineValToPlain(result);
+        addConsoleEntry('result', `⏹ Method returned: ${typeof plain === 'object' ? JSON.stringify(plain, null, 2) : formatValue(plain)}`);
+      }
+      addConsoleEntry('info', '✅ Execution finished. Restart (⟳) to run again.');
+      updateDebugPanels();
+    },
+    onError: (err) => {
+      if (!debugState.active) return;
+      debugState.paused = false;
+      debugState.engineRunning = false;
+      const msg = err && err.apexType ? `${err.apexType}: ${err.apexMessage}` : (err && err.message) || String(err);
+      addConsoleEntry('error', `✖ Uncaught exception: ${msg}`);
+      if (err && err.apexStack && err.apexStack.length) {
+        addConsoleEntry('error', err.apexStack.map(f => `    at ${f.className}.${f.methodName} (line ${f.line})`).join('\n'));
+      }
+      updateDebugPanels();
+    },
+  };
+
+  let engine;
+  try {
+    engine = new E.ApexEngine(host);
+    engine.loadSource(filePath, source);
+  } catch (e) {
+    console.warn('[engine] parse failed, falling back:', e);
+    addConsoleEntry('warn', `Live interpreter could not parse this file (${e.message || e}) — falling back to org-replay mode.`);
+    return false;
+  }
+
+  const className = filePath.split('/').pop().replace(/\.(cls|trigger)$/, '');
+  if (!engine.registry.get(className)) return false;
+  const methods = engine.registry.get(className).findMethods(methodName);
+  if (!methods.length) return false;
+
+  const args = (methods[0].params || []).map((p, i) =>
+    requestParams && requestParams[i] !== undefined ? JSON.parse(JSON.stringify(requestParams[i])) : null);
+
+  debugState.engineMode = true;
+  debugState.engineSession = engine;
+  engine.mode = 'into';                    // pause on the very first statement
+  debugState.engineRunning = true;
+
+  // Fire and let the pause gate drive the UI; completion handled by onDone/onError.
+  engine.run(className, methodName, args).catch(() => { /* reported via onError */ });
+  return true;
+}
+
+/** Resume the live interpreter with a step action ('continue'|'into'|'over'|'out'). */
+function engineStep(action) {
+  const eng = debugState.engineSession;
+  if (!eng) return;
+  debugState.paused = false;
+  debugState.engineRunning = true;
+  clearCurrentLineHighlight();
+  eng.resume(action);
+}
+
+/** Console / watch evaluation inside the live interpreter's top frame. */
+async function evaluateEngineConsole(expr) {
+  const eng = debugState.engineSession;
+  if (!eng || !eng.topFrame()) { addConsoleEntry('error', 'No active engine frame'); return; }
+  try {
+    const val = await eng.evalExpressionInFrame(expr, eng.topFrame());
+    const plain = engineValToPlain(val);
+    if (plain !== null && typeof plain === 'object') addConsoleEntry('result-json', JSON.stringify(plain, null, 2));
+    else addConsoleEntry('result', formatValue(plain));
+    // Assignments may have mutated scope — refresh panels
+    mirrorEngineStack(eng.getCallStack());
+    updateDebugPanels();
+  } catch (e) {
+    addConsoleEntry('error', e && e.apexType ? `${e.apexType}: ${e.apexMessage}` : (e.message || String(e)));
+  }
+  renderConsolePanel();
 }
 
 /* ================================================================
@@ -3043,6 +3308,7 @@ function assignProperty(scope, path, value) {
 
 async function debugContinue() {
   if (!debugState.active) return;
+  if (debugState.engineMode) { engineStep('continue'); return; }
   if (debugState.replayMode) { await replayContinue(); return; }
   debugState.paused = false;
   debugState.stepMode = 'continue';
@@ -3064,6 +3330,7 @@ async function debugContinue() {
 
 async function debugStepOver() {
   if (!debugState.active || !debugState.paused) return;
+  if (debugState.engineMode) { engineStep('over'); return; }
   if (debugState.replayMode) { await replayStepOver(); return; }
   debugState.stepMode = 'stepOver';
   debugState.stepDepth = debugState.callStack.length;
@@ -3081,6 +3348,7 @@ async function debugStepOver() {
 
 async function debugStepInto() {
   if (!debugState.active || !debugState.paused) return;
+  if (debugState.engineMode) { engineStep('into'); return; }
   if (debugState.replayMode) { await replayStepInto(); return; }
   debugState.stepMode = 'stepInto';
   debugState.stepDepth = debugState.callStack.length;
@@ -3098,6 +3366,7 @@ async function debugStepInto() {
 
 async function debugStepOut() {
   if (!debugState.active || !debugState.paused) return;
+  if (debugState.engineMode) { engineStep('out'); return; }
   if (debugState.replayMode) { await replayStepOut(); return; }
   debugState.stepMode = 'stepOut';
   debugState.stepDepth = debugState.callStack.length;
@@ -4985,6 +5254,13 @@ function evaluateConsoleExpression(expr) {
   // SOQL: `[SELECT ...]`, `SELECT ...`, or `soql: SELECT ...` runs against the org.
   const soqlMatch = expr.match(/^(?:soql:\s*)?(\[?\s*SELECT\b[\s\S]*)$/i);
   if (soqlMatch) { runConsoleSoql(soqlMatch[1].trim()); return; }
+
+  // Live interpreter: evaluate in the real engine frame (supports method calls,
+  // assignments, object graphs — anything the interpreter can execute).
+  if (debugState.engineMode && debugState.engineSession) {
+    evaluateEngineConsole(expr);
+    return;
+  }
 
   try {
     // Check for assignment: varName = value  or  obj.prop = value
