@@ -335,7 +335,13 @@
   }
 
   /* ================= interpreter ================= */
-  const BUILTIN_TYPES = new Set(['string', 'integer', 'long', 'double', 'decimal', 'boolean', 'id', 'object', 'date', 'datetime', 'time', 'blob', 'list', 'map', 'set', 'math', 'json', 'system', 'database', 'limits', 'userinfo', 'test', 'schema', 'sobject', 'exception', 'type', 'url', 'void', 'string.format']);
+  const BUILTIN_TYPES = new Set(['string', 'integer', 'long', 'double', 'decimal', 'boolean', 'id', 'object', 'date', 'datetime', 'time', 'blob', 'list', 'map', 'set', 'math', 'json', 'system', 'database', 'limits', 'userinfo', 'test', 'schema', 'sobject', 'exception', 'type', 'url', 'void', 'string.format', 'logginglevel', 'apexpages']);
+  const BUILTIN_ENUMS = {
+    'logginglevel': ['NONE', 'INTERNAL', 'FINEST', 'FINER', 'FINE', 'DEBUG', 'INFO', 'WARN', 'ERROR'],
+    'apexpages.severity': ['CONFIRM', 'ERROR', 'FATAL', 'INFO', 'WARNING'],
+    'triggeroperation': ['BEFORE_INSERT', 'BEFORE_UPDATE', 'BEFORE_DELETE', 'AFTER_INSERT', 'AFTER_UPDATE', 'AFTER_DELETE', 'AFTER_UNDELETE'],
+    'quiddity': ['ANONYMOUS', 'AURA', 'BATCH_APEX', 'FUTURE', 'INVOCABLE_ACTION', 'QUEUEABLE', 'REST', 'RUNTEST_SYNC', 'SCHEDULED', 'SOAP', 'SYNCHRONOUS', 'VF'],
+  };
   // Sentinel returned by org-eval helpers when a value could not be resolved from the org.
   const ENGINE_UNRESOLVED = Symbol('engine-unresolved');
 
@@ -354,6 +360,7 @@
       this.maxSteps = 200000;
       this._steps = 0;
       this.dmlLog = [];
+      this.pageMessages = [];
     }
 
     loadSource(fileName, source) {
@@ -1354,6 +1361,16 @@
       }
       if (tn === 'datetime') { const args = await this.evalArgs(e.args, frame); return args.length ? new ApexDatetime(new Date(args[0], (args[1] || 1) - 1, args[2] || 1, args[3] || 0, args[4] || 0, args[5] || 0)) : ApexDatetime.now(); }
       if (tn === 'date') { const args = await this.evalArgs(e.args, frame); return args.length >= 3 ? new ApexDate(args[0], args[1], args[2]) : ApexDate.today(); }
+      // ApexPages.Message — simulate locally
+      if (tn === 'apexpages.message') {
+        const args = await this.evalArgs(e.args, frame);
+        return {
+          attributes: { type: 'ApexPages.Message' },
+          severity: args.length > 0 ? toApexString(args[0]) : null,
+          summary: args.length > 1 ? toApexString(args[1]) : null,
+          detail: args.length > 2 ? toApexString(args[2]) : null,
+        };
+      }
       // Otherwise: assume SObject — new Account(Name='x') or new Account()
       const rec = { attributes: { type: e.type.name } };
       if (e.namedArgs) for (const na of e.namedArgs) rec[na.name] = await this.evalExpr(na.value, frame);
@@ -1551,6 +1568,9 @@
         case 'clone': { const c = Object.assign({}, rec); if (!a[0]) delete c.Id; return c; }
         case 'getpopulatedfieldsasmap': { const m = new ApexMap(); for (const k of Object.keys(rec)) if (k !== 'attributes') m.put(k, rec[k]); return m; }
         case 'tostring': return toApexString(rec);
+        case 'getsummary': return rec.summary ?? null;
+        case 'getdetail': return rec.detail ?? null;
+        case 'getseverity': return rec.severity ?? null;
         default:
           if (this.host.log) this.host.log(`⚠ SObject.${name}() is not simulated — returning null and continuing.`, 'system');
           return null;
@@ -1562,7 +1582,17 @@
       const t = typeName.toLowerCase();
       const p = propName.toLowerCase();
       if (t === 'trigger') return null; // trigger context not simulated
-      throw new ApexError('System.VariableDoesNotExistException', `${typeName}.${propName} does not exist`, line);
+      // Built-in enum lookup
+      const enumVals = BUILTIN_ENUMS[t];
+      if (enumVals) {
+        const match = enumVals.find(v => v.toLowerCase() === p);
+        if (match) return match;
+      }
+      // ApexPages.Severity sub-namespace
+      if (t === 'apexpages' && p === 'severity') return { __builtinRef: 'ApexPages.Severity' };
+      // Unknown static prop — degrade gracefully (never kill a session)
+      if (this.host.log) this.host.log(`⚠ ${typeName}.${propName} is not simulated — returning null and continuing.`, 'system');
+      return null;
     }
 
     async callStaticBuiltin(typeName, name, a, line, frame) {
@@ -1713,6 +1743,37 @@
         }
         return null;
       }
+      if (t === 'apexpages') {
+        switch (n) {
+          case 'addmessage': {
+            const msg = a[0];
+            this.pageMessages.push(msg);
+            const sev = (msg && msg.severity) ? toApexString(msg.severity) : 'UNKNOWN';
+            const sum = (msg && msg.summary != null) ? toApexString(msg.summary) : '';
+            if (this.host.log) this.host.log(`ApexPages message [${sev}]: ${sum}`, 'system');
+            return null;
+          }
+          case 'addmessages': {
+            const arg = a[0];
+            if (arg instanceof ApexError) {
+              const synth = { attributes: { type: 'ApexPages.Message' }, severity: 'ERROR', summary: arg.apexMessage, detail: null };
+              this.pageMessages.push(synth);
+              if (this.host.log) this.host.log(`ApexPages message [ERROR]: ${arg.apexMessage}`, 'system');
+            } else if (Array.isArray(arg)) {
+              for (const m of arg) { this.pageMessages.push(m); }
+            }
+            return null;
+          }
+          case 'getmessages': return this.pageMessages.slice();
+          case 'hasmessages': return this.pageMessages.length > 0;
+          case 'currentpage':
+            if (this.host.log) this.host.log('⚠ ApexPages.currentPage(): VF page context is not simulated — returning null.', 'system');
+            return null;
+          default:
+            if (this.host.log) this.host.log(`⚠ ApexPages.${name}() is not simulated — returning null`, 'system');
+            return null;
+        }
+      }
       if (t === 'schema') {
         if (this.host.log) this.host.log(`Schema.${name}: describe calls are not simulated locally`, 'system');
         return null;
@@ -1804,6 +1865,9 @@
 
     /** Try to resolve an arbitrary static call in the org (scalar args only). */
     async tryOrgStaticCall(typeName, methodName, a) {
+      // VF-only namespaces are illegal in anon Apex — never send them to the org.
+      const blocked = new Set(['apexpages', 'pagereference']);
+      if (blocked.has(typeName.toLowerCase())) return ENGINE_UNRESOLVED;
       if (!this.host.evalOrg) return ENGINE_UNRESOLVED;
       for (const x of a) { if (x !== null && x !== undefined && typeof x === 'object') return ENGINE_UNRESOLVED; }
       const expr = `${typeName}.${methodName}(${a.map(x => this.apexLiteral(x)).join(', ')})`;

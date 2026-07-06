@@ -1693,7 +1693,19 @@ function parseSfJson(stdout) {
   const start = stdout.indexOf('{');
   const end = stdout.lastIndexOf('}');
   if (start < 0 || end <= start) return null;
-  try { return JSON.parse(stdout.slice(start, end + 1)); } catch { return null; }
+  try { return JSON.parse(stdout.slice(start, end + 1)); } catch {
+    // Last resort: extract a structured error from truncated CLI output
+    if (stdout.includes('"name"') && stdout.includes('"message"')) {
+      const mMatch = stdout.match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      const nMatch = stdout.match(/"name"\s*:\s*"([^"]*)"/);
+      if (mMatch) {
+        let msg = mMatch[1];
+        try { msg = JSON.parse('"' + mMatch[1] + '"'); } catch {}
+        return { status: 1, truncated: true, name: nMatch ? nMatch[1] : 'unknown', message: msg };
+      }
+    }
+    return null;
+  }
 }
 
 /** Strip sf CLI noise (update-available warnings, `›` banner lines, blank lines). */
@@ -2255,6 +2267,10 @@ async function runEntryMethodInOrg() {
     if (!cli) {
       debugState.orgActivity = { error: (stderr || stdout || 'No response from sf CLI').split('\n').slice(0, 5).join('\n') };
       addConsoleEntry('error', `sf CLI returned non-JSON. stdout(${(stdout||'').length}b): ${(stdout||'').slice(0,300)} | stderr: ${(stderr||'').slice(0,300)}`);
+    } else if (cli.truncated) {
+      debugState.orgActivity = { error: cli.message };
+      addConsoleEntry('error', `Org run failed: ${cli.message}`);
+      return;
     } else {
       // On success the payload is under result; on compile failure it's under data.
       const res = cli.result || cli.data || {};
