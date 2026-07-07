@@ -372,6 +372,14 @@
       return `${v.classInfo.name}:[${parts.join(', ')}]`;
     }
     if (isSObject(v)) {
+      // Schema describe-chain handles stringify to their API name (matches Apex,
+      // e.g. `'' + ProductConfiguration__c.getSObjectType()` → 'ProductConfiguration__c').
+      if (v.__sobjectType) return v.__sobjectType;
+      if (v.__describeResult) return v.__describeResult;
+      if (v.__fieldsHandle) return v.__fieldsHandle;
+      if (v.__sobjectField) return v.__sobjectField.field;
+      if (v.__describeFieldResult) return v.__describeFieldResult.field;
+      if (v.__typeToken) return v.__typeToken;
       const parts = [];
       for (const k of Object.keys(v)) { if (k === 'attributes') continue; parts.push(`${k}=${toApexString(v[k])}`); }
       return `${sobjType(v)}:{${parts.join(', ')}}`;
@@ -543,6 +551,15 @@
       if (this.stopped) throw new StopSignal();
       if (!node || !node.line) return;
       frame.line = node.line;
+      // Track the line currently executing and surface it to the UI so a running
+      // (Continue) session shows WHERE it is — most valuable on a slow line that
+      // then awaits the org (SOQL/describe/eval), which yields to let the UI paint
+      // the highlight before the fetch returns.
+      this.currentLine = node.line; this.currentFile = frame.file;
+      if (this.host.onExecLine && (this._lastExecLine !== node.line || this._lastExecFile !== frame.file)) {
+        this._lastExecLine = node.line; this._lastExecFile = frame.file;
+        try { this.host.onExecLine({ line: node.line, file: frame.file }); } catch (_) { /* UI errors never kill execution */ }
+      }
       if (++this._steps > this.maxSteps) throw new ApexError('System.LimitException', 'Maximum interpreter steps exceeded (possible infinite loop)', node.line);
       const depth = this.callStack.length;
       let pauseReason = null;
@@ -1324,6 +1341,14 @@
     }
 
     async memberGet(target, name, line, frame) {
+      // Schema describe chain: `.fields` is accessed as a property on a
+      // DescribeSObjectResult; the other handles expose no plain fields.
+      if (target && typeof target === 'object' && !(target instanceof ApexObject)) {
+        if (target.__describeResult && name.toLowerCase() === 'fields') return { __fieldsHandle: target.__describeResult };
+        if (target.__sobjectType || target.__fieldsHandle || target.__sobjectField || target.__describeFieldResult || target.__typeToken) {
+          throw new ApexError('System.VariableDoesNotExistException', `Property ${name} does not exist on ${typeNameOf(target)}`, line);
+        }
+      }
       if (target instanceof ApexObject) {
         const prop = this.findPropInHierarchy(target.classInfo, name);
         if (prop && prop.getter && prop.getter !== 'auto') {
@@ -1621,6 +1646,17 @@
       if (target && target.__typeToken) {
         return await this.callTypeTokenMethod(target, name, args, line, frame);
       }
+      // Schema describe chain handles (Schema.SObjectType / DescribeSObjectResult /
+      // SObjectField / DescribeFieldResult). These are plain objects, so they must
+      // be intercepted BEFORE the isSObject branch below. Field metadata is resolved
+      // from the connected org (real names/labels) — never fabricated.
+      if (target && typeof target === 'object') {
+        if (target.__sobjectType) return await this.callSObjectTypeMethod(target, name, args, line, frame);
+        if (target.__describeResult) return await this.callDescribeResultMethod(target, name, args, line, frame);
+        if (target.__fieldsHandle) return await this.callFieldsHandleMethod(target, name, args, line, frame);
+        if (target.__sobjectField) return this.callSObjectFieldMethod(target, name, args, line, frame);
+        if (target.__describeFieldResult) return this.callDescribeFieldResultMethod(target, name, args, line, frame);
+      }
       if (target instanceof ApexObject) {
         const { ci, m } = this.findMethodInHierarchy(target.classInfo, name, args);
         if (m) return this.invokeMethod(ci, m, target, args, frame);
@@ -1673,6 +1709,79 @@
       if (lk === 'equals') { const o = args[0]; return !!(o && o.__typeToken && String(o.__typeToken).toLowerCase() === String(typeName).toLowerCase()); }
       if (lk === 'hashcode') return String(typeName).length;
       throw new ApexError('System.NoSuchMethodException', `Method Type.${name} not supported`, line);
+    }
+
+    /* ---------- Schema describe chain (real org metadata) ---------- */
+    /** Fetch + cache real field metadata for an SObject from the connected org. */
+    async ensureDescribe(name) {
+      if (!this._descCache) this._descCache = new Map();
+      const key = String(name).toLowerCase();
+      if (this._descCache.has(key)) return this._descCache.get(key);
+      let info = { name, names: [], label: name, prefix: '', plural: name, error: null, resolved: false };
+      if (this.host.describeSObject) {
+        this.pendingBackend = `describe ${name} from org…`;
+        try {
+          const r = await this.host.describeSObject(name);
+          if (r && Array.isArray(r.names) && r.names.length) {
+            info = { name, names: r.names, label: r.label || name, prefix: r.prefix || '', plural: r.plural || name, error: null, resolved: true };
+          } else if (r && r.error) { info.error = r.error; }
+        } catch (e) { info.error = e && e.message; }
+        finally { this.pendingBackend = null; }
+      }
+      this._descCache.set(key, info);
+      return info;
+    }
+    async callSObjectTypeMethod(tok, name, args, line, frame) {
+      const nm = tok.__sobjectType; const lk = name.toLowerCase();
+      if (lk === 'getdescribe') { await this.ensureDescribe(nm); return { __describeResult: nm }; }
+      if (lk === 'newsobject') return { attributes: { type: nm } };
+      if (lk === 'getname' || lk === 'tostring') return nm;
+      if (lk === 'equals') { const o = args[0]; return !!(o && o.__sobjectType && String(o.__sobjectType).toLowerCase() === String(nm).toLowerCase()); }
+      if (lk === 'hashcode') return String(nm).length;
+      if (this.host.log) this.host.log(`⚠ Schema.SObjectType.${name}() not simulated — returning null`, 'system');
+      return null;
+    }
+    async callDescribeResultMethod(tok, name, args, line, frame) {
+      const nm = tok.__describeResult; const info = await this.ensureDescribe(nm); const lk = name.toLowerCase();
+      if (lk === 'getname') return nm;
+      if (lk === 'getlocalname') return stripNs(nm);
+      if (lk === 'getlabel') return info.label;
+      if (lk === 'getlabelplural') return info.plural;
+      if (lk === 'getkeyprefix') return info.prefix || null;
+      if (lk === 'getsobjecttype') return { __sobjectType: nm };
+      if (lk === 'fields' || lk === 'getfields') return { __fieldsHandle: nm };
+      if (lk === 'tostring') return nm;
+      if (this.host.log) this.host.log(`⚠ DescribeSObjectResult.${name}() not simulated — returning null`, 'system');
+      return null;
+    }
+    async callFieldsHandleMethod(tok, name, args, line, frame) {
+      const nm = tok.__fieldsHandle; const info = await this.ensureDescribe(nm); const lk = name.toLowerCase();
+      if (lk === 'getmap') {
+        // Apex Schema fields.getMap() keys are lowercased field names; the values
+        // (SObjectField) carry the real API name via getDescribe().getName().
+        const m = new ApexMap();
+        for (const fn of info.names) m.put(String(fn).toLowerCase(), { __sobjectField: { sobject: nm, field: fn } });
+        return m;
+      }
+      if (this.host.log) this.host.log(`⚠ Schema fields.${name}() not simulated — returning null`, 'system');
+      return null;
+    }
+    callSObjectFieldMethod(tok, name, args, line) {
+      const f = tok.__sobjectField; const lk = name.toLowerCase();
+      if (lk === 'getdescribe') return { __describeFieldResult: f };
+      if (lk === 'getsobjectfield') return tok;
+      if (lk === 'getname' || lk === 'tostring') return f.field;
+      if (this.host.log) this.host.log(`⚠ Schema.SObjectField.${name}() not simulated — returning null`, 'system');
+      return null;
+    }
+    callDescribeFieldResultMethod(tok, name, args, line) {
+      const f = tok.__describeFieldResult; const lk = name.toLowerCase();
+      if (lk === 'getname' || lk === 'tostring') return f.field;
+      if (lk === 'getlocalname') return stripNs(f.field);
+      if (lk === 'getlabel') return f.field;
+      if (lk === 'getsobjecttype') return { __sobjectType: f.sobject };
+      if (this.host.log) this.host.log(`⚠ DescribeFieldResult.${name}() not simulated — returning null`, 'system');
+      return null;
     }
 
     /* ---------- new ---------- */
@@ -1936,7 +2045,7 @@
       switch (name.toLowerCase()) {
         case 'get': { const v = sobjGet(rec, a[0]); return v === undefined ? null : v; }
         case 'put': { const prev = sobjGet(rec, a[0]); sobjSet(rec, a[0], a[1]); return prev === undefined ? null : prev; }
-        case 'getsobjecttype': return sobjType(rec);
+        case 'getsobjecttype': return { __sobjectType: sobjType(rec) };
         case 'clone': { const c = Object.assign({}, rec); if (!a[0]) delete c.Id; return c; }
         case 'getpopulatedfieldsasmap': { const m = new ApexMap(); for (const k of Object.keys(rec)) if (k !== 'attributes') m.put(k, rec[k]); return m; }
         case 'tostring': return toApexString(rec);
@@ -2241,6 +2350,11 @@
           (n === 'getinstance' || n === 'getorgdefaults' || n === 'getvalues' || n === 'getall')) {
         return await this.resolveCustomSettingCall(typeName, name, n, a, line);
       }
+      // <SObjectTypeName>.getSObjectType() — a static Schema call on a type name
+      // (e.g. ProductConfiguration__c.getSObjectType()). Return a real
+      // Schema.SObjectType handle so downstream describe/field-name resolution
+      // works against org metadata instead of returning null.
+      if (n === 'getsobjecttype') return { __sobjectType: typeName };
       // Unknown namespace/class — try lazy class load once
       const ci = await this.lazyLoadClass(typeName);
       if (ci) {

@@ -31,6 +31,7 @@ const debugState = {
   breakpoints: new Map(),
   breakpointDecorations: new Map(),  // filePath → decoration IDs array
   currentLineDecoration: [],         // decoration IDs for current execution line
+  execLineDecoration: [],            // decoration IDs for the line executing during a running (Continue) session
   // Variable scopes
   variables: {},               // Current frame's variable map
   // Class-level fields: className → { publicFields: {}, privateFields: {}, staticFields: {} }
@@ -1406,6 +1407,14 @@ function engineValToPlain(v, depth = 0) {
   const t = typeof v;
   if (t === 'string' || t === 'number' || t === 'boolean') return v;
   if (t === 'object' && v.__typeToken) return v.__typeToken;   // System.Type / Schema.SObjectType handle → its API name
+  if (t === 'object') {
+    // Schema describe-chain handles → readable API-name strings.
+    if (v.__sobjectType) return `SObjectType(${v.__sobjectType})`;
+    if (v.__describeResult) return `DescribeSObjectResult(${v.__describeResult})`;
+    if (v.__fieldsHandle) return `fields(${v.__fieldsHandle})`;
+    if (v.__sobjectField) return `SObjectField(${v.__sobjectField.field})`;
+    if (v.__describeFieldResult) return `DescribeFieldResult(${v.__describeFieldResult.field})`;
+  }
   const E = window.ApexEngine;
   if (Array.isArray(v)) return v.map(x => engineValToPlain(x, depth + 1));
   if (E && v instanceof E.ApexMap) {
@@ -1496,6 +1505,7 @@ function engineBuildSoql(raw, binds) {
 async function onEnginePause(info) {
   debugState.paused = true;
   debugState.engineRunning = false;
+  clearExecutingLineHighlight();
   mirrorEngineStack(info.stack || []);
   debugState.currentLine = info.line;
   // Announce an exception pause so it's obvious WHY we stopped (and why the try
@@ -1634,6 +1644,34 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
         renderConsolePanel();
       }
     },
+    // Describe an SObject's REAL fields from the org (used by the Schema describe
+    // chain, e.g. Type.getSObjectType().getDescribe().fields.getMap()). Cached,
+    // with a namespace-prefix retry so bare names like ProductConfiguration__c
+    // resolve in a managed-package org (Apttus_Config2__ProductConfiguration__c).
+    describeSObject: async (name) => {
+      if (!liveOrgAvailable()) return { error: 'no org' };
+      if (!debugState.engineDescribeCache) debugState.engineDescribeCache = new Map();
+      const key = String(name).toLowerCase();
+      if (debugState.engineDescribeCache.has(key)) return debugState.engineDescribeCache.get(key);
+      debugState.orgFetching = true; updateLiveOrgIndicator();
+      addConsoleEntry('info', `⚙ Describing ${name} in org…`); renderConsolePanel();
+      let r = await _runDescribeViaApex(name);
+      // Retry with the package namespace prefix when the bare name isn't found
+      // (a 2-segment name like Foo__c has no namespace yet).
+      if ((!r || !r.names || !r.names.length) && String(name).split('__').length < 3) {
+        const ns = await getPackageNamespace();
+        if (ns) {
+          const r2 = await _runDescribeViaApex(`${ns}__${name}`);
+          if (r2 && r2.names && r2.names.length) r = r2;
+        }
+      }
+      const out = (r && r.names) ? r : { names: [], error: (r && r.error) || 'describe failed' };
+      if (out.names && out.names.length) addConsoleEntry('info', `↳ ${name}: ${out.names.length} fields resolved from org`);
+      else addConsoleEntry('warn', `Describe ${name} returned no fields${out.error ? ' — ' + out.error : ''}`);
+      debugState.orgFetching = false; updateLiveOrgIndicator(); renderConsolePanel();
+      debugState.engineDescribeCache.set(key, out);
+      return out;
+    },
     loadClassSource: async (className) => {
       const file = await resolveClassFile(className);
       if (!file) return null;
@@ -1649,6 +1687,19 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
       return bps.get(line) || {};
     },
     onPause: (info) => { onEnginePause(info); },
+    // Fired as each line begins executing during a running session. Coalesced
+    // via rAF so we repaint the "executing" highlight at most once per frame.
+    onExecLine: (info) => {
+      if (!debugState.active) return;
+      debugState._pendingExecLine = info;
+      if (debugState._execRaf) return;
+      debugState._execRaf = requestAnimationFrame(() => {
+        debugState._execRaf = null;
+        const i = debugState._pendingExecLine;
+        if (!i || debugState.paused) return;
+        highlightExecutingLine(i.line, i.file);
+      });
+    },
     onDone: (result) => {
       if (!debugState.active) return;
       debugState.paused = false;
@@ -2026,6 +2077,60 @@ async function _runSoqlViaApex(soql) {
     return { records: recs.map(cleanSObject), error: null, soql, mode: 'system' };
   } catch (e) {
     return { _apexUnavailable: true };
+  }
+}
+
+/**
+ * Describe an SObject in the connected org via anonymous Apex, returning REAL
+ * field API names (+ label / key prefix). Uses the same FINEST-log marker
+ * mechanism as _runSoqlViaApex so it runs in system mode. No fabrication: if the
+ * type can't be described, returns an error and an empty field list.
+ */
+async function _runDescribeViaApex(sobjectName) {
+  const org = getActiveOrg();
+  if (!org) return { error: 'no org' };
+  const esc = String(sobjectName).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const apex = [
+    `List<String> ccNames = new List<String>();`,
+    `String ccErr = '', ccLabel = '', ccPrefix = '', ccPlural = '';`,
+    `try {`,
+    `    Schema.DescribeSObjectResult ccD = Schema.describeSObjects(new String[]{'${esc}'})[0];`,
+    `    for (Schema.SObjectField ccF : ccD.fields.getMap().values()) { ccNames.add(ccF.getDescribe().getName()); }`,
+    `    ccLabel = ccD.getLabel();`,
+    `    ccPlural = ccD.getLabelPlural();`,
+    `    if (ccD.getKeyPrefix() != null) ccPrefix = ccD.getKeyPrefix();`,
+    `} catch (Exception ccE) { ccErr = ccE.getTypeName() + ': ' + ccE.getMessage(); }`,
+    `String ccOut;`,
+    `try { ccOut = JSON.serialize(new Map<String,Object>{'names'=>ccNames,'label'=>ccLabel,'prefix'=>ccPrefix,'plural'=>ccPlural}); } catch (Exception e) { ccOut = '{}'; }`,
+    `System.debug(LoggingLevel.ERROR, '__CC_DESC__' + ccOut);`,
+    `System.debug(LoggingLevel.ERROR, '__CC_DESCERR__' + ccErr);`,
+  ].join('\n');
+  try {
+    const paths = await window.congacode.getPaths?.();
+    const dir = paths?.congacodeDir || paths?.home || '.';
+    const tmpFile = `${dir}/.cc_debug_desc.apex`;
+    await window.congacode.writeFile(tmpFile, apex);
+    const cmd = `sf apex run --file "${tmpFile}" --json --target-org ${org.org}`;
+    const { stdout } = await window.congacode.sfExec(cmd, window.state?.folderPath, 60000);
+    const cli = parseSfJson(stdout);
+    if (!cli) return { error: 'CLI unavailable' };
+    const res = (cli.result || cli.data) || {};
+    const log = res.logs || '';
+    let raw = null, dErr = '';
+    for (const line of log.split('\n')) {
+      const pipe = line.split('|');
+      const msg = pipe.length >= 5 ? pipe.slice(4).join('|') : '';
+      if (msg.startsWith('__CC_DESC__')) raw = msg.slice('__CC_DESC__'.length);
+      else if (msg.startsWith('__CC_DESCERR__')) dErr = msg.slice('__CC_DESCERR__'.length);
+    }
+    if (dErr) return { error: dErr };
+    if (raw == null) return { error: 'no describe marker (FINEST logs off?)' };
+    let obj = {};
+    try { obj = JSON.parse(raw) || {}; } catch { obj = {}; }
+    const names = Array.isArray(obj.names) ? obj.names : [];
+    return { names, label: obj.label || sobjectName, prefix: obj.prefix || '', plural: obj.plural || sobjectName, error: names.length ? null : 'no fields' };
+  } catch (e) {
+    return { error: e?.message || String(e) };
   }
 }
 
@@ -3708,6 +3813,43 @@ function clearCurrentLineHighlight() {
   if (debugState.currentLineDecoration.length > 0) {
     editor.deltaDecorations(debugState.currentLineDecoration, []);
     debugState.currentLineDecoration = [];
+  }
+  clearExecutingLineHighlight();
+}
+
+/**
+ * Highlight the line the interpreter is CURRENTLY executing during a running
+ * (Continue) session — distinct from the paused-line highlight. Coalesced via
+ * requestAnimationFrame so a fast run repaints at most once per frame, and a
+ * slow line (one that awaits the org for SOQL/describe/eval) stays visibly
+ * highlighted while the fetch is in flight.
+ */
+function highlightExecutingLine(line, file) {
+  const editor = window.state?.editor;
+  if (!editor || !debugState.active || debugState.paused || !line) return;
+  // Only decorate when the executing file is the one on screen (don't thrash
+  // file switches on every line); cross-file pauses are handled on pause.
+  if (file && debugState.currentFile && file !== debugState.currentFile) return;
+  clearExecutingLineHighlight();
+  debugState.execLineDecoration = editor.deltaDecorations([], [
+    {
+      range: new monaco.Range(line, 1, line, 1),
+      options: {
+        isWholeLine: true,
+        className: 'debug-executing-line',
+        glyphMarginClassName: 'debug-executing-arrow',
+        stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+      }
+    }
+  ]);
+}
+
+function clearExecutingLineHighlight() {
+  const editor = window.state?.editor;
+  if (!editor) return;
+  if (debugState.execLineDecoration && debugState.execLineDecoration.length > 0) {
+    editor.deltaDecorations(debugState.execLineDecoration, []);
+    debugState.execLineDecoration = [];
   }
 }
 
