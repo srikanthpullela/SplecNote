@@ -665,6 +665,7 @@
       this._hasSteppedOnce = false;
       this.pauseRequested = false;
       this.callStack = [];
+      this._recursionReported = false;
       this.pageMessages = [];
       this.dmlLog = [];
       const cls = this.registry.get(className) || await this.lazyLoadClass(className);
@@ -906,7 +907,17 @@
         className: cls.name, methodName: method.name, file: cls.fileName,
         line: method.line, env, thisRef: method.static ? null : thisRef, classInfo: cls,
       };
-      if (this.callStack.length > 500) throw new ApexError('System.LimitException', 'Maximum stack depth reached (recursion too deep)', method.line);
+      if (this.callStack.length > 500) {
+        // Interpreter recursion guard. Surface the repeating cycle so the user
+        // (and we) can see WHICH methods loop, instead of a bare limit error
+        // that a CPQ `catch (Exception)` swallows far from the real cause.
+        const cycle = this._describeRecursionCycle();
+        if (this.host.log && !this._recursionReported) {
+          this._recursionReported = true;
+          this.host.log(`♻ Runaway recursion detected — the interpreter kept re-entering the same call cycle ${cycle.reps}× and stopped at depth ${this.callStack.length}. Repeating cycle:\n${cycle.text}`, 'system');
+        }
+        throw new ApexError('System.LimitException', `Maximum stack depth reached (recursion too deep). Repeating cycle: ${cycle.short}`, method.line);
+      }
       this.callStack.push(frame);
       try {
         await this.execBlock(method.body, frame, new Environment(env, 'body'));
@@ -932,6 +943,42 @@
       } finally {
         this.callStack.pop();
       }
+    }
+
+    /**
+     * Analyze the current call stack to find the repeating cycle behind a
+     * runaway recursion. Returns a human-readable description of the shortest
+     * repeating unit of `Class.method` signatures at the top of the stack.
+     */
+    _describeRecursionCycle() {
+      const sig = (f) => `${f.className}.${f.methodName}`;
+      const top = this.callStack.slice(-60).map(sig);
+      // Find the shortest period P such that the tail repeats with period P.
+      let period = 0;
+      for (let p = 1; p <= Math.floor(top.length / 2); p++) {
+        let ok = true;
+        for (let i = top.length - 1; i - p >= 0 && i >= top.length - p * 3; i--) {
+          if (top[i] !== top[i - p]) { ok = false; break; }
+        }
+        if (ok) { period = p; break; }
+      }
+      if (!period) {
+        const uniq = [...new Set(top.slice(-8))];
+        return { text: uniq.map(s => '   ↻ ' + s).join('\n'), short: uniq.join(' → '), reps: 0 };
+      }
+      const unit = top.slice(top.length - period);
+      // Count how many times the unit repeats down the stack.
+      let reps = 0;
+      for (let i = top.length - period; i >= 0; i -= period) {
+        let match = true;
+        for (let j = 0; j < period; j++) { if (top[i + j] !== unit[j]) { match = false; break; } }
+        if (match) reps++; else break;
+      }
+      return {
+        text: unit.map(s => '   ↻ ' + s).join('\n'),
+        short: unit.join(' → '),
+        reps,
+      };
     }
 
     /* ---------- statement execution ---------- */

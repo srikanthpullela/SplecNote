@@ -1687,18 +1687,14 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
       return bps.get(line) || {};
     },
     onPause: (info) => { onEnginePause(info); },
-    // Fired as each line begins executing during a running session. Coalesced
-    // via rAF so we repaint the "executing" highlight at most once per frame.
+    // Fired as each line begins executing during a running session. We FOLLOW
+    // execution across files (open the executing class + reveal/highlight the
+    // line) so the user can watch where the interpreter is — especially on slow
+    // lines that await the org, and to make loops visible. Throttled so a fast
+    // run doesn't thrash the editor.
     onExecLine: (info) => {
       if (!debugState.active) return;
-      debugState._pendingExecLine = info;
-      if (debugState._execRaf) return;
-      debugState._execRaf = requestAnimationFrame(() => {
-        debugState._execRaf = null;
-        const i = debugState._pendingExecLine;
-        if (!i || debugState.paused) return;
-        highlightExecutingLine(i.line, i.file);
-      });
+      followExecutingLine(info);
     },
     onDone: (result) => {
       if (!debugState.active) return;
@@ -3818,17 +3814,66 @@ function clearCurrentLineHighlight() {
 }
 
 /**
- * Highlight the line the interpreter is CURRENTLY executing during a running
- * (Continue) session — distinct from the paused-line highlight. Coalesced via
- * requestAnimationFrame so a fast run repaints at most once per frame, and a
- * slow line (one that awaits the org for SOQL/describe/eval) stays visibly
- * highlighted while the fetch is in flight.
+ * Follow the interpreter as it executes, so the user can SEE where execution
+ * currently is — even when it steps into another class file. We open the
+ * executing file (if different from the one on screen), reveal the line, and
+ * paint the animated "executing" decoration. Throttled (~140ms) so a fast run
+ * doesn't thrash the editor: we act on the leading edge, then again on the
+ * trailing edge if execution has advanced. Slow lines (awaiting the org) and
+ * tight loops both become clearly visible.
+ */
+function followExecutingLine(info) {
+  if (!info || !debugState.active) return;
+  debugState._execPending = info;
+  if (debugState._execThrottled) return;
+  flushExecFollow();
+  debugState._execThrottled = true;
+  debugState._execTimer = setTimeout(() => {
+    debugState._execThrottled = false;
+    const p = debugState._execPending;
+    if (p && (p.line !== debugState._execShownLine || p.file !== debugState._execShownFile)) {
+      followExecutingLine(p);
+    }
+  }, 140);
+}
+
+async function flushExecFollow() {
+  const i = debugState._execPending;
+  if (!i || !debugState.active || debugState.paused) return;
+  debugState._execShownLine = i.line;
+  debugState._execShownFile = i.file;
+  await revealExecutingLocation(i.line, i.file);
+}
+
+/**
+ * Open (if needed) and reveal the file+line the interpreter is executing.
+ * Guarded so overlapping async file opens can't stack up.
+ */
+async function revealExecutingLocation(line, file) {
+  const editor = window.state?.editor;
+  if (!editor || !debugState.active || debugState.paused || !line) return;
+  if (file && file !== debugState.currentFile && /\.(cls|trigger)$/.test(file)) {
+    if (debugState._execOpening) return;   // an open is already in flight
+    debugState._execOpening = true;
+    try {
+      const content = await window.congacode.readFile(file);
+      if (content != null) { await window.openFile(file, content); debugState.currentFile = file; }
+    } catch (_) { /* keep current file */ }
+    finally { debugState._execOpening = false; }
+  }
+  if (!debugState.active || debugState.paused) return;  // user may have paused during the open
+  highlightExecutingLine(line, file);
+  try { editor.revealLineInCenterIfOutsideViewport(line); } catch (_) { /* ignore */ }
+}
+
+/**
+ * Paint the animated "currently executing" decoration on a line — distinct from
+ * the amber paused-line highlight. Only decorates the file that's on screen (the
+ * caller opens the right file first via revealExecutingLocation).
  */
 function highlightExecutingLine(line, file) {
   const editor = window.state?.editor;
   if (!editor || !debugState.active || debugState.paused || !line) return;
-  // Only decorate when the executing file is the one on screen (don't thrash
-  // file switches on every line); cross-file pauses are handled on pause.
   if (file && debugState.currentFile && file !== debugState.currentFile) return;
   clearExecutingLineHighlight();
   debugState.execLineDecoration = editor.deltaDecorations([], [
@@ -3846,6 +3891,11 @@ function highlightExecutingLine(line, file) {
 
 function clearExecutingLineHighlight() {
   const editor = window.state?.editor;
+  if (debugState._execTimer) { clearTimeout(debugState._execTimer); debugState._execTimer = null; }
+  debugState._execThrottled = false;
+  debugState._execPending = null;
+  debugState._execShownLine = null;
+  debugState._execShownFile = null;
   if (!editor) return;
   if (debugState.execLineDecoration && debugState.execLineDecoration.length > 0) {
     editor.deltaDecorations(debugState.execLineDecoration, []);
