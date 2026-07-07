@@ -1592,6 +1592,9 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
           renderConsolePanel();
         } else {
           addConsoleEntry('info', `✓ ${res.records.length} row(s) from org${res.mode === 'system' ? ' (system mode — full permissions)' : res.mode === 'user' ? ' (user mode)' : ''}`);
+          if (res.droppedColumns && res.droppedColumns.length) {
+            addConsoleEntry('warn', `⚠ Column(s) ${res.droppedColumns.join(', ')} not visible outside the managed package — fetched without them.`);
+          }
         }
         return res.records;
       } finally {
@@ -1744,6 +1747,13 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
   debugState.engineSession = engine;
   engine.mode = 'into';                    // pause on the very first statement
   debugState.engineRunning = true;
+
+  // Fix 2: seed real user info into the host so UserInfo.getUserId() etc. return
+  // the actual running user's Id rather than a synthetic placeholder. Non-blocking
+  // so session start isn't delayed; the engine uses the real id as soon as it resolves.
+  if (liveOrgAvailable()) {
+    getOrgUserInfo().then(ui => { if (ui) host.userInfo = ui; });
+  }
 
   // Fire and let the pause gate drive the UI; completion handled by onDone/onError.
   engine.run(className, methodName, args).catch(() => { /* reported via onError */ });
@@ -1997,6 +2007,28 @@ async function execSoql(soql) {
       // (emptyResult && r2 also empty) → keep the original 0-row result: truly not found.
     }
   }
+
+  // Fix 1: drop-invisible-column retry — some managed-package columns are not
+  // visible outside the package (deprecated/protected). When the org reports
+  // "No such column 'X' on entity 'Y'", strip X from the SELECT list and retry,
+  // up to 6 times. The engine treats absent fields as null, matching in-org behavior.
+  const droppedColumns = [];
+  let colRetryQuery = result.soql || soql;
+  for (let dropAttempt = 0; dropAttempt < 6 && result.error; dropAttempt++) {
+    const noColM = result.error.match(/No such column '([\w.]+)' on entity '[\w.]+'/i)
+      || result.error.match(/Didn.?t understand relationship '([\w.]+)'/i)
+      || result.error.match(/INVALID_FIELD[^']*'([\w.]+)'/i);
+    if (!noColM) break; // not a column-visibility error we can fix
+    const badCol = noColM[1];
+    const stripped = stripColumnFromSoql(colRetryQuery, badCol);
+    if (!stripped) break; // col not in SELECT (e.g. only in WHERE/ORDER BY) — can't fix
+    colRetryQuery = stripped;
+    droppedColumns.push(badCol);
+    const r3 = await _runSoqlOnce(colRetryQuery);
+    result = { ...r3, soql: colRetryQuery };
+  }
+  if (!result.error && droppedColumns.length) result.droppedColumns = droppedColumns;
+
   debugState.orgQueryCache.set(soql, result);
   return result;
 }
@@ -2169,6 +2201,95 @@ async function getPackageNamespace() {
     }
   } catch (_) { /* no namespace / not an sfdx project */ }
   return debugState._namespace;
+}
+
+/**
+ * Fetch the connected user's info from the org once per app session (cached).
+ * Returns { id, username, orgId, profileId, alias } or null on failure.
+ * Caches null so a failed fetch is not retried on every SOQL/eval call.
+ */
+async function getOrgUserInfo() {
+  if (debugState._orgUserInfo !== undefined) return debugState._orgUserInfo;
+  const org = getActiveOrg();
+  if (!org) { debugState._orgUserInfo = null; return null; }
+  try {
+    const folder = window.state?.folderPath;
+    const { stdout } = await window.congacode.sfExec(
+      `sf org display user --json --target-org ${org.org}`, folder, 60000);
+    const parsed = parseSfJson(stdout);
+    if (!parsed || parsed.status !== 0 || !parsed.result) {
+      debugState._orgUserInfo = null;
+      return null;
+    }
+    const r = parsed.result;
+    const ui = {
+      id: r.id,
+      username: r.username,
+      orgId: r.orgId,
+      profileId: r.profileId,
+      alias: r.alias,
+    };
+    debugState._orgUserInfo = ui;
+    return ui;
+  } catch (_) {
+    debugState._orgUserInfo = null;
+    return null;
+  }
+}
+
+/**
+ * Strip one column from the top-level SELECT clause of a SOQL string.
+ * Returns the modified SOQL when the column was found and removed, or null
+ * when the column is not present in the SELECT list (signals no retry).
+ * Only operates on the outermost SELECT…FROM span (depth-0 with respect to
+ * parentheses) so inner sub-selects are left untouched.
+ */
+function stripColumnFromSoql(soql, col) {
+  if (!col || !soql) return null;
+  const upper = soql.toUpperCase();
+
+  // Locate the first SELECT keyword at paren-depth 0.
+  let selectEnd = -1;
+  let depth = 0;
+  for (let i = 0; i < soql.length; i++) {
+    const ch = soql[i];
+    if (ch === '(') { depth++; continue; }
+    if (ch === ')') { depth--; continue; }
+    if (depth === 0 && upper.slice(i, i + 6) === 'SELECT') {
+      const before = i === 0 || /\s/.test(soql[i - 1]);
+      const after = i + 6 >= soql.length || /[\s(]/.test(soql[i + 6]);
+      if (before && after) { selectEnd = i + 6; break; }
+    }
+  }
+  if (selectEnd < 0) return null;
+
+  // Locate the first FROM keyword at paren-depth 0 after SELECT.
+  let fromStart = -1;
+  depth = 0;
+  for (let i = selectEnd; i < soql.length; i++) {
+    const ch = soql[i];
+    if (ch === '(') { depth++; continue; }
+    if (ch === ')') { depth--; continue; }
+    if (depth === 0 && upper.slice(i, i + 4) === 'FROM') {
+      const before = /\s/.test(soql[i - 1] || ' ');
+      const after = i + 4 >= soql.length || /\s/.test(soql[i + 4]);
+      if (before && after) { fromStart = i; break; }
+    }
+  }
+  if (fromStart < 0) return null;
+
+  const selectClause = soql.slice(selectEnd, fromStart);
+  const colEsc = col.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const colRe = new RegExp('(?<![\\w])' + colEsc + '(?![\\w])', 'i');
+  if (!colRe.test(selectClause)) return null; // column not in SELECT list — bail out
+
+  // Split on commas, filter out the matching field, rejoin.
+  const parts = selectClause.split(',');
+  const filtered = parts.filter(p => !colRe.test(p.trim()));
+  if (filtered.length === parts.length) return null; // wasn't removed
+  if (filtered.length === 0) return null;             // would leave an empty SELECT
+
+  return soql.slice(0, selectEnd) + filtered.join(',') + soql.slice(fromStart);
 }
 
 /** Prefix unqualified custom (__c/__r/__mdt/…) API names in a SOQL string with the namespace. */
@@ -5202,6 +5323,34 @@ function registerDebugHoverProvider() {
           }
           return evaluateInOrg(orgExpr, topFrame).then((r) => {
             if (r.error) {
+              // Fix 3a: "Variable does not exist: X" where X is a local/field in the
+              // current frame → X is a runtime object that can't be serialised into
+              // anonymous Apex. Show the same friendly message as the unresolved path.
+              const varM = r.error.match(/Variable does not exist: (\w+)/i);
+              if (varM) {
+                const badVar = varM[1];
+                const frameScope = topFrame
+                  ? { ...(topFrame.classFields || {}), ...topFrame.variables }
+                  : {};
+                if (badVar in frameScope) {
+                  const friendly = `Can't evaluate: \`${badVar}\` is a runtime object built inside the method, and anonymous Apex can't call methods on it or rebuild it (private helpers/state aren't reachable). Use ▶ Run in Org to replay the whole method, then hover the variable itself for its real value — or set a value in the Console (e.g. \`${badVar} = …\`).`;
+                  addConsoleEntry('info', `${orgExpr} → (org eval) ${friendly}`);
+                  return errHover(orgExpr, friendly);
+                }
+              }
+              // Fix 3b: "Method does not exist or incorrect signature: …" for an
+              // unqualified call (no dot before the method name in the hovered expr).
+              // These are private/instance methods that anonymous Apex can't reach.
+              const methM = r.error.match(/Method does not exist or incorrect signature:/i);
+              if (methM) {
+                const beforeParen = orgExpr.slice(0, orgExpr.indexOf('('));
+                if (beforeParen && !beforeParen.includes('.')) {
+                  const methName = beforeParen.trim();
+                  const friendly = `Can't evaluate: \`${methName}()\` isn't visible to anonymous Apex (private/instance method). Step into it instead, or hover its arguments.`;
+                  addConsoleEntry('info', `${orgExpr} → (org eval) ${friendly}`);
+                  return errHover(orgExpr, friendly);
+                }
+              }
               addConsoleEntry('info', `${orgExpr} → (org eval) ${r.error}`);
               return errHover(orgExpr, r.error);
             }
