@@ -5930,6 +5930,57 @@ function initRichTextEditor() {
     dom.statusRichText.addEventListener('click', toggleRichTextMode);
   }
 
+  // Auto-list continuation on Enter (numbered and bullet lists)
+  // When a line starts with "1. " or "- " / "* ", pressing Enter auto-continues the list.
+  // Pressing Enter on an empty list item (only the prefix) breaks out of the list.
+  dom.richTextEditor.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.metaKey) return;
+
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return;
+
+    // Walk up to the current block element; bail if inside a native <li>
+    let block = sel.getRangeAt(0).startContainer;
+    while (block && block !== dom.richTextEditor) {
+      if (block.nodeType === Node.ELEMENT_NODE) {
+        if (block.tagName === 'LI') return; // browser handles native ordered/unordered lists
+        if (['DIV', 'P'].includes(block.tagName)) break;
+      }
+      block = block.parentNode;
+    }
+    if (!block || block === dom.richTextEditor) return;
+
+    const lineText = (block.innerText || block.textContent || '').replace(/\n$/, '');
+
+    // Detect list pattern at the start of the line
+    const numMatch   = lineText.match(/^(\d+)([.)]) /);               // "1. " or "1) "
+    const bulletMatch = !numMatch && lineText.match(/^([-*+]) /);     // "- " / "* " / "+ "
+    if (!numMatch && !bulletMatch) return;
+
+    e.preventDefault();
+
+    const prefixTrimmed = numMatch ? `${numMatch[1]}${numMatch[2]}` : bulletMatch[1];
+
+    // Empty list item (only prefix typed, no content) → break out of the list
+    if (lineText.trim() === prefixTrimmed) {
+      block.innerHTML = '<br>';
+      const r = document.createRange();
+      r.setStart(block, 0);
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+      return;
+    }
+
+    // Continue the list on the next line with the appropriate next prefix
+    const nextPrefix = numMatch
+      ? `${parseInt(numMatch[1]) + 1}${numMatch[2]} `
+      : `${bulletMatch[1]} `;
+
+    document.execCommand('insertParagraph');
+    document.execCommand('insertText', false, nextPrefix);
+  });
+
   // Rich text context menu (right-click)
   initRichTextContextMenu();
 

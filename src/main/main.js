@@ -1653,14 +1653,23 @@ app.whenReady().then(() => {
   ensureDirs();
   appIsReady = true;
 
+  // Detect if launched as a login item (macOS auto-launch on restart).
+  // In that case, open the window hidden — user brings it up by clicking the dock icon.
+  const loginItemSettings = process.platform === 'darwin'
+    ? app.getLoginItemSettings()
+    : { wasOpenedAsHidden: false, wasOpenedAtLogin: false };
+  const openedAtLogin = loginItemSettings.wasOpenedAtLogin || loginItemSettings.wasOpenedAsHidden;
+
   // If files were queued (from open-file before ready), open each in a new window
   if (pendingFilesToOpen.length > 0) {
     pendingFilesToOpen.forEach(fp => openFileInNewWindow(fp));
     pendingFilesToOpen = [];
-  } else {
-    // No file to open — launch the normal main window with welcome screen
+  } else if (!openedAtLogin) {
+    // No file to open and not a login-item launch — show the normal main window
     createWindow();
   }
+  // If openedAtLogin and no files pending, don't create a window; the app lives
+  // in the dock and the user opens it from there when needed.
 
   // Set up dock menu with recent files
   updateDockMenu();

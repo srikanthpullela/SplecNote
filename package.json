@@ -57,7 +57,10 @@
         "dmg",
         "zip"
       ],
-      "darkModeSupport": true
+      "darkModeSupport": true,
+      "extendInfo": {
+        "NSQuitAlwaysKeepsWindows": false
+      }
     },
     "dmg": {
       "title": "CongaCode",
