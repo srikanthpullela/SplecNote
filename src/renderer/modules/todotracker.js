@@ -1,5 +1,5 @@
 /* ================================================================
-   CongaCode — TODO / FIXME Tracker Module
+   Apex Debug Studio — TODO / FIXME Tracker Module
    Scans workspace files for TODO, FIXME, HACK, BUG, NOTE comments.
    Auto-scans on panel open. Click items to preview code context.
    ================================================================ */
@@ -112,7 +112,7 @@
   async function scanWorkspace() {
     window.showToast('Scanning workspace…', 'info');
     try {
-      const result = await window.congacode.scanTodos(state.folderPath);
+      const result = await window.apexStudio.scanTodos(state.folderPath);
       if (result && result.items) {
         todoItems = result.items;
       }
@@ -217,7 +217,7 @@
       lines = tab.model.getValue().split('\n');
     } else {
       try {
-        const content = await window.congacode.readFile(item.filePath);
+        const content = await window.apexStudio.readFile(item.filePath);
         if (content != null) lines = content.split('\n');
       } catch { lines = []; }
     }
@@ -269,7 +269,7 @@
       window.activateTab(tab.id);
     } else if (item.filePath && !item.filePath.startsWith('Untitled')) {
       try {
-        const content = await window.congacode.readFile(item.filePath);
+        const content = await window.apexStudio.readFile(item.filePath);
         if (content != null) await window.openFile(item.filePath, content);
       } catch {}
     }

@@ -1,5 +1,5 @@
 /* ================================================================
-   CongaCode — Pomodoro Focus Timer Module
+   Apex Debug Studio — Pomodoro Focus Timer Module
    25-min work / 5-min break timer in the status bar.
    ================================================================ */
 'use strict';
@@ -101,7 +101,7 @@
 
     // Show native notification
     if (Notification.permission === 'granted') {
-      new Notification('CongaCode Pomodoro', {
+      new Notification('Apex Debug Studio Pomodoro', {
         body: mode === 'work' ? `Session #${sessionCount + 1} complete! Time for a break.` : 'Break is over! Ready to focus?',
         icon: '🍅',
       });

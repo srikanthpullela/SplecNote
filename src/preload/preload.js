@@ -1,10 +1,10 @@
 /**
- * CongaCode — Preload Script
+ * Apex Debug Studio — Preload Script
  * Secure IPC bridge with fs ops for context menus, global search, quick open, etc.
  */
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('congacode', {
+const apexStudioApi = {
   // Dialogs
   openFileDialog: () => ipcRenderer.invoke('dialog:open-file'),
   openFolderDialog: () => ipcRenderer.invoke('dialog:open-folder'),
@@ -126,4 +126,9 @@ contextBridge.exposeInMainWorld('congacode', {
       return () => ipcRenderer.removeListener(channel, listener);
     }
   },
-});
+};
+
+// Expose the bridge under the new brand name, plus a legacy `congacode` alias
+// (same object) so any not-yet-migrated call sites keep working.
+contextBridge.exposeInMainWorld('apexStudio', apexStudioApi);
+contextBridge.exposeInMainWorld('congacode', apexStudioApi);

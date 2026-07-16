@@ -1,6 +1,6 @@
 name: Build desktop apps
 
-# Builds the CongaCode Electron app for both macOS and Windows on every push /
+# Builds the Apex Debug Studio Electron app for both macOS and Windows on every push /
 # pull request to the default branch (and on demand). Each OS job produces
 # installable artifacts (macOS: .dmg + .zip, Windows: .exe (NSIS) + .zip) and
 # uploads them so they can be downloaded from the run summary.
@@ -77,7 +77,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: congacode-${{ matrix.platform }}
+          name: apex-debug-studio-${{ matrix.platform }}
           if-no-files-found: warn
           retention-days: 14
           path: |

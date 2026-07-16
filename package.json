@@ -1,8 +1,8 @@
 {
-  "name": "congacode",
-  "productName": "CongaCode",
+  "name": "apex-debug-studio",
+  "productName": "Apex Debug Studio",
   "version": "1.0.0",
-  "description": "CongaCode — A modern text editor with auto-save, session persistence, and powerful editing features.",
+  "description": "Apex Debug Studio — Live Apex debugging, reimagined. A modern Salesforce Apex editor with live debugging, auto-save, session persistence, and powerful editing features.",
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
@@ -10,7 +10,7 @@
     "build": "electron-builder --mac",
     "build:all": "electron-builder --mac --win"
   },
-  "author": "CongaCode",
+  "author": "Apex Debug Studio",
   "license": "MIT",
   "devDependencies": {
     "electron": "^28.1.0",
@@ -23,8 +23,8 @@
     "simple-git": "^3.32.3"
   },
   "build": {
-    "appId": "com.congacode.app",
-    "productName": "CongaCode",
+    "appId": "com.apexdebugstudio.app",
+    "productName": "Apex Debug Studio",
     "asar": true,
     "directories": {
       "output": "dist"
@@ -36,7 +36,7 @@
       "!.git/**",
       "!.gitignore",
       "!README.md",
-      "!CONGACODE.md",
+      "!APEXDEBUGSTUDIO.md",
       "!.nvmrc",
       "!node_modules/monaco-editor/dev/**",
       "!node_modules/monaco-editor/esm/**",
@@ -60,7 +60,7 @@
       "darkModeSupport": true
     },
     "dmg": {
-      "title": "CongaCode",
+      "title": "Apex Debug Studio",
       "icon": "build/icon.icns",
       "contents": [
         {

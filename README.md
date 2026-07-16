@@ -1,11 +1,13 @@
-# CongaCode
+# Apex Debug Studio
 
-A modern, Sublime Text–inspired notepad application for macOS with **auto-save**, **session persistence**, and powerful editing features.
+**Live Apex debugging, reimagined.** A modern Salesforce Apex editor for macOS with a Chrome DevTools-style **live Apex debugger**, plus **auto-save**, **session persistence**, and powerful editing features.
 
 ## Features
 
+- **Live Apex debugging** — set breakpoints, step through `.cls` files, inspect variables and watch expressions, and replay org execution logs
+- **Salesforce tooling** — org connection, Apex test runner, SOQL, and system-mode queries via the Salesforce CLI
 - **Monaco Editor** — the same editor engine that powers VS Code
-- **Auto-save** — every tab is automatically saved to `~/CongaCode/AutoSave/YYYY-MM-DD/` with date-based folders
+- **Auto-save** — every tab is automatically saved to `~/ApexDebugStudio/AutoSave/YYYY-MM-DD/` with date-based folders
 - **Session persistence** — all tabs, cursor positions, and settings survive app restarts
 - **Tabs** — open multiple files, rename tabs with double-click, close with middle-click
 - **Search & Replace** — regex, case-sensitive, whole-word matching (⌘F / ⌘H)
@@ -37,10 +39,10 @@ npm run build:all   # macOS + Windows
 All unsaved tabs are persisted to:
 
 ```
-~/CongaCode/AutoSave/2026-02-25/Untitled-1.txt
+~/ApexDebugStudio/AutoSave/2026-02-25/Untitled-1.txt
 ```
 
-Session data is stored in `~/CongaCode/.session.json`.
+Session data is stored in `~/ApexDebugStudio/.session.json`.
 
 ## Keyboard Shortcuts
 

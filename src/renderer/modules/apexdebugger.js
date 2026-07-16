@@ -1,5 +1,5 @@
 /* ========================================================================
-   CongaCode — Apex Request Debugger (apexdebugger.js)
+   Apex Debug Studio — Apex Request Debugger (apexdebugger.js)
    Chrome DevTools-style in-editor debugger for Apex .cls files.
    Simulates execution locally using request JSON as input data.
    ======================================================================== */
@@ -54,6 +54,26 @@ const debugState = {
   // Watch expressions
   watchExpressions: [],  // [{ expr: string, id: number }]
   watchNextId: 1,
+  // Watch by IDENTITY — objects/fields pinned from the hover value-tree. We follow
+  // the live engine reference (not its position), so a value buried inside a huge
+  // collection stays tracked even as the collection changes.
+  //   watchPins: [{ id, watchId, kind:'object'|'field', field?, label, typeName, path }]
+  //   trackedObjects: Map<watchId, { obj, kind, field?, label, typeName }>  (per run)
+  //   watchNextObjId: next runtime object id
+  watchPins: [],
+  trackedObjects: new Map(),
+  watchNextObjId: 1,
+  // Watch WITH HISTORY — delta-only timeline per tracked object (per run). Only real
+  // execution writes where the value actually changed are recorded.
+  //   Map<watchId, [{ seq, field, oldDisp, newDisp, step, line, file, className, methodName }]>
+  watchHistory: new Map(),
+  _watchHistoryCap: 500,       // ring cap per tracked object (bounds memory on deep runs)
+  _watchTrackedCap: 40,        // max simultaneously tracked objects
+  // DATA FLOW — how tracked objects move through methods (per run). Deduped event
+  // stream (methodKey|watchId|access) with per-method access counts, from which both
+  // the per-method table and the per-object flow are derived at render time.
+  //   events: [{ watchId, methodKey, className, methodName, file, line, access, count, firstStep }]
+  dataFlow: { events: [], seen: new Map(), focusWatchId: null },
   // Request data
   requestJson: null,
   parsedRequest: null,
@@ -65,9 +85,16 @@ const debugState = {
   orgFetching: false,          // True while an org call is in flight
   orgQueryCache: new Map(),    // normalized SOQL string → { records, error, soql }
   sysHelper: new Map(),        // org username → 'ready'|'declined'|'unavailable'|Promise (system-mode helper class status)
+  // System-mode preference is tri-state ('auto'|'on'|'off'); see loadSystemModePref.
+  // 'auto' (default) resumes system mode on any org where the helper class is ALREADY
+  // deployed (nothing is ever deployed automatically) and stays in user mode elsewhere.
+  // systemModeEnabled is the EFFECTIVE state for the currently connected org.
+  systemModePref: 'auto',
+  systemModeEnabled: false,
+  _generatedOrgLogs: false,    // true once the app has run anonymous Apex this session (=> ApexLogs exist to clean up)
   // FINEST-logging warm-up cache (per org alias). Avoids re-doing the ~7 serial `sf`
   // CLI calls that set up the temporary debug TraceFlag on every run: once a valid
-  // CongaCodeFinest flag exists it is reused until it nears expiry. Value shape:
+  // ApexDebugStudioFinest flag exists it is reused until it nears expiry. Value shape:
   // { promise:Promise<bool>, expiresAt:number|null, userId:string|null, debugLevelId:string|null }.
   // Populated in the background the moment a debug session starts (overlaps the wait).
   _finestWarm: new Map(),
@@ -914,7 +941,7 @@ async function evaluateUserMethodLocally(receiverObj, methodName, argValues, typ
     try { file = await resolveClassFile(n); } catch { file = null; }
     if (!file) continue;
     let src;
-    try { src = await window.congacode.readFile(file); } catch { continue; }
+    try { src = await window.apexStudio.readFile(file); } catch { continue; }
     if (!src) continue;
     const mi = findMethodInSource(src, methodName);
     if (mi) { methodInfo = mi; source = src; break; }
@@ -989,7 +1016,7 @@ async function parseClassFieldsAsync(className) {
   const filePath = await resolveClassFile(className);
   if (!filePath) return null;
   try {
-    const source = await window.congacode.readFile(filePath);
+    const source = await window.apexStudio.readFile(filePath);
     if (!source) return null;
     const fields = parseClassFields(source);
     debugState.classFieldsCache.set(className, fields);
@@ -1233,7 +1260,7 @@ async function buildClassIndex() {
   if (!folder) return {};
 
   try {
-    const allFiles = await window.congacode.getAllFiles(folder);
+    const allFiles = await window.apexStudio.getAllFiles(folder);
     const index = {};
     for (const f of allFiles) {
       if (f.endsWith('.cls') || f.endsWith('.trigger')) {
@@ -1272,7 +1299,7 @@ async function resolveClassFile(className) {
    ================================================================ */
 
 async function startDebugSession(filePath, methodName, requestParams) {
-  const source = await window.congacode.readFile(filePath);
+  const source = await window.apexStudio.readFile(filePath);
   if (!source) { window.showToast?.('Could not read file', 'error'); return; }
 
   const methodInfo = findMethodInSource(source, methodName);
@@ -1334,7 +1361,7 @@ async function startDebugSession(filePath, methodName, requestParams) {
   }];
 
   // Open file in editor at method start
-  const content = await window.congacode.readFile(filePath);
+  const content = await window.apexStudio.readFile(filePath);
   await window.openFile(filePath, content);
 
   // Show debug UI
@@ -1730,7 +1757,7 @@ async function onEnginePause(info) {
   const differentFile = info.file && info.file !== debugState.currentFile && /\.(cls|trigger)$/.test(info.file);
   if (differentFile) {
     try {
-      const content = await window.congacode.readFile(info.file);
+      const content = await window.apexStudio.readFile(info.file);
       if (content != null) { await window.openFile(info.file, content); }
     } catch (_) { /* fall through — keep whatever is open */ }
   }
@@ -1741,6 +1768,10 @@ async function onEnginePause(info) {
   revealPauseLocation(info.line, differentFile);
   captureEngineHistory(info.reason);
   setDebugBusyUI();
+  // Re-attach any watch pins whose object now resolves in this frame (new run /
+  // restored definitions), and follow any stable binding that was reassigned to a
+  // different object so the Watch + Data Flow tabs stay continuous across the swap.
+  try { await syncWatchPins(); } catch (_) {}
   updateDebugPanels();
 }
 
@@ -1794,13 +1825,57 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
       updateLiveOrgIndicator();
       if (!probe) {
         maybeOpenOrgTabForLiveQuery();
-        addConsoleEntry('info', `⏳ Fetching from org: ${soql.replace(/\s+/g, ' ').slice(0, 180)}`);
+        addConsoleEntry('info', `⏳ Fetching from org: ${soql.replace(/\s+/g, ' ').trim()}`);
         renderConsolePanel();
       }
       try {
+        // If the user already made a session decision for this query shape, honor it
+        // silently so a failing query inside a loop doesn't re-prompt every iteration.
+        if (!probe) {
+          if (!debugState._soqlSessionDecision) debugState._soqlSessionDecision = new Map();
+          if (debugState._soqlSessionDecision.get(normalizeSoqlKey(soql)) === 'zero') {
+            addConsoleEntry('warn', '↳ (remembered this session) continuing with 0 rows for this query.');
+            return [];
+          }
+        }
         const res = await execSoql(soql);
+        if (res._appliedSavedFix && !probe) {
+          addConsoleEntry('info', '🛠 Applied your saved SOQL fix for this query.');
+        }
         if (res.error) {
-          if (!probe) addConsoleEntry('error', `SOQL error: ${res.error}`);
+          if (!probe) {
+            // Offer an inline fix so a per-org schema mismatch doesn't dead-end the whole
+            // session: the user edits the SOQL, runs it, and continues with the results.
+            const key = normalizeSoqlKey(soql);
+            if (!debugState._soqlSessionDecision) debugState._soqlSessionDecision = new Map();
+            const aborted = debugState._soqlSessionDecision.get(key) === 'abort';
+            if (!aborted && isFixableSoqlError(res.error)) {
+              const outcome = await showSoqlFixModal({ soql, error: res.error, resolvedSoql: res.soql || soql });
+              if (outcome.action === 'continue') {
+                if (!debugState._soqlSessionFixes) debugState._soqlSessionFixes = new Map();
+                debugState._soqlSessionFixes.set(key, toSoqlTemplate(outcome.soql));
+                if (outcome.remember) {
+                  try {
+                    await saveSoqlFix(soql, outcome.soql);
+                    addConsoleEntry('info', '💾 Saved this fix for this project — future runs apply it automatically (until the schema changes).');
+                  } catch (_) { /* persistence is best-effort */ }
+                }
+                addConsoleEntry('info', `✓ Applied your SOQL fix — ${outcome.records.length} row(s) from org.`);
+                renderConsolePanel();
+                return outcome.records;
+              }
+              if (outcome.action === 'zero') {
+                debugState._soqlSessionDecision.set(key, 'zero');
+                addConsoleEntry('warn', '↳ Continuing with 0 rows (your choice). Downstream code that dereferences the empty result may throw a NullPointerException — exactly as it would in real Apex.');
+                renderConsolePanel();
+                return [];
+              }
+              // Abort → remember for the session so we don't re-prompt, then throw as usual.
+              debugState._soqlSessionDecision.set(key, 'abort');
+            }
+            const hint = soqlPermissionHint(res.error);
+            addConsoleEntry(hint ? 'warn' : 'error', hint || `SOQL error: ${res.error}`);
+          }
           // Tag as org-origin so the engine attributes it correctly: a semantic
           // rejection (bad query/data) reads as "real Apex error reported by the org",
           // while an infra failure (CLI crash/auth/timeout) reads as an org/CLI issue —
@@ -1821,6 +1896,12 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
               ? ' This ran in system mode (FLS/CRUD/sharing bypassed), so a missing permission is NOT the cause — the record genuinely is not in the org.'
               : '';
             addConsoleEntry('warn', `↳ This record does not exist in the connected org (it may be a transient record that was already cleaned up).${sysNote} Any code that dereferences this empty result will get null — and will throw a NullPointerException, exactly as it would in real Apex. No data is being generated to hide this.`);
+            // Temp/transient objects (e.g. Apttus_Config2__TempObject__c) are deleted
+            // shortly after the request that created them completes, so re-running an old
+            // captured request will always 404 on its temp Id. Steer the user to re-capture.
+            if (/TempObject/i.test(info.subject)) {
+              addConsoleEntry('warn', `⚠ This looks like a transient temp record (TempObject) that the org has already cleaned up. Replaying an old captured request won't find it. ➜ Re-capture the LATEST request from the org (redo the action so a fresh temp Id is generated), then debug that one — the stale Id from the previous run can't be recovered.`);
+            }
           }
           renderConsolePanel();
         } else if (!probe) {
@@ -1892,22 +1973,38 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
     describeSObject: async (name) => {
       if (!liveOrgAvailable()) return { error: 'no org' };
       if (!debugState.engineDescribeCache) debugState.engineDescribeCache = new Map();
-      const key = String(name).toLowerCase();
+      // Key by connected org too: field lists differ per org (a field may exist in
+      // one org but not another), so a describe cached under a prior org must never
+      // be reused for a different one.
+      const _org = getActiveOrg();
+      const key = `${_org && _org.org ? _org.org : '?'}::${String(name).toLowerCase()}`;
       if (debugState.engineDescribeCache.has(key)) return debugState.engineDescribeCache.get(key);
       debugState.orgFetching = true;
       debugState.currentQueryText = `Describe ${name}`;
       updateLiveOrgIndicator();
       maybeOpenOrgTabForLiveQuery();
       addConsoleEntry('info', `⚙ Describing ${name} in org…`); renderConsolePanel();
-      let r = await _runDescribeViaApex(name);
-      // Retry with the package namespace prefix when the bare name isn't found
-      // (a 2-segment name like Foo__c has no namespace yet).
+      // Prefer the REST describe (no debug log, nothing deployed). Only fall back to the
+      // anonymous-Apex describe when REST truly can't run AND system mode is on (it needs
+      // FINEST logging). This keeps user mode log-free.
+      let r = await _runDescribeViaRest(name);
       if ((!r || !r.names || !r.names.length) && String(name).split('__').length < 3) {
         const ns = await getPackageNamespace();
         if (ns) {
-          const r2 = await _runDescribeViaApex(`${ns}__${name}`);
+          const r2 = await _runDescribeViaRest(`${ns}__${name}`);
           if (r2 && r2.names && r2.names.length) r = r2;
         }
+      }
+      if ((!r || !r.names || !r.names.length) && r && r._restUnavailable && isSystemModeEnabled()) {
+        let ra = await _runDescribeViaApex(name);
+        if ((!ra || !ra.names || !ra.names.length) && String(name).split('__').length < 3) {
+          const ns = await getPackageNamespace();
+          if (ns) {
+            const ra2 = await _runDescribeViaApex(`${ns}__${name}`);
+            if (ra2 && ra2.names && ra2.names.length) ra = ra2;
+          }
+        }
+        if (ra && ra.names && ra.names.length) r = ra;
       }
       const out = (r && r.names) ? r : { names: [], error: (r && r.error) || 'describe failed' };
       if (out.names && out.names.length) addConsoleEntry('info', `↳ ${name}: ${out.names.length} fields resolved from org`);
@@ -1920,7 +2017,7 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
       const file = await resolveClassFile(className);
       if (!file) return null;
       try {
-        const src = await window.congacode.readFile(file);
+        const src = await window.apexStudio.readFile(file);
         if (src) addConsoleEntry('info', `↳ Loaded ${className} from ${file.split('/').pop()} (step-into available)`);
         return src ? { source: src, path: file } : null;
       } catch (_) { return null; }
@@ -1936,6 +2033,11 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
       if (!debugState.active) return;
       followExecutingLine(info);
     },
+    // Watch + data-flow field observers. Fired by the engine ONLY for objects the
+    // user pinned (obj.__tracked), and only during real execution (never during
+    // hover/console evals or while paused). Cheap: a couple of Map ops per event.
+    onFieldWrite: (ev) => { try { recordFieldWrite(ev); } catch (_) {} },
+    onFieldRead: (ev) => { try { recordFieldRead(ev); } catch (_) {} },
     onDone: (result) => {
       if (!debugState.active) return;
       debugState.paused = false;
@@ -2017,6 +2119,10 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
   debugState.engineSession = engine;
   engine.mode = 'into';                    // pause on the very first statement
   debugState.engineRunning = true;
+  // Fresh run → clear per-run watch history / data-flow and unbind identity pins
+  // (object identities from the previous run no longer exist). Watch DEFINITIONS
+  // (expressions + pin paths) are preserved so they can re-bind by path this run.
+  resetWatchRuntime();
 
   // Fix 2: seed real user info into the host so UserInfo.getUserId() etc. return
   // the actual running user's Id rather than a synthetic placeholder. Non-blocking
@@ -2279,7 +2385,7 @@ async function runLiveQuery(rawQuery, scope) {
   const cmd = `sf data query --query "${escaped}" --json --target-org ${org.org}`;
   let result = { records: [], error: null, soql };
   try {
-    const { stdout, stderr } = await window.congacode.sfExec(cmd, folder, 60000);
+    const { stdout, stderr } = await window.apexStudio.sfExec(cmd, folder, 60000);
     const parsed = parseSfJson(stdout);
     if (parsed && parsed.status === 0 && parsed.result) {
       result.records = (parsed.result.records || []).map(cleanSObject);
@@ -2305,11 +2411,147 @@ function describeEmptyQuery(soql) {
   return { subject: `${obj} matching the query`, byId: false, org: orgName };
 }
 
+/**
+ * When a user-mode query fails because the connected user can't see an object/field
+ * (FLS/CRUD), return a friendly 🔒 explanation instead of a raw platform error — but only
+ * while system mode is OFF (with it on, the helper would have read the field). Returns
+ * null when the error isn't a permission/visibility problem, so genuine query errors are
+ * still shown verbatim. Never fabricates data.
+ */
+function soqlPermissionHint(errText) {
+  if (isSystemModeEnabled()) return null;
+  const t = String(errText || '');
+  if (!/No such column|sObject type .* is not supported|INVALID_TYPE|INVALID_FIELD|not supported for query|INSUFFICIENT_ACCESS|is not accessible|didn.?t understand/i.test(t)) return null;
+  const col = t.match(/No such column '([\w.]+)'/i);
+  const typ = t.match(/sObject type '([\w.]+)'/i) || t.match(/on entity '([\w.]+)'/i);
+  const what = col ? `field ${col[1]}` : (typ ? `object ${typ[1]}` : 'that field/object');
+  return `🔒 ${what} isn't readable by the connected user (no permission). Nothing was fabricated. To read it, enable ⚡ System mode (deploys a read-only helper — needs deploy rights) or grant the user access. Original: ${t}`;
+}
+
+/**
+ * True when a SOQL error is a query-STRUCTURE problem the user can fix by editing the
+ * query (bad field/relationship/object/type, malformed SOQL) — as opposed to an infra
+ * failure (CLI/auth/network/timeout) or a plain empty result. Gates the interactive
+ * "Fix SOQL & continue" dialog so we only offer it when editing the query can help.
+ */
+function isFixableSoqlError(errText) {
+  const t = String(errText || '');
+  if (!t) return false;
+  // Never offer the editor for infra/auth problems — editing SOQL won't fix those.
+  if (/No org connected|not authorized|expired access token|INVALID_SESSION|ENOTFOUND|ECONNRESET|ETIMEDOUT|timed out|sf:? not found|command not found/i.test(t)) return false;
+  return /No such column|No such relationship|INVALID_FIELD|INVALID_TYPE|not supported for query|sObject type .* is not supported|Didn.?t understand relationship|MALFORMED_QUERY|unexpected token|INVALID_QUERY_FILTER_OPERATOR|on entity '|line \d+:\d+/i.test(t);
+}
+
+/* ================================================================
+   Interactive "Fix SOQL & continue" — per-project persistence
+   ----------------------------------------------------------------
+   Every org/project has a different schema, so a query the debugger (or
+   the user's own Apex) builds can reference a field/relationship that
+   doesn't exist in THIS org. Instead of dead-ending the whole session,
+   the user can edit the failing SOQL and continue — and we remember the
+   correction so the same query shape just works next time. Stored PER
+   PROJECT FOLDER in ~/ApexDebugStudio/soql-fixes.json.
+
+   Keying: literals (quoted strings, numbers) are masked to '?' so a fix
+   for one record Id applies to every record Id of the same shape. The
+   corrected query is kept as a template with the same '?' markers; at
+   apply time the CURRENT query's literals are re-injected positionally,
+   but ONLY when the count matches (otherwise we re-prompt, never guess).
+   ================================================================ */
+const SOQL_LITERAL_RE = /'(?:[^'\\]|\\.)*'|\b\d+(?:\.\d+)?\b/g;
+
+/** Ordered list of literal tokens (quoted strings + bare numbers) in a query. */
+function soqlLiterals(soql) {
+  const out = [];
+  String(soql || '').replace(SOQL_LITERAL_RE, (m) => { out.push(m); return m; });
+  return out;
+}
+
+/** Whitespace-collapsed, literal-masked, lower-cased key for matching query shapes. */
+function normalizeSoqlKey(soql) {
+  return String(soql || '').replace(/\s+/g, ' ').trim().replace(SOQL_LITERAL_RE, '?').toLowerCase();
+}
+
+/** Turn a concrete query into a reusable template (literals → '?'), whitespace-collapsed. */
+function toSoqlTemplate(soql) {
+  return String(soql || '').replace(/\s+/g, ' ').trim().replace(SOQL_LITERAL_RE, '?');
+}
+
+/** Re-inject a query's current literals into a saved template. Null if the counts differ. */
+function applySoqlTemplate(template, currentSoql) {
+  const lits = soqlLiterals(currentSoql);
+  const holes = (String(template).match(/\?/g) || []).length;
+  if (holes !== lits.length) return null; // shape changed → caller should re-prompt
+  let i = 0;
+  return String(template).replace(/\?/g, () => lits[i++]);
+}
+
+let _soqlFixesCache = null; // { "<folderPath>": { "<key>": "<template>" } }
+
+function _soqlProjectKey() { return (window.state && window.state.folderPath) || '__global__'; }
+
+async function _soqlFixesPath() {
+  const paths = await window.apexStudio.getPaths?.();
+  const base = paths?.appDataDir || paths?.home || '.';
+  return `${base}/soql-fixes.json`;
+}
+
+async function loadSoqlFixes() {
+  if (_soqlFixesCache) return _soqlFixesCache;
+  try {
+    const raw = await window.apexStudio.readFile(await _soqlFixesPath());
+    _soqlFixesCache = raw ? (JSON.parse(raw) || {}) : {};
+  } catch (_) { _soqlFixesCache = {}; }
+  return _soqlFixesCache;
+}
+
+/** Persist a corrected query (as a template) for the current project + query shape. */
+async function saveSoqlFix(originalSoql, correctedSoql) {
+  const all = await loadSoqlFixes();
+  const proj = _soqlProjectKey();
+  if (!all[proj]) all[proj] = {};
+  all[proj][normalizeSoqlKey(originalSoql)] = toSoqlTemplate(correctedSoql);
+  _soqlFixesCache = all;
+  try { await window.apexStudio.writeFile(await _soqlFixesPath(), JSON.stringify(all, null, 2)); } catch (_) { /* best effort */ }
+}
+
+/**
+ * Best available corrected query for a concrete SOQL, or null. Session fixes (chosen
+ * "continue" WITHOUT "remember") take precedence over persisted ones. Returns a
+ * ready-to-run query with the current literals re-injected.
+ */
+async function getEffectiveSoqlFix(soql) {
+  const key = normalizeSoqlKey(soql);
+  const sess = debugState._soqlSessionFixes && debugState._soqlSessionFixes.get(key);
+  if (sess) { const applied = applySoqlTemplate(sess, soql); if (applied && applied !== soql) return applied; }
+  const all = await loadSoqlFixes();
+  const proj = all[_soqlProjectKey()];
+  const tpl = proj && proj[key];
+  if (!tpl) return null;
+  const applied = applySoqlTemplate(tpl, soql);
+  return (applied && applied !== soql) ? applied : null;
+}
+
 /** Execute a fully-resolved SOQL string against the org via `sf data query` (cached). */
-async function execSoql(soql) {
+async function execSoql(soql, opts) {
   const org = getActiveOrg();
   if (!org) return { records: [], error: 'No org connected', soql };
-  if (debugState.orgQueryCache.has(soql)) return debugState.orgQueryCache.get(soql);
+
+  // Transparently apply a previously-saved (project) or session-scoped interactive fix
+  // for this query's shape. Skipped for the fix dialog's own test run (noSavedFix) so it
+  // tests exactly what the user typed.
+  let appliedSavedFix = false;
+  if (!(opts && opts.noSavedFix)) {
+    try {
+      const fixed = await getEffectiveSoqlFix(soql);
+      if (fixed && fixed !== soql) { soql = fixed; appliedSavedFix = true; }
+    } catch (_) { /* fixes are best-effort — fall back to the original query */ }
+  }
+
+  if (debugState.orgQueryCache.has(soql)) {
+    const cached = debugState.orgQueryCache.get(soql);
+    return appliedSavedFix ? { ...cached, _appliedSavedFix: true } : cached;
+  }
 
   let result = await _runSoqlOnce(soql);
   // Managed-package objects/fields need their namespace prefix when queried via the
@@ -2323,7 +2565,7 @@ async function execSoql(soql) {
   const emptyResult = !result.error && (result.records || []).length === 0;
   if (compileErr || emptyResult) {
     const ns = await getPackageNamespace();
-    const nsSoql = applyNamespaceToSoql(soql, ns);
+    const nsSoql = await applyNamespaceToSoql(soql, ns);
     if (ns && nsSoql !== soql) {
       const r2 = await _runSoqlOnce(nsSoql);
       if (!r2.error && (r2.records || []).length > 0) {
@@ -2371,6 +2613,7 @@ async function execSoql(soql) {
     result = { ...r3, soql: colRetryQuery };
   }
   if (!result.error && droppedColumns.length) result.droppedColumns = droppedColumns;
+  if (appliedSavedFix) result._appliedSavedFix = true;
 
   debugState.orgQueryCache.set(soql, result);
   return result;
@@ -2392,14 +2635,117 @@ async function execSoql(soql) {
  * deployed. Deploy only happens on the user's OK; otherwise we fall back to
  * user-mode queries. Status is cached per org for the session.
  * ==================================================================== */
-const SYS_HELPER_CLASS = 'CongaCodeSystemQuery';
+const SYS_HELPER_CLASS = 'ApexDebugStudioSystemQuery';
 const SYS_HELPER_API_VERSION = '58.0';
+
+/* ----------------------------------------------------------------------
+ * System-mode opt-in
+ * --------------------------------------------------------------------
+ * The preference is tri-state and persisted per app:
+ *   'auto' (default) — resume system mode automatically on any org where the read-only
+ *                      helper class is ALREADY deployed; stay in user mode everywhere else.
+ *                      Nothing is ever deployed in 'auto' — we only DETECT an existing class,
+ *                      so locked-down customer orgs (no helper) are never touched.
+ *   'on'            — user explicitly forced system mode (offers to deploy the helper if absent).
+ *   'off'           — user explicitly forced user mode (never uses system mode).
+ * `debugState.systemModeEnabled` is the EFFECTIVE state for the connected org.
+ * ------------------------------------------------------------------- */
+const DBG_SYSMODE_KEY = 'apexstudio.debug.systemMode.v1';
+
+/** True when reads should run in system mode for the connected org. */
+function isSystemModeEnabled() {
+  return !!debugState.systemModeEnabled;
+}
+
+/** The persisted preference: 'auto' | 'on' | 'off'. */
+function systemModePref() {
+  return debugState.systemModePref || 'auto';
+}
+
+/** Load the persisted system-mode preference (called once at init). */
+function loadSystemModePref() {
+  let pref = 'auto';
+  try {
+    const raw = localStorage.getItem(DBG_SYSMODE_KEY);
+    if (raw === 'on' || raw === '1') pref = 'on';   // '1' = legacy explicit-on
+    else if (raw === 'off') pref = 'off';           // legacy '0' falls through to 'auto'
+  } catch (_) { /* default auto */ }
+  debugState.systemModePref = pref;
+  // 'auto' starts OFF until a connected org with the helper flips it on (onOrgConnectedCheckHelper).
+  debugState.systemModeEnabled = (pref === 'on');
+  return pref;
+}
+
+/**
+ * Explicit user choice via the ⚡ toggle. Persists 'on'/'off' so it sticks and so
+ * auto-resume no longer overrides it. Use setSystemModeAuto() for the automatic path.
+ */
+function setSystemMode(on) {
+  debugState.systemModeEnabled = !!on;
+  debugState.systemModePref = on ? 'on' : 'off';
+  try { localStorage.setItem(DBG_SYSMODE_KEY, on ? 'on' : 'off'); } catch (_) {}
+  updateSystemModeUi();
+}
+
+/** Set the EFFECTIVE state from the auto-resume path WITHOUT changing the 'auto' preference. */
+function setSystemModeAuto(on) {
+  debugState.systemModeEnabled = !!on;
+  updateSystemModeUi();
+}
+
+/** Reflect the current system-mode state onto the org-bar + debug-panel toggle buttons. */
+function updateSystemModeUi() {
+  const on = isSystemModeEnabled();
+  const auto = systemModePref() === 'auto';
+  const label = on ? '⚡ System mode' : '🔒 User mode';
+  const title = on
+    ? `System mode ON${auto ? ' (auto-resumed — helper already on this org)' : ''} — reads FLS-hidden managed-package fields via the read-only helper class. Click to switch to user mode.`
+    : 'User mode — reads only what the connected user can see; nothing is deployed. System mode resumes automatically on orgs where the helper class already exists; click to enable it here (deploys the helper if the org does not have it yet).';
+  for (const id of ['sf-systemmode-toggle', 'dbg-systemmode-toggle']) {
+    const btn = document.getElementById(id);
+    if (!btn) continue;
+    btn.classList.toggle('on', on);
+    btn.textContent = label;
+    btn.title = title;
+  }
+}
+
+/**
+ * Toggle system mode from the UI. Turning it ON immediately verifies/deploys the helper
+ * on the active org (with the existing consent modal); turning it OFF is instant and
+ * deploys nothing. Returns the resulting boolean state.
+ */
+async function toggleSystemMode() {
+  const next = !isSystemModeEnabled();
+  setSystemMode(next);
+  if (next) {
+    const org = getActiveOrg();
+    if (!org || !org.org) {
+      addConsoleEntry('warn', 'System mode enabled, but no org is connected yet — connect an org, then it will offer to deploy the read-only helper when a hidden field is needed.');
+      renderConsolePanel();
+    } else {
+      // Explicit opt-in → run the consent + deploy flow now so the first hidden-field read is instant.
+      debugState.sysHelper.delete(org.org);
+      try {
+        const status = await ensureSystemHelper(org);
+        if (status === 'declined') { addConsoleEntry('info', 'System mode left OFF — helper deploy was declined. Reads stay in user mode.'); setSystemMode(false); }
+        else if (status === 'unavailable') { addConsoleEntry('warn', 'System mode is ON, but the helper class could not be deployed to this org (likely no deploy permission). Hidden fields will show as 🔒 until it can be deployed or the user is granted access.'); }
+        else if (status === 'privileged') { addConsoleEntry('info', "System mode ON — you're connected as a System Administrator (full data access), so user-mode reads already return every field. No helper class was deployed."); }
+      } catch (_) { /* non-fatal */ }
+      renderConsolePanel();
+    }
+  } else {
+    addConsoleEntry('info', 'System mode OFF — reads run in user mode via the Query API (nothing deployed, no debug logs).');
+    renderConsolePanel();
+  }
+  return isSystemModeEnabled();
+}
 
 /** The read-only system-mode helper class source. */
 function sysHelperApexBody() {
   return [
     'public without sharing class ' + SYS_HELPER_CLASS + ' {',
-    '    // Deployed by the CongaCode Apex debugger. Runs READ-ONLY SOQL that you',
+    '    // Deployed by the Apex Debug Studio Apex debugger. Runs READ-ONLY SOQL that you',
     '    // trigger in system mode (AccessLevel.SYSTEM_MODE), so managed-package',
     "    // data your user lacks permission for (e.g. Apttus_Config2__TempObject__c)",
     '    // can be inspected truthfully. It never performs any DML.',
@@ -2425,7 +2771,7 @@ async function systemHelperExists(org) {
   const folder = window.state?.folderPath;
   const cmd = `sf data query --use-tooling-api --query "SELECT Id FROM ApexClass WHERE Name='${SYS_HELPER_CLASS}' LIMIT 1" --json --target-org ${org.org}`;
   try {
-    const { stdout } = await window.congacode.sfExec(cmd, folder, 60000);
+    const { stdout } = await window.apexStudio.sfExec(cmd, folder, 60000);
     const parsed = parseSfJson(stdout);
     if (parsed && parsed.status === 0 && parsed.result) {
       return (parsed.result.records || []).length > 0;
@@ -2434,24 +2780,63 @@ async function systemHelperExists(org) {
   return null; // query itself failed (auth/CLI) — org not verifiable right now
 }
 
+/**
+ * Whether the connected user already has org-wide data access — i.e. the stock
+ * "System Administrator" profile, or any profile / permission set that grants
+ * "Modify All Data" or "View All Data". Such a user reads every field in plain
+ * user mode, so the system-mode helper class is unnecessary and we skip the
+ * deploy consent for them entirely. Returns true / false / null (couldn't tell).
+ * Cached per org on debugState._userFullAccess.
+ */
+async function connectedUserHasFullAccess(org) {
+  if (!org || !org.org) return null;
+  const cache = debugState._userFullAccess;
+  if (cache && cache.org === org.org && typeof cache.value === 'boolean') return cache.value;
+
+  const folder = window.state?.folderPath;
+  const ui = await getOrgUserInfo();
+  // Fast path: the stock System Administrator profile always carries Modify All Data.
+  if (ui && ui.profileName && /^system administrator$/i.test(String(ui.profileName).trim())) {
+    debugState._userFullAccess = { org: org.org, value: true };
+    return true;
+  }
+  const userId = ui && ui.id;
+  if (!userId) return null; // can't verify who's connected → let the caller prompt
+
+  // Robust path: any assigned permission set (which includes the profile's own
+  // permission set) granting Modify All Data / View All Data.
+  const soql = `SELECT PermissionSetId FROM PermissionSetAssignment WHERE AssigneeId='${userId}' AND (PermissionSet.PermissionsModifyAllData=true OR PermissionSet.PermissionsViewAllData=true) LIMIT 1`;
+  try {
+    const { stdout } = await window.apexStudio.sfExec(
+      `sf data query --query "${soql}" --json --target-org ${org.org}`, folder, 60000);
+    const parsed = parseSfJson(stdout);
+    if (parsed && parsed.status === 0 && parsed.result) {
+      const value = (parsed.result.records || []).length > 0;
+      debugState._userFullAccess = { org: org.org, value };
+      return value;
+    }
+  } catch (_) { /* fall through → unknown */ }
+  return null;
+}
+
 /** Deploy the helper class via a throwaway SFDX project. Returns { ok, error }. */
 async function deploySystemHelper(org) {
   if (!org || !org.org) return { ok: false, error: 'no org' };
   try {
-    const paths = await window.congacode.getPaths?.();
-    const base = (paths?.congacodeDir || paths?.home || '.') + '/.cc_sys_helper';
+    const paths = await window.apexStudio.getPaths?.();
+    const base = (paths?.appDataDir || paths?.home || '.') + '/.cc_sys_helper';
     const projFile = `${base}/sfdx-project.json`;
     const clsFile = `${base}/force-app/main/default/classes/${SYS_HELPER_CLASS}.cls`;
     const metaFile = `${clsFile}-meta.xml`;
-    await window.congacode.writeFile(projFile, JSON.stringify({
+    await window.apexStudio.writeFile(projFile, JSON.stringify({
       packageDirectories: [{ path: 'force-app', default: true }],
       namespace: '', sourceApiVersion: SYS_HELPER_API_VERSION,
     }, null, 2));
-    await window.congacode.writeFile(clsFile, sysHelperApexBody());
-    await window.congacode.writeFile(metaFile,
+    await window.apexStudio.writeFile(clsFile, sysHelperApexBody());
+    await window.apexStudio.writeFile(metaFile,
       `<?xml version="1.0" encoding="UTF-8"?>\n<ApexClass xmlns="http://soap.sforce.com/2006/04/metadata">\n    <apiVersion>${SYS_HELPER_API_VERSION}</apiVersion>\n    <status>Active</status>\n</ApexClass>\n`);
     const cmd = `sf project deploy start --source-dir force-app --target-org ${org.org} --json`;
-    const { stdout, stderr } = await window.congacode.sfExec(cmd, base, 120000);
+    const { stdout, stderr } = await window.apexStudio.sfExec(cmd, base, 120000);
     const parsed = parseSfJson(stdout);
     if (parsed && parsed.status === 0 && parsed.result && parsed.result.success) return { ok: true };
     return { ok: false, error: sfErrorText(parsed, stderr, stdout, 'Deploy failed') };
@@ -2480,7 +2865,7 @@ function showSystemHelperConsent(org) {
         </div>
         <div class="curl-import-body" style="padding:14px 16px;line-height:1.55;font-size:13px;">
           <p style="margin:0 0 10px;">Some managed-package data (for example <code>Apttus_Config2__TempObject__c</code> and its <code>Data__c</code> field) isn't readable by your connected user, so queries fail with <em>"sObject type not supported"</em> or <em>"No such column"</em> and the debugger can't see the real values.</p>
-          <p style="margin:0 0 8px;">To read that data <strong>truthfully</strong> — without changing any permissions — CongaCode needs to deploy one small Apex helper class to this org:</p>
+          <p style="margin:0 0 8px;">To read that data <strong>truthfully</strong> — without changing any permissions — Apex Debug Studio needs to deploy one small Apex helper class to this org:</p>
           <ul style="margin:0 0 10px 18px;padding:0;">
             <li><code>${dbgEscapeHtml(SYS_HELPER_CLASS)}</code> — a <code>without sharing</code> class that runs the <strong>read-only SELECT</strong> queries you trigger in <strong>system mode</strong> (bypasses object/field permissions).</li>
             <li>It <strong>never</strong> inserts, updates, or deletes anything. It's reusable across runs, and you can delete it from the org anytime.</li>
@@ -2508,6 +2893,100 @@ function showSystemHelperConsent(org) {
 }
 
 /**
+ * Interactive "Fix SOQL & continue" dialog. Shown when a query the debugger runs fails
+ * with a fixable structural error (bad field/relationship/type/malformed SOQL). Lets the
+ * user edit the SOQL, run it live against the org, and continue with the results — so a
+ * per-org schema difference doesn't dead-end the debug session. Read-only; never DML.
+ * Resolves one of:
+ *   { action:'continue', records, soql, remember }  // use the edited query's rows
+ *   { action:'zero' }                               // continue with 0 rows
+ *   { action:'abort' }                              // give up → the original error throws
+ */
+function showSoqlFixModal({ soql, error, resolvedSoql }) {
+  return new Promise((resolve) => {
+    const prev = document.getElementById('cc-soqlfix-overlay');
+    if (prev) prev.remove();
+    const startSoql = (resolvedSoql || soql || '').replace(/\s+/g, ' ').trim();
+    const orgLabel = (getActiveOrg() || {}).org || 'the connected org';
+    const overlay = document.createElement('div');
+    overlay.id = 'cc-soqlfix-overlay';
+    overlay.className = 'modal-overlay';
+    overlay.style.cssText = 'z-index:2000;';
+    overlay.innerHTML = `
+      <div class="curl-import-modal" style="width:700px;max-width:94vw;">
+        <div class="curl-import-header" style="padding:10px 16px;">
+          <span class="curl-import-title">🛠 Fix SOQL & continue</span>
+        </div>
+        <div class="curl-import-body" style="padding:14px 16px;line-height:1.5;font-size:13px;">
+          <p style="margin:0 0 8px;">This query failed against <strong>${dbgEscapeHtml(orgLabel)}</strong>. Every org's schema differs, so edit the query to match THIS org and run it — then continue with the results. This only changes the read query the debugger runs; your org is never modified.</p>
+          <div style="margin:0 0 10px;padding:8px 10px;background:var(--bg-tertiary,#161b22);border:1px solid var(--border-color,#30363d);border-left:3px solid #f85149;border-radius:4px;color:#ff7b72;font-family:var(--font-mono,ui-monospace,monospace);font-size:12px;white-space:pre-wrap;max-height:120px;overflow:auto;">${dbgEscapeHtml(error || '')}</div>
+          <label for="soqlfix-input" style="display:block;margin:0 0 4px;color:var(--text-secondary,#8a8a8a);font-size:12px;">SOQL (editable — press ⌘/Ctrl+Enter to run)</label>
+          <textarea id="soqlfix-input" spellcheck="false" style="width:100%;height:150px;box-sizing:border-box;resize:vertical;font-family:var(--font-mono,ui-monospace,monospace);font-size:12.5px;line-height:1.45;padding:8px 10px;background:var(--bg-primary,#0d1117);color:var(--text-primary,#e6edf3);border:1px solid var(--border-color,#30363d);border-radius:4px;">${dbgEscapeHtml(startSoql)}</textarea>
+          <div id="soqlfix-result" style="margin-top:8px;font-size:12px;min-height:18px;white-space:pre-wrap;"></div>
+          <label style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:12px;color:var(--text-secondary,#8a8a8a);cursor:pointer;">
+            <input type="checkbox" id="soqlfix-remember" checked style="margin:0;" />
+            Remember this fix for this project (auto-apply to the same query next time, until the schema changes)
+          </label>
+        </div>
+        <div class="curl-import-footer" style="padding:10px 16px;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+          <button id="soqlfix-abort" class="curl-import-btn curl-import-cancel">Abort (throw error)</button>
+          <button id="soqlfix-zero" class="curl-import-btn curl-import-cancel">Continue with 0 rows</button>
+          <button id="soqlfix-run" class="curl-import-btn">▶ Run test</button>
+          <button id="soqlfix-use" class="curl-import-btn curl-import-apply" disabled style="opacity:.5;">Use results &amp; continue</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const input = overlay.querySelector('#soqlfix-input');
+    const resultBox = overlay.querySelector('#soqlfix-result');
+    const useBtn = overlay.querySelector('#soqlfix-use');
+    const runBtn = overlay.querySelector('#soqlfix-run');
+    const rememberBox = overlay.querySelector('#soqlfix-remember');
+    let lastGood = null; // { records, soql } — set after a successful test run
+
+    const cleanup = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+    const finish = (val) => { cleanup(); resolve(val); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); finish({ action: 'abort' }); } };
+    const setUseEnabled = (on) => { useBtn.disabled = !on; useBtn.style.opacity = on ? '1' : '.5'; };
+
+    const doRun = async () => {
+      const edited = input.value.trim();
+      if (!edited) { resultBox.innerHTML = `<span style="color:#ff7b72;">Enter a query to run.</span>`; return; }
+      runBtn.disabled = true; runBtn.textContent = '⏳ Running…';
+      resultBox.innerHTML = `<span style="color:var(--text-secondary,#8a8a8a);">Running against the org…</span>`;
+      setUseEnabled(false); lastGood = null;
+      let res;
+      try { res = await execSoql(edited, { noSavedFix: true }); }
+      catch (e) { res = { error: e?.message || String(e) }; }
+      runBtn.disabled = false; runBtn.textContent = '▶ Run test';
+      if (res.error) {
+        setUseEnabled(false);
+        resultBox.innerHTML = `<span style="color:#ff7b72;">✗ ${dbgEscapeHtml(res.error)}</span>`;
+      } else {
+        const n = (res.records || []).length;
+        lastGood = { records: res.records || [], soql: edited };
+        setUseEnabled(true);
+        const dropped = (res.droppedColumns && res.droppedColumns.length)
+          ? ` (dropped column(s) absent in this org: ${dbgEscapeHtml(res.droppedColumns.join(', '))})` : '';
+        resultBox.innerHTML = `<span style="color:#3fb950;">✓ ${n} row(s) returned${dropped}. Click “Use results & continue”.</span>`;
+      }
+    };
+
+    runBtn.addEventListener('click', doRun);
+    input.addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); doRun(); } });
+    useBtn.addEventListener('click', () => {
+      if (!lastGood) return;
+      finish({ action: 'continue', records: lastGood.records, soql: lastGood.soql, remember: !!rememberBox.checked });
+    });
+    overlay.querySelector('#soqlfix-zero').addEventListener('click', () => finish({ action: 'zero' }));
+    overlay.querySelector('#soqlfix-abort').addEventListener('click', () => finish({ action: 'abort' }));
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) finish({ action: 'abort' }); });
+    document.addEventListener('keydown', onKey);
+    setTimeout(() => input?.focus(), 60);
+  });
+}
+
+/**
  * Ensure the system-mode helper is usable on the org. Returns 'ready',
  * 'declined', or 'unavailable'. Prompts for consent + deploys only when needed.
  * Caches per org (and dedupes concurrent callers via an in-flight promise).
@@ -2523,6 +3002,12 @@ async function ensureSystemHelper(org) {
     const exists = await systemHelperExists(org);
     if (exists === true) return 'ready';
     if (exists === null) return 'unavailable'; // org not verifiable now → use user mode, don't prompt
+    // Helper absent. If the connected user already has org-wide data access
+    // (System Administrator / Modify All / View All Data), plain user mode reads
+    // every field — so skip the deploy consent panel entirely for them.
+    let fullAccess = null;
+    try { fullAccess = await connectedUserHasFullAccess(org); } catch (_) { fullAccess = null; }
+    if (fullAccess === true) return 'privileged';
     const ok = await showSystemHelperConsent(org);
     if (!ok) return 'declined';
     addConsoleEntry('info', `⏳ Deploying system-mode helper class ${SYS_HELPER_CLASS} to ${org.info?.alias || org.org}…`);
@@ -2545,34 +3030,55 @@ async function ensureSystemHelper(org) {
 }
 
 /**
- * Proactive check when the user connects/switches to an org. If the helper is
- * already present we stay silent; otherwise we prompt (unless a check is already
- * in flight). 'declined'/'unavailable' are re-evaluated so a fresh connect can
- * re-offer the deploy, per the user's request.
+ * Called by the Salesforce module when the user connects/switches to an org.
+ *
+ * AUTO-RESUME: when the preference is 'auto' (the default), we do a cheap read-only check
+ * for whether the read-only helper class is ALREADY deployed on this org. If it is, we turn
+ * system mode ON for this org so FLS-hidden managed-package fields read truthfully again
+ * (this is what stops the "null field → NullPointerException" seen in user mode). We NEVER
+ * deploy here — an org without the helper simply stays in safe user mode and shows 🔒.
+ *
+ * An explicit user choice ('on'/'off' via the ⚡ toggle) always wins and is left untouched.
  */
 async function onOrgConnectedCheckHelper(org) {
-  if (!org || !org.org || !org.connected) return;
-  const v = debugState.sysHelper.get(org.org);
-  if (v === 'ready' || (v && typeof v.then === 'function')) return;
-  debugState.sysHelper.delete(org.org);
-  try { await ensureSystemHelper(org); } catch (_) { /* non-fatal */ }
+  // A (re)connect may be a different org/user — drop cached identity + access so
+  // the next lookups re-evaluate against the org that's actually connected now.
+  debugState._orgUserInfo = undefined;
+  debugState._userFullAccess = undefined;
+  // Explicit user choice wins — never auto-flip it.
+  if (systemModePref() !== 'auto') { updateSystemModeUi(); return; }
+  if (!org || !org.org || !liveOrgAvailable()) { setSystemModeAuto(false); return; }
+  let exists = null;
+  try { exists = await systemHelperExists(org); } catch (_) { exists = null; }
+  if (exists === true) {
+    // Prime the per-org status cache so the first read skips a second existence check.
+    debugState.sysHelper.set(org.org, 'ready');
+    if (!isSystemModeEnabled()) {
+      addConsoleEntry('info', `⚡ System mode auto-resumed on ${org.info?.alias || org.org} — the read-only helper class ${SYS_HELPER_CLASS} is already deployed, so FLS-hidden managed-package fields are readable (nothing was deployed). Click the toggle for user mode.`);
+      renderConsolePanel();
+    }
+    setSystemModeAuto(true);
+  } else {
+    // Helper absent, or org not verifiable right now → stay in safe user mode (🔒 for hidden data).
+    setSystemModeAuto(false);
+  }
 }
 
 /**
  * Single SOQL invocation (no caching, no namespace retry).
  *
- * Order of preference:
- *   1. SYSTEM MODE via the deployed helper class (`Database.query(soql,
- *      AccessLevel.SYSTEM_MODE)`) — bypasses the connected user's FLS/CRUD, so
- *      managed-package data is returned intact. Requires the helper to be
- *      deployed (consent-gated).
- *   2. USER MODE via anonymous Apex (`Database.query(soql)`) — when the helper
- *      isn't available (declined / deploy failed / older org).
- *   3. USER MODE via the REST Query API — when the Apex path can't run at all.
+ * DEFAULT is USER MODE via the REST Query API (`sf data query`) — it creates NO debug
+ * log and deploys nothing, so it's the right choice for locked-down customer orgs. It
+ * returns every field the connected user can see.
+ *
+ * SYSTEM MODE (deployed `without sharing` helper, `AccessLevel.SYSTEM_MODE`) is only
+ * used when the user has explicitly enabled it via the ⚡ toggle AND the helper is
+ * deployed. It bypasses the user's FLS/CRUD so hidden managed-package data is returned.
+ *
  * Returns { records, error, soql, mode }.
  */
 async function _runSoqlOnce(soql) {
-  if (liveOrgAvailable()) {
+  if (liveOrgAvailable() && isSystemModeEnabled()) {
     const org = getActiveOrg();
     let status = 'unavailable';
     try { status = await ensureSystemHelper(org); } catch (_) { /* fall through */ }
@@ -2580,13 +3086,26 @@ async function _runSoqlOnce(soql) {
       const viaSystem = await _runSoqlViaApexSystem(soql);
       if (viaSystem && !viaSystem._apexUnavailable) return viaSystem;
     }
+  }
+  // USER MODE (default): REST Query API — no debug log created.
+  const viaRest = await _runSoqlViaRest(soql);
+  if (viaRest && !viaRest._restUnavailable) return viaRest;
+  // REST itself couldn't run (CLI/auth failure). Anonymous Apex is the only remaining
+  // option, but it needs FINEST logging; only fall back to it when system mode is on
+  // (so user mode never silently starts generating debug logs).
+  if (liveOrgAvailable() && isSystemModeEnabled()) {
     const viaApex = await _runSoqlViaApexUser(soql);
     if (viaApex && !viaApex._apexUnavailable) return viaApex;
   }
-  return _runSoqlViaRest(soql);
+  return viaRest;
 }
 
-/** USER-MODE fetch: a single `sf data query` invocation (REST Query API). */
+/** True when an error string looks like a CLI/auth/connection failure (not a real query error). */
+function _looksLikeCliAuthError(txt) {
+  return /No authorization information|not been authorized|Session expired|INVALID_SESSION|expired access\/refresh token|Could not.*refresh|No such (file|org)|command not found|ENOENT|Cannot read propert|Maximum call stack|timed out|ETIMEDOUT|self.signed|getaddrinfo|ECONNREFUSED/i.test(String(txt || ''));
+}
+
+/** USER-MODE fetch: a single `sf data query` invocation (REST Query API). Creates NO debug log. */
 async function _runSoqlViaRest(soql) {
   const org = getActiveOrg();
   const folder = window.state?.folderPath;
@@ -2594,22 +3113,26 @@ async function _runSoqlViaRest(soql) {
   const cmd = `sf data query --query "${escaped}" --json --target-org ${org.org}`;
   let result = { records: [], error: null, soql, mode: 'user' };
   try {
-    const { stdout, stderr } = await window.congacode.sfExec(cmd, folder, 60000);
+    const { stdout, stderr } = await window.apexStudio.sfExec(cmd, folder, 60000);
     const parsed = parseSfJson(stdout);
     if (parsed && parsed.status === 0 && parsed.result) {
       result.records = (parsed.result.records || []).map(cleanSObject);
     } else {
       result.error = sfErrorText(parsed, stderr, stdout, 'Query failed');
+      // Distinguish a genuine query rejection (return it → namespace retry / 🔒 hint)
+      // from the CLI being unable to run at all (signal a fallback to anonymous Apex).
+      if (!parsed || _looksLikeCliAuthError(result.error)) result._restUnavailable = true;
     }
   } catch (e) {
     result.error = e?.message || String(e);
+    result._restUnavailable = true;
   }
   return result;
 }
 
 /**
  * SYSTEM-MODE fetch: run the query through the deployed helper class
- * (`CongaCodeSystemQuery.ccQuery`, which uses `Database.query(soql,
+ * (`ApexDebugStudioSystemQuery.ccQuery`, which uses `Database.query(soql,
  * AccessLevel.SYSTEM_MODE)`), invoked from a thin anonymous Apex wrapper. Because
  * the query executes inside a compiled `without sharing` class, it bypasses the
  * connected user's object/field permissions — so managed-package data the user
@@ -2625,6 +3148,11 @@ async function _runSoqlViaRest(soql) {
 async function _runSoqlViaApexSystem(soql) {
   const org = getActiveOrg();
   if (!org) return { _apexUnavailable: true };
+  // Anonymous Apex only yields our result markers when FINEST logging is on for the
+  // running user. Warm it on demand (cached) so this works even if the proactive
+  // warm-up didn't run (e.g. system mode was enabled mid-session).
+  await ensureFinestLogging(org.org);
+  debugState._generatedOrgLogs = true;
   // Escape for an Apex single-quoted literal. escapeApexString also converts raw
   // newlines to \n — critical because the source SOQL is often multi-line
   // (e.g. ConfigRequest.getRequestSO), and raw newlines make the wrapper fail to
@@ -2645,12 +3173,12 @@ async function _runSoqlViaApexSystem(soql) {
     `System.debug(LoggingLevel.ERROR, '__CC_SOQLERR__' + ccErr);`,
   ].join('\n');
   try {
-    const paths = await window.congacode.getPaths?.();
-    const dir = paths?.congacodeDir || paths?.home || '.';
+    const paths = await window.apexStudio.getPaths?.();
+    const dir = paths?.appDataDir || paths?.home || '.';
     const tmpFile = `${dir}/.cc_debug_soql_sys.apex`;
-    await window.congacode.writeFile(tmpFile, apex);
+    await window.apexStudio.writeFile(tmpFile, apex);
     const cmd = `sf apex run --file "${tmpFile}" --json --target-org ${org.org}`;
-    const { stdout, stderr } = await window.congacode.sfExec(cmd, window.state?.folderPath, 60000);
+    const { stdout, stderr } = await window.apexStudio.sfExec(cmd, window.state?.folderPath, 60000);
     const cli = parseSfJson(stdout);
     if (!cli) return { _apexUnavailable: true };
     const res = (cli.result || cli.data) || {};
@@ -2693,6 +3221,9 @@ async function _runSoqlViaApexSystem(soql) {
 async function _runSoqlViaApexUser(soql) {
   const org = getActiveOrg();
   if (!org) return { _apexUnavailable: true };
+  // Needs FINEST markers — warm on demand (cached) so it works without the proactive warm-up.
+  await ensureFinestLogging(org.org);
+  debugState._generatedOrgLogs = true;
   // Escape for embedding inside an Apex single-quoted string literal.
   // escapeApexString also converts raw newlines to \n so multi-line SOQL still
   // compiles inside the anonymous wrapper.
@@ -2711,12 +3242,12 @@ async function _runSoqlViaApexUser(soql) {
     `System.debug(LoggingLevel.ERROR, '__CC_SOQLERR__' + ccErr);`,
   ].join('\n');
   try {
-    const paths = await window.congacode.getPaths?.();
-    const dir = paths?.congacodeDir || paths?.home || '.';
+    const paths = await window.apexStudio.getPaths?.();
+    const dir = paths?.appDataDir || paths?.home || '.';
     const tmpFile = `${dir}/.cc_debug_soql.apex`;
-    await window.congacode.writeFile(tmpFile, apex);
+    await window.apexStudio.writeFile(tmpFile, apex);
     const cmd = `sf apex run --file "${tmpFile}" --json --target-org ${org.org}`;
-    const { stdout, stderr } = await window.congacode.sfExec(cmd, window.state?.folderPath, 60000);
+    const { stdout, stderr } = await window.apexStudio.sfExec(cmd, window.state?.folderPath, 60000);
     const cli = parseSfJson(stdout);
     if (!cli) return { _apexUnavailable: true };
     const res = (cli.result || cli.data) || {};
@@ -2742,14 +3273,64 @@ async function _runSoqlViaApexUser(soql) {
 }
 
 /**
+ * Describe an SObject via the REST/Tooling describe API (`sf sobject describe`).
+ * Creates NO debug log and needs nothing deployed — the preferred path. Maps the
+ * REST field metadata onto the exact shape the engine consumes (see
+ * callDescribeFieldResultMethod in apexengine.js). Returns { fields, names, label,
+ * prefix, plural, obj, error } or a `_restUnavailable` marker on CLI/auth failure.
+ */
+async function _runDescribeViaRest(sobjectName) {
+  const org = getActiveOrg();
+  if (!org) return { error: 'no org' };
+  const folder = window.state?.folderPath;
+  const cmd = `sf sobject describe --sobject ${sobjectName} --json --target-org ${org.org}`;
+  try {
+    const { stdout, stderr } = await window.apexStudio.sfExec(cmd, folder, 60000);
+    const parsed = parseSfJson(stdout);
+    if (!parsed || parsed.status !== 0 || !parsed.result) {
+      const error = sfErrorText(parsed, stderr, stdout, 'Describe failed');
+      return { error, _restUnavailable: (!parsed || _looksLikeCliAuthError(error)) };
+    }
+    const d = parsed.result;
+    const fields = (Array.isArray(d.fields) ? d.fields : []).map(f => ({
+      name: f.name, label: f.label, type: f.type,
+      custom: !!f.custom, html: !!f.htmlFormatted, calc: !!f.calculated,
+      precision: f.precision || 0, scale: f.scale || 0, length: f.length || 0,
+      nillable: !!f.nillable, defaultValue: (f.defaultValue !== undefined ? f.defaultValue : null),
+      referenceTo: Array.isArray(f.referenceTo) ? f.referenceTo.slice() : [],
+      nameField: !!f.nameField, unique: !!f.unique, externalId: !!f.externalId,
+      updateable: !!f.updateable, createable: !!f.createable, sortable: !!f.sortable,
+      filterable: !!f.filterable, relationshipName: f.relationshipName || null,
+      picklist: (Array.isArray(f.picklistValues) ? f.picklistValues : []).map(pe => ({
+        label: pe.label, value: pe.value, active: !!pe.active, default: !!pe.defaultValue,
+      })),
+    }));
+    const names = fields.map(f => f.name).filter(Boolean);
+    const obj = {
+      accessible: d.accessible !== false, createable: !!d.createable, updateable: !!d.updateable,
+      deletable: !!d.deletable, queryable: d.queryable !== false, searchable: !!d.searchable,
+      mergeable: !!d.mergeable, custom: !!d.custom, customSetting: !!d.customSetting,
+      feedEnabled: !!d.feedEnabled, undeletable: !!d.undeletable,
+    };
+    return { fields, names, label: d.label || sobjectName, prefix: d.keyPrefix || '', plural: d.labelPlural || sobjectName, obj, error: names.length ? null : 'no fields' };
+  } catch (e) {
+    return { error: e?.message || String(e), _restUnavailable: true };
+  }
+}
+
+/**
  * Describe an SObject in the connected org via anonymous Apex, returning REAL
  * field API names (+ label / key prefix). Uses the same FINEST-log marker
  * mechanism as the SOQL fetch. No fabrication: if the type can't be described,
- * returns an error and an empty field list.
+ * returns an error and an empty field list. Fallback only — prefer _runDescribeViaRest
+ * (no debug log). Used for FLS-hidden fields when system mode is on.
  */
 async function _runDescribeViaApex(sobjectName) {
   const org = getActiveOrg();
   if (!org) return { error: 'no org' };
+  // Needs FINEST markers — warm on demand (cached).
+  await ensureFinestLogging(org.org);
+  debugState._generatedOrgLogs = true;
   const esc = String(sobjectName).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   const apex = [
     `List<Map<String,Object>> ccFields = new List<Map<String,Object>>();`,
@@ -2788,12 +3369,12 @@ async function _runDescribeViaApex(sobjectName) {
     `System.debug(LoggingLevel.ERROR, '__CC_DESCERR__' + ccErr);`,
   ].join('\n');
   try {
-    const paths = await window.congacode.getPaths?.();
-    const dir = paths?.congacodeDir || paths?.home || '.';
+    const paths = await window.apexStudio.getPaths?.();
+    const dir = paths?.appDataDir || paths?.home || '.';
     const tmpFile = `${dir}/.cc_debug_desc.apex`;
-    await window.congacode.writeFile(tmpFile, apex);
+    await window.apexStudio.writeFile(tmpFile, apex);
     const cmd = `sf apex run --file "${tmpFile}" --json --target-org ${org.org}`;
-    const { stdout } = await window.congacode.sfExec(cmd, window.state?.folderPath, 60000);
+    const { stdout } = await window.apexStudio.sfExec(cmd, window.state?.folderPath, 60000);
     const cli = parseSfJson(stdout);
     if (!cli) return { error: 'CLI unavailable' };
     const res = (cli.result || cli.data) || {};
@@ -2824,8 +3405,8 @@ async function getPackageNamespace() {
   debugState._namespace = null;
   try {
     const folder = window.state?.folderPath;
-    if (folder && window.congacode?.readFile) {
-      const txt = await window.congacode.readFile(`${folder}/sfdx-project.json`);
+    if (folder && window.apexStudio?.readFile) {
+      const txt = await window.apexStudio.readFile(`${folder}/sfdx-project.json`);
       const j = JSON.parse(txt);
       if (j && j.namespace) debugState._namespace = j.namespace;
     }
@@ -2844,7 +3425,7 @@ async function getOrgUserInfo() {
   if (!org) { debugState._orgUserInfo = null; return null; }
   try {
     const folder = window.state?.folderPath;
-    const { stdout } = await window.congacode.sfExec(
+    const { stdout } = await window.apexStudio.sfExec(
       `sf org display user --json --target-org ${org.org}`, folder, 60000);
     const parsed = parseSfJson(stdout);
     if (!parsed || parsed.status !== 0 || !parsed.result) {
@@ -2857,6 +3438,7 @@ async function getOrgUserInfo() {
       username: r.username,
       orgId: r.orgId,
       profileId: r.profileId,
+      profileName: r.profileName,
       alias: r.alias,
     };
     debugState._orgUserInfo = ui;
@@ -2929,11 +3511,68 @@ function stripColumnFromSoql(soql, col) {
 }
 
 /** Prefix unqualified custom (__c/__r/__mdt/…) API names in a SOQL string with the namespace. */
-function applyNamespaceToSoql(soql, ns) {
+/**
+ * Set of REAL API names (fields + relationship names, lowercased) for an object
+ * in the connected org, used to decide whether a `__c`/`__r` token actually needs
+ * the package namespace. Locally-added custom fields on a managed object carry NO
+ * namespace (e.g. `RG_Rollup_Summary_Test__c` on `Apttus_Config2__ProductConfiguration__c`),
+ * so they must never be prefixed. Returns null when the object can't be described
+ * (caller then falls back to the blind prefix). Cached per org+object.
+ */
+async function getOrgFieldNameSet(objectName) {
+  if (!objectName) return null;
+  const org = getActiveOrg();
+  if (!org || !org.org) return null;
+  if (!debugState._fieldNameSets) debugState._fieldNameSets = new Map();
+  const cacheKey = `${org.org}::${String(objectName).toLowerCase()}`;
+  if (debugState._fieldNameSets.has(cacheKey)) return debugState._fieldNameSets.get(cacheKey);
+
+  const collect = (r) => {
+    if (!r || !Array.isArray(r.fields) || !r.fields.length) return null;
+    const set = new Set();
+    for (const f of r.fields) {
+      if (f.name) set.add(String(f.name).toLowerCase());
+      if (f.relationshipName) set.add(String(f.relationshipName).toLowerCase());
+    }
+    return set;
+  };
+
+  let set = collect(await _runDescribeViaRest(objectName));
+  // The object name itself may need the package prefix to resolve (bare source name
+  // against a managed-package org). Retry the describe with the namespace once.
+  if (!set && String(objectName).split('__').length < 3) {
+    const ns = await getPackageNamespace();
+    if (ns) set = collect(await _runDescribeViaRest(`${ns}__${objectName}`));
+  }
+  debugState._fieldNameSets.set(cacheKey, set || null);
+  return set || null;
+}
+
+/**
+ * Apply the managed-package namespace to a SOQL query — but ONLY to tokens that
+ * genuinely need it. A `__c`/`__r` token is left untouched when it is already
+ * namespaced OR when it is a real (unprefixed) field/relationship on the queried
+ * object per the org describe (i.e. a locally-added custom field). Only bare
+ * tokens that do NOT exist unprefixed get the namespace — that's the managed-package
+ * field case the retry is meant to fix. Falls back to the blind prefix only when the
+ * object can't be described.
+ */
+async function applyNamespaceToSoql(soql, ns) {
   if (!ns) return soql;
   const nsPrefix = ns.toLowerCase() + '__';
+  const fromM = String(soql).match(/\bFROM\s+([A-Za-z0-9_]+)/i);
+  const fieldSet = fromM ? await getOrgFieldNameSet(fromM[1]) : null;
   return soql.replace(/\b(\w+?)__(c|r|mdt|e|b|x|share|history|kav)\b/gi, (full) => {
-    if (full.toLowerCase().startsWith(nsPrefix)) return full; // already namespaced
+    const lower = full.toLowerCase();
+    if (lower.startsWith(nsPrefix)) return full;      // already namespaced
+    // Known real field/relationship on the object (e.g. a local custom field with
+    // no namespace) — must NOT be prefixed.
+    if (fieldSet && fieldSet.has(lower)) return full;
+    // No describe available → fall back to the original blind prefix so we don't
+    // regress bare-managed-name source queries when the org can't be described.
+    if (!fieldSet) return ns + '__' + full;
+    // Describe available and the bare name isn't a real field → it needs the
+    // package namespace (a managed-package field written without its prefix).
     return ns + '__' + full;
   });
 }
@@ -3293,13 +3932,13 @@ async function ensureFinestLogging(orgAlias) {
 /**
  * The real trace-flag setup (uncached). Parallelizes the two independent lookups
  * (running user's Id vs. our FINEST DebugLevel) and REUSES an existing non-expired
- * CongaCodeFinest DEVELOPER_LOG trace flag instead of delete+recreating one every
+ * ApexDebugStudioFinest DEVELOPER_LOG trace flag instead of delete+recreating one every
  * time. Only touches debug metadata (DebugLevel / TraceFlag) — never business data.
  * `entry` is mutated with the resolved userId / debugLevelId / expiresAt for caching.
  */
 async function _ensureFinestLoggingUncached(orgAlias, entry) {
   const folder = window.state?.folderPath;
-  const run = (cmd) => window.congacode.sfExec(cmd, folder, 60000);
+  const run = (cmd) => window.apexStudio.sfExec(cmd, folder, 60000);
   const jparse = (s) => parseSfJson(s);
   try {
     // (a) Resolve the running user's Id and (b) find/create the FINEST DebugLevel in
@@ -3317,10 +3956,10 @@ async function _ensureFinestLoggingUncached(orgAlias, entry) {
       if (entry.debugLevelId) return entry.debugLevelId;
       // ApexCode=FINEST is what emits the STATEMENT_EXECUTE + VARIABLE_ASSIGNMENT
       // events the replay engine needs.
-      const dlq = jparse((await run(`sf data query --use-tooling-api --json --target-org ${orgAlias} -q "SELECT Id FROM DebugLevel WHERE DeveloperName = 'CongaCodeFinest'"`)).stdout);
+      const dlq = jparse((await run(`sf data query --use-tooling-api --json --target-org ${orgAlias} -q "SELECT Id FROM DebugLevel WHERE DeveloperName = 'ApexDebugStudioFinest'"`)).stdout);
       let id = dlq?.result?.records?.[0]?.Id;
       if (!id) {
-        const created = jparse((await run(`sf data create record --use-tooling-api --sobject DebugLevel --target-org ${orgAlias} --json --values "DeveloperName=CongaCodeFinest MasterLabel=CongaCodeFinest ApexCode=FINEST ApexProfiling=NONE Callout=NONE Database=FINEST System=FINE Validation=NONE Visualforce=NONE Workflow=NONE"`)).stdout);
+        const created = jparse((await run(`sf data create record --use-tooling-api --sobject DebugLevel --target-org ${orgAlias} --json --values "DeveloperName=ApexDebugStudioFinest MasterLabel=ApexDebugStudioFinest ApexCode=FINEST ApexProfiling=NONE Callout=NONE Database=FINEST System=FINE Validation=NONE Visualforce=NONE Workflow=NONE"`)).stdout);
         id = created?.result?.id;
       } else {
         // Ensure a pre-existing level is really at FINEST (it may have been created
@@ -3349,13 +3988,18 @@ async function _ensureFinestLoggingUncached(orgAlias, entry) {
       return true;
     }
 
-    // No usable flag → clear stale ones and create a fresh 1h flag.
+    // No usable flag → clear stale ones and create a fresh SHORT-lived flag. We keep the
+    // window small on purpose: a DEVELOPER_LOG trace flag makes the org capture a debug log
+    // for EVERYTHING this user does until it expires, so a 1-hour flag was the main cause of
+    // the "debug-log flood". System-mode reads warm this on demand and reuse it (see the
+    // SAFETY window in ensureFinestLogging), so a short lifetime is enough for a read burst
+    // while dramatically shrinking how much of the user's activity gets logged.
     for (const tf of flags) {
       await run(`sf data delete record --use-tooling-api --sobject TraceFlag --record-id ${tf.Id} --target-org ${orgAlias} --json`);
     }
     const now = new Date();
     const start = now.toISOString();
-    const expMs = now.getTime() + 60 * 60 * 1000;
+    const expMs = now.getTime() + 12 * 60 * 1000; // 12 min (was 60) — on-demand reads renew it as needed
     const exp = new Date(expMs).toISOString();
     const created = jparse((await run(`sf data create record --use-tooling-api --sobject TraceFlag --target-org ${orgAlias} --json --values "TracedEntityId=${userId} DebugLevelId=${dlId} LogType=DEVELOPER_LOG StartDate=${start} ExpirationDate=${exp}"`)).stdout);
     const ok = !!(created?.result?.id);
@@ -3365,23 +4009,85 @@ async function _ensureFinestLoggingUncached(orgAlias, entry) {
 }
 
 /**
- * Kick FINEST-logging setup in the BACKGROUND (fire-and-forget) the moment a debug
- * session starts with a connected org, so the ~7-call trace-flag dance overlaps the
- * user reading code / the engine warming up instead of stalling the first org run.
- * Cached + deduped, so the later run reuses this exact result rather than re-doing it.
+ * Historically this proactively set a FINEST trace flag on every debug-session start so the
+ * first org read was fast. That meant the org started logging ALL of the user's activity the
+ * moment a session opened — a big contributor to the debug-log flood — even if no system-mode
+ * read ever happened. It is now a deliberate NO-OP: trace setup happens strictly ON DEMAND,
+ * only when a system-mode anonymous-Apex read actually runs (every such path calls
+ * ensureFinestLogging itself). User-mode reads use the REST Query API and never trace at all.
  */
 function warmUpLiveOrg() {
+  /* intentionally empty — see doc comment above (on-demand tracing only) */
+}
+
+/**
+ * Delete the connected user's Apex debug logs from the org — the noise this tool's
+ * anonymous-Apex runs generate. Only ever touches ApexLog (debug logs), never business
+ * data, and only the running user's own logs. Uses one anonymous-Apex delete so it's a
+ * single fast call. Returns { ok, deleted?, error? }.
+ */
+async function clearMyDebugLogs(org) {
+  org = org || getActiveOrg();
+  if (!org || !org.org) return { ok: false, error: 'No org connected' };
+  const folder = window.state?.folderPath;
+  const apex = [
+    `List<ApexLog> ccLogs = [SELECT Id FROM ApexLog WHERE LogUserId = :UserInfo.getUserId() LIMIT 10000];`,
+    `Integer ccN = ccLogs.size();`,
+    `String ccErr = '';`,
+    `try { if (!ccLogs.isEmpty()) delete ccLogs; } catch (Exception e) { ccErr = e.getMessage(); }`,
+    `System.debug(LoggingLevel.ERROR, '__CC_LOGDEL__' + ccN);`,
+    `System.debug(LoggingLevel.ERROR, '__CC_LOGDEL_ERR__' + ccErr);`,
+  ].join('\n');
   try {
-    if (!liveOrgAvailable()) return;
-    const org = getActiveOrg();
-    if (org?.org) ensureFinestLogging(org.org);
-  } catch (_) { /* non-fatal */ }
+    await ensureFinestLogging(org.org); // ensures our ERROR markers come back in the run log
+    const paths = await window.apexStudio.getPaths?.();
+    const dir = paths?.appDataDir || paths?.home || '.';
+    const tmpFile = `${dir}/.cc_debug_logdel.apex`;
+    await window.apexStudio.writeFile(tmpFile, apex);
+    const { stdout, stderr } = await window.apexStudio.sfExec(`sf apex run --file "${tmpFile}" --json --target-org ${org.org}`, folder, 60000);
+    const cli = parseSfJson(stdout);
+    const log = ((cli && (cli.result || cli.data)) || {}).logs || '';
+    let n = null, derr = '';
+    for (const line of log.split('\n')) {
+      const pipe = line.split('|');
+      const msg = pipe.length >= 5 ? pipe.slice(4).join('|') : '';
+      if (msg.startsWith('__CC_LOGDEL__')) n = parseInt(msg.slice('__CC_LOGDEL__'.length), 10);
+      else if (msg.startsWith('__CC_LOGDEL_ERR__')) derr = msg.slice('__CC_LOGDEL_ERR__'.length);
+    }
+    if (derr) return { ok: false, error: derr };
+    if (n == null || Number.isNaN(n)) return { ok: false, error: sfErrorText(cli, stderr, stdout, 'Could not clear debug logs') };
+    debugState._generatedOrgLogs = false;
+    return { ok: true, deleted: n };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+/** UI handler for the "🧹 Clear logs" button — clears the user's debug logs + reports. */
+async function clearDebugLogsFromUi() {
+  const org = getActiveOrg();
+  if (!org || !org.org) { window.showToast?.('Connect an org first', 'warn'); return; }
+  const btn = document.getElementById('sf-clearlogs');
+  const prev = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Clearing…'; }
+  addConsoleEntry('info', `🧹 Clearing this tool's Apex debug logs on ${org.info?.alias || org.org}…`);
+  renderConsolePanel();
+  const res = await clearMyDebugLogs(org);
+  if (res.ok) {
+    addConsoleEntry('info', `✓ Cleared ${res.deleted} debug log${res.deleted === 1 ? '' : 's'} from the org.`);
+    window.showToast?.(`Cleared ${res.deleted} debug log${res.deleted === 1 ? '' : 's'}`, 'success');
+  } else {
+    addConsoleEntry('error', `Could not clear debug logs: ${res.error}`);
+    window.showToast?.('Could not clear debug logs', 'error');
+  }
+  renderConsolePanel();
+  if (btn) { btn.disabled = false; btn.textContent = prev || '🧹 Clear logs'; }
 }
 
 /** Fetch the most recent Apex debug log body from the org (used to get FINEST detail). */
 async function fetchLatestApexLog(orgAlias) {
   const folder = window.state?.folderPath;
-  const run = (cmd) => window.congacode.sfExec(cmd, folder, 60000);
+  const run = (cmd) => window.apexStudio.sfExec(cmd, folder, 60000);
   try {
     const list = parseSfJson((await run(`sf apex log list --json --target-org ${orgAlias}`)).stdout);
     const recs = list?.result || [];
@@ -3405,7 +4111,7 @@ async function fetchLatestApexLog(orgAlias) {
  */
 async function fetchLatestApexLogRaw(orgAlias) {
   const folder = window.state?.folderPath;
-  const run = (cmd) => window.congacode.sfExec(cmd, folder, 90000);
+  const run = (cmd) => window.apexStudio.sfExec(cmd, folder, 90000);
   try {
     let id = null;
     // The log LIST is metadata only (no bodies) so --json is small and safe here.
@@ -3489,7 +4195,7 @@ async function runEntryMethodInOrg() {
   const filePath = debugState.entryFile;
   const methodName = debugState.entryMethod;
   const org = getActiveOrg();
-  const source = await window.congacode.readFile(filePath);
+  const source = await window.apexStudio.readFile(filePath);
   if (!source) { window.showToast?.('Could not read entry file', 'error'); return; }
 
   const sig = getEntrySignature(source, methodName);
@@ -3520,13 +4226,13 @@ async function runEntryMethodInOrg() {
   if (!finestOn) addConsoleEntry('info', '⚠ Could not auto-enable FINEST logging (needs "View/Manage All Data" or Tooling access). Stepping may lack variable values.');
 
   try {
-    const paths = await window.congacode.getPaths?.();
-    const dir = paths?.congacodeDir || paths?.home || '.';
+    const paths = await window.apexStudio.getPaths?.();
+    const dir = paths?.appDataDir || paths?.home || '.';
     const tmpFile = `${dir}/.cc_debug_run.apex`;
-    await window.congacode.writeFile(tmpFile, apex);
+    await window.apexStudio.writeFile(tmpFile, apex);
 
     const cmd = `sf apex run --file "${tmpFile}" --json --target-org ${org.org}`;
-    const { stdout, stderr } = await window.congacode.sfExec(cmd, window.state?.folderPath, 180000);
+    const { stdout, stderr } = await window.apexStudio.sfExec(cmd, window.state?.folderPath, 180000);
 
     let cli = parseSfJson(stdout);
     if (!cli) {
@@ -3611,7 +4317,7 @@ async function runEntryMethodInOrg() {
           } else if (!finestOn) {
             addConsoleEntry('error', '⚠ FINEST logging is not enabled for the running user, so the real execution can\'t be reconstructed. It needs the "View All Data"/Tooling permission to auto-enable, or set the running user\'s Apex debug level to FINEST (ApexCode=FINEST) in Setup → Debug Logs, then Restart.');
           } else if (logForReplay) {
-            addConsoleEntry('info', `⚠ The org log came back without step detail (${logForReplay.length}b). Replay needs STATEMENT_EXECUTE + VARIABLE_ASSIGNMENT (ApexCode=FINEST). Confirm the CongaCodeFinest debug level is FINEST and Restart.`);
+            addConsoleEntry('info', `⚠ The org log came back without step detail (${logForReplay.length}b). Replay needs STATEMENT_EXECUTE + VARIABLE_ASSIGNMENT (ApexCode=FINEST). Confirm the ApexDebugStudioFinest debug level is FINEST and Restart.`);
           } else {
             addConsoleEntry('info', '⚠ The org returned an empty log. If the method compiled, enable FINEST for the running user and Restart.');
           }
@@ -5127,7 +5833,7 @@ async function stepIntoMethod(className, methodName, argsRaw, currentFrame, assi
   if (!filePath) return false;
 
   try {
-    const source = await window.congacode.readFile(filePath);
+    const source = await window.apexStudio.readFile(filePath);
     const methodInfo = findMethodInSource(source, methodName);
     if (!methodInfo) return false;
 
@@ -5414,7 +6120,7 @@ function _lineSnippet(filePath, line) {
   return '';
 }
 
-const DBG_BREAKPOINTS_KEY = 'congacode.debug.breakpoints.v1';
+const DBG_BREAKPOINTS_KEY = 'apexstudio.debug.breakpoints.v1';
 
 /** Persist all breakpoints (condition, logpoint, enabled state, snippet) so they
  *  survive app restarts — the user keeps their breakpoints across days until they
@@ -5905,7 +6611,7 @@ function setDebugBusyUI() {
    user can also drag it anywhere by the "⠿ DEBUGGING" grip, and the position is
    remembered across sessions.
    ---------------------------------------------------------------- */
-const DBG_TOOLBAR_POS_KEY = 'congacode.dbgToolbarPos';
+const DBG_TOOLBAR_POS_KEY = 'apexstudio.dbgToolbarPos';
 
 function _clampToolbarPos(left, top, el) {
   const w = el.offsetWidth || 320;
@@ -6121,7 +6827,7 @@ function revealPauseLocation(line, switchedFile) {
 }
 
 async function navigateToFile(filePath, line) {
-  const content = await window.congacode.readFile(filePath);
+  const content = await window.apexStudio.readFile(filePath);
   await window.openFile(filePath, content);
   // Wait for model to be set, then apply decorations
   setTimeout(() => {
@@ -6252,6 +6958,8 @@ function showDebugUI() {
   debugState.debugPanelVisible = true;
   _$('#debug-toolbar')?.classList.remove('hidden');
   _$('#debug-panel')?.classList.remove('hidden');
+  // The panel is on screen now — hide the status-bar "reopen" affordance.
+  _$('#status-reopen-debug')?.classList.add('hidden');
   // Make the toolbar draggable and restore its remembered (or centred) position.
   initDebugToolbarDrag();
   positionDebugToolbar();
@@ -6266,6 +6974,9 @@ function hideDebugUI() {
   debugState.debugPanelVisible = false;
   _$('#debug-toolbar')?.classList.add('hidden');
   _$('#debug-panel')?.classList.add('hidden');
+  // Surface a one-click way to bring the panel back (the close button is the only
+  // way to get here, so the user explicitly hid it — don't strand its output).
+  _$('#status-reopen-debug')?.classList.remove('hidden');
   clearCurrentLineHighlight();
   // Restore editor layout
   setTimeout(() => window.state?.editor?.layout(), 50);
@@ -6275,6 +6986,7 @@ function updateDebugPanels() {
   applyUserOverridesToStack();
   renderVariablesPanel();
   renderWatchPanel();
+  renderDataFlowPanel();
   renderCallStackPanel();
   renderConsolePanel();
   renderBreakpointsPanel();
@@ -6436,12 +7148,385 @@ function renderVariablesPanel() {
   container.innerHTML = html;
 }
 
+/* ================================================================
+   WATCH BY IDENTITY · WATCH-WITH-HISTORY · DATA FLOW
+   ----------------------------------------------------------------
+   Pin a live engine object/field from the hover value-tree and follow it BY
+   REFERENCE (not by position) for the rest of the run — so a value buried inside
+   a huge collection stays tracked even as the collection churns. Record a
+   delta-only history of its field changes and a deduped data-flow of which
+   methods read vs modify it. Every value is a real engine capture — nothing here
+   is fabricated. Fed by the engine's field observer (host.onFieldWrite/Read).
+   ================================================================ */
+
+function _watchE() { return window.ApexEngine; }
+// The engine's current top frame (the pin's bind scope), or null when not running.
+function _watchTopFrame() {
+  const eng = debugState.engineSession;
+  return eng && eng.topFrame ? eng.topFrame() : null;
+}
+
+// Compact, IMMUTABLE snapshot of a value for a history row, so later mutations of
+// the live object never rewrite what the timeline already showed. Primitives are
+// kept as-is; objects/containers collapse to a short type label.
+function _watchDispSnapshot(v) {
+  const E = _watchE();
+  if (v === null || v === undefined) return null;
+  const t = typeof v;
+  if (t === 'string' || t === 'number' || t === 'boolean') return v;
+  if (Array.isArray(v)) return `List(${v.length})`;
+  if (E) {
+    if (v instanceof E.ApexObject) {
+      const cls = v.classInfo && (v.classInfo.name || v.classInfo.qualifiedName);
+      return `${cls || 'Object'} {${v.fields ? v.fields.size : 0}}`;
+    }
+    if (v instanceof E.ApexMap) return `Map (${v.m ? v.m.size : 0})`;
+    if (v instanceof E.ApexSet) return `Set (${v.items ? v.items().length : 0})`;
+  }
+  try { return String(E && E.toApexString ? E.toApexString(v) : v); } catch (_) { return '‹value›'; }
+}
+
+// Did the value REALLY change? Apex equality for values, reference identity for
+// objects/containers — so re-assigning the same object is not a "delta".
+function _watchSameValue(a, b) {
+  if (a === b) return true;
+  if (a && typeof a === 'object') return false;  // objects: identity only
+  const E = _watchE();
+  if (E && E.apexEquals) { try { return E.apexEquals(a, b) === true; } catch (_) {} }
+  return false;
+}
+
+function _watchMethodKey(ev) { return `${ev.className || '?'}.${ev.methodName || '?'}`; }
+
+// Human type label for a pin. Prefer the real Apex class/container name for engine
+// values (ApexObject/Map/Set); fall back to the generic hover type namer otherwise.
+function _watchTypeName(v) {
+  const E = _watchE();
+  if (E && v && typeof v === 'object') {
+    if (v instanceof E.ApexObject) return (v.classInfo && (v.classInfo.name || v.classInfo.qualifiedName)) || 'Object';
+    if (v instanceof E.ApexMap) return `Map (${v.m ? v.m.size : 0})`;
+    if (v instanceof E.ApexSet) return `Set (${v.items ? v.items().length : 0})`;
+  }
+  try { return getValueTypeName(v, null); } catch (_) { return 'value'; }
+}
+
+/* ---- capture (host.onFieldWrite / onFieldRead) ---- */
+function recordFieldWrite(ev) {
+  if (ev == null || ev.watchId == null || !debugState.trackedObjects.has(ev.watchId)) return;
+  // Watch WITH HISTORY — delta-only: record only genuine value changes.
+  if (!_watchSameValue(ev.oldValue, ev.newValue)) {
+    const arr = debugState.watchHistory.get(ev.watchId) || [];
+    arr.push({
+      seq: arr.length, field: ev.field,
+      oldDisp: _watchDispSnapshot(ev.oldValue), newDisp: _watchDispSnapshot(ev.newValue),
+      step: ev.step, line: ev.line, file: ev.file, className: ev.className, methodName: ev.methodName,
+    });
+    if (arr.length > debugState._watchHistoryCap) arr.shift();
+    debugState.watchHistory.set(ev.watchId, arr);
+  }
+  _recordDataFlow(ev, 'write');
+  _scheduleWatchRefresh();
+}
+
+function recordFieldRead(ev) {
+  if (ev == null || ev.watchId == null || !debugState.trackedObjects.has(ev.watchId)) return;
+  _recordDataFlow(ev, 'read');
+}
+
+// Deduped per (method|object|access); repeat accesses just bump the count so the
+// event stream stays O(methods × tracked objects) no matter how hot the code is.
+function _recordDataFlow(ev, access) {
+  const df = debugState.dataFlow;
+  const mkey = _watchMethodKey(ev);
+  const dedup = `${mkey}|${ev.watchId}|${access}`;
+  const idx = df.seen.get(dedup);
+  if (idx != null) { df.events[idx].count++; return; }
+  df.seen.set(dedup, df.events.length);
+  df.events.push({
+    watchId: ev.watchId, methodKey: mkey, className: ev.className, methodName: ev.methodName,
+    file: ev.file, line: ev.line, access, count: 1, firstStep: ev.step,
+  });
+}
+
+/* ---- registration (hover pin / watch tab) ---- */
+// Ensure a LIVE object is tracked by identity; returns its watchId (reused if
+// already tracked, assigned on first sight). Enforces the tracked-object cap.
+function _watchEnsureTracked(obj) {
+  const E = _watchE();
+  if (!obj || typeof obj !== 'object') return null;
+  if (obj.__watchId != null && debugState.trackedObjects.has(obj.__watchId)) return obj.__watchId;
+  if (debugState.trackedObjects.size >= debugState._watchTrackedCap) {
+    window.showToast?.(`Watch limit reached (${debugState._watchTrackedCap}). Remove one to pin another.`);
+    return null;
+  }
+  const watchId = debugState.watchNextObjId++;
+  if (E && E.trackObject) E.trackObject(obj, watchId); else { obj.__tracked = true; obj.__watchId = watchId; }
+  debugState.trackedObjects.set(watchId, { obj });
+  return watchId;
+}
+
+// Add a watch pin. kind 'object' follows the whole object; kind 'field' focuses a
+// single field of it (its timeline is filtered to that field). Several field pins
+// can share one tracked object identity. Returns the pin (or an existing duplicate).
+function watchAddPin(obj, meta) {
+  const watchId = _watchEnsureTracked(obj);
+  if (watchId == null) return null;
+  const kind = (meta && meta.kind) || 'object';
+  const field = (meta && meta.field) != null ? meta.field : null;
+  const dup = debugState.watchPins.find(p => p.watchId === watchId && p.kind === kind && (p.field || null) === field);
+  if (dup) return dup;
+  const pin = {
+    id: debugState.watchNextId++, watchId, kind, field,
+    label: (meta && meta.label) || 'value', typeName: meta && meta.typeName,
+    path: (meta && meta.path) || null, bindExpr: (meta && meta.bindExpr) || null, _bound: true,
+    watchChain: [watchId], replacements: [], _bindFrame: null, _cleared: false,
+  };
+  debugState.watchPins.push(pin);
+  saveWatchDefs();
+  return pin;
+}
+
+function watchUnpin(pinId) {
+  const i = debugState.watchPins.findIndex(p => p.id === pinId);
+  if (i < 0) return;
+  const pin = debugState.watchPins[i];
+  debugState.watchPins.splice(i, 1);
+  // Drop the tracked object + its history only if no other pin still references it.
+  if (pin.watchId != null && !debugState.watchPins.some(p => p.watchId === pin.watchId)) {
+    const tr = debugState.trackedObjects.get(pin.watchId);
+    if (tr && tr.obj) { const E = _watchE(); if (E && E.untrackObject) E.untrackObject(tr.obj); }
+    debugState.trackedObjects.delete(pin.watchId);
+    debugState.watchHistory.delete(pin.watchId);
+    if (debugState.dataFlow.focusWatchId === pin.watchId) debugState.dataFlow.focusWatchId = null;
+  }
+  saveWatchDefs();
+  updateDebugPanels();
+}
+
+// Is a live reference already pinned?
+function watchIsTracked(obj) {
+  return !!(obj && typeof obj === 'object' && obj.__watchId != null && debugState.trackedObjects.has(obj.__watchId));
+}
+
+/* ---- per-run reset (keeps persisted definitions) ---- */
+function resetWatchRuntime() {
+  debugState.trackedObjects = new Map();
+  debugState.watchHistory = new Map();
+  debugState.dataFlow = { events: [], seen: new Map(), focusWatchId: null };
+  // Unbind identity pins — the previous run's object refs are gone. The pin
+  // DEFINITIONS (path/label/kind) survive so they can re-bind by path this run.
+  for (const p of debugState.watchPins) {
+    p.watchId = null; p._bound = false; p._cleared = false;
+    p.watchChain = []; p.replacements = []; p._bindFrame = null;
+  }
+}
+
+/* ---- throttled repaint (field writes can stream fast during a free run) ---- */
+let _watchRefreshTimer = null;
+function _scheduleWatchRefresh() {
+  if (_watchRefreshTimer) return;
+  _watchRefreshTimer = setTimeout(() => {
+    _watchRefreshTimer = null;
+    try { renderWatchPanel(); } catch (_) {}
+    try { renderDataFlowPanel(); } catch (_) {}
+  }, 120);
+}
+
+/* ---- persistence of watch DEFINITIONS (expressions + pin re-bind exprs) ----
+   We persist only DEFINITIONS, never live object refs or per-run history/watchIds.
+   On a new run each pin re-binds by evaluating its expression at a pause. */
+function saveWatchDefs() {
+  try {
+    const defs = {
+      exprs: debugState.watchExpressions.map(w => w.expr),
+      pins: debugState.watchPins
+        .filter(p => p.bindExpr)
+        .map(p => ({ kind: p.kind, field: p.field, label: p.label, typeName: p.typeName, bindExpr: p.bindExpr })),
+    };
+    localStorage.setItem('apexstudio.watchDefs', JSON.stringify(defs));
+  } catch (_) { /* storage is best-effort */ }
+}
+
+function loadWatchDefs() {
+  let defs;
+  try { defs = JSON.parse(localStorage.getItem('apexstudio.watchDefs') || 'null'); } catch (_) { defs = null; }
+  if (!defs) return;
+  if (Array.isArray(defs.exprs) && !debugState.watchExpressions.length) {
+    for (const expr of defs.exprs) debugState.watchExpressions.push({ id: debugState.watchNextId++, expr });
+  }
+  if (Array.isArray(defs.pins) && !debugState.watchPins.length) {
+    for (const d of defs.pins) {
+      if (!d || !d.bindExpr) continue;
+      // Restored as UNBOUND definitions — they attach to a live object the first
+      // time their expression resolves at a pause this run (syncWatchPins).
+      debugState.watchPins.push({
+        id: debugState.watchNextId++, watchId: null, kind: d.kind || 'object',
+        field: d.field != null ? d.field : null, label: d.label || d.bindExpr,
+        typeName: d.typeName, path: null, bindExpr: d.bindExpr, _bound: false,
+        watchChain: [], replacements: [], _bindFrame: null, _cleared: false,
+      });
+    }
+  }
+}
+
+// Is this bind expression a STABLE binding — a bare variable or a dotted member
+// path (request, this.cart, ctx.request)? Only stable bindings are followed across
+// REASSIGNMENT. Positional/element paths (request.lineItems[0]) or calls are NOT
+// stable, so those pins stay locked to their instance by identity (position-proof).
+function _isStableBinding(expr) {
+  return typeof expr === 'string' && /^[A-Za-z_$][\w$]*(\s*\.\s*[A-Za-z_$][\w$]*)*$/.test(expr.trim());
+}
+
+// Build the synthetic timeline marker recorded when a watched binding is REASSIGNED
+// to a different object (e.g. `request` becomes a structurally different server
+// response) or cleared to null. It captures WHERE the swap was seen and the old→new
+// type/summary, so the developer can pinpoint where the structure changed.
+function _watchMakeReplaceMarker(eng, oldObj, newObj, cleared) {
+  const top = (eng.topFrame && eng.topFrame()) || null;
+  return {
+    __marker: 'replaced', cleared: !!cleared,
+    oldType: oldObj != null ? _watchTypeName(oldObj) : null,
+    oldDisp: oldObj != null ? _watchDispSnapshot(oldObj) : null,
+    newType: cleared ? 'null' : (newObj != null ? _watchTypeName(newObj) : null),
+    newDisp: cleared ? null : (newObj != null ? _watchDispSnapshot(newObj) : null),
+    file: eng.currentFile || (top && top.file) || null,
+    line: eng.currentLine != null ? eng.currentLine : (top ? top.line : null),
+    step: eng._steps || 0,
+    className: top ? top.className : null, methodName: top ? top.methodName : null,
+  };
+}
+
+// At each pause: (1) bind any unbound pin by evaluating its expression; (2) for an
+// already-bound pin whose STABLE binding now resolves to a DIFFERENT object, record
+// a replacement marker and follow the new object so the timeline stays CONTINUOUS
+// across request→response style transforms. Reassignment-following is restricted to
+// the frame the pin was bound in, so a same-named variable in another method is
+// never mistaken for a reassignment of ours. Sandbox eval → the observer stays
+// silent, so syncing never pollutes history/data-flow. Cheap: pins only, at pause.
+async function syncWatchPins() {
+  if (!debugState.watchPins.length) return;
+  const eng = debugState.engineSession;
+  if (!eng || !debugState.paused) return;
+  const top = eng.topFrame && eng.topFrame();
+  if (!top) return;
+
+  for (const pin of debugState.watchPins) {
+    if (!pin.bindExpr) continue;
+
+    // (1) initial (re-)bind of an unbound pin — attach wherever the path resolves.
+    if (!pin._bound) {
+      let ref;
+      try { ref = await eng.evalExpressionSandboxed(pin.bindExpr, top, false); } catch (_) { ref = undefined; }
+      if (ref && typeof ref === 'object') {
+        const wid = _watchEnsureTracked(ref);
+        if (wid != null) {
+          pin.watchId = wid; pin._bound = true; pin._cleared = false;
+          pin.watchChain = [wid]; pin.replacements = pin.replacements || [];
+          pin._bindFrame = top;
+        }
+      }
+      continue;
+    }
+
+    // (2) reassignment follow — stable bindings only, and only while paused in the
+    // SAME frame the pin was bound in (identity-safe against same-named variables).
+    if (!_isStableBinding(pin.bindExpr) || pin._bindFrame !== top) continue;
+    let ref;
+    try { ref = await eng.evalExpressionSandboxed(pin.bindExpr, top, false); } catch (_) { ref = undefined; }
+    if (ref === undefined) continue;                 // out of scope / unresolved — leave as-is
+    const tr = pin.watchId != null ? debugState.trackedObjects.get(pin.watchId) : null;
+    const cur = tr && tr.obj;
+
+    if (ref === null) {                              // binding was cleared to null
+      if (!pin._cleared && cur) {
+        pin.replacements = pin.replacements || [];
+        pin.replacements.push(_watchMakeReplaceMarker(eng, cur, null, true));
+        pin._cleared = true;
+      }
+      continue;
+    }
+    if (typeof ref !== 'object' || ref === cur) continue;  // primitive or same object — nothing to follow
+
+    // Genuine reassignment to a different object → mark it and follow the new one.
+    const wid = _watchEnsureTracked(ref);
+    if (wid == null) continue;
+    pin.replacements = pin.replacements || [];
+    pin.replacements.push(_watchMakeReplaceMarker(eng, cur, ref, false));
+    if (!(pin.watchChain && pin.watchChain.length)) pin.watchChain = pin.watchId != null ? [pin.watchId] : [];
+    pin.watchChain.push(wid);
+    pin.watchId = wid; pin._cleared = false;
+    // Attribute the swap to the current method in the Data Flow view.
+    try {
+      _recordDataFlow({ watchId: wid, className: top.className, methodName: top.methodName,
+        file: eng.currentFile || top.file, line: eng.currentLine != null ? eng.currentLine : top.line,
+        step: eng._steps }, 'write');
+    } catch (_) {}
+  }
+}
+
+/* ---- Watch tab display helpers (read raw — never through getField, so painting
+   the panel during a free run can't pollute the data-flow with UI reads) ---- */
+function _watchLiveRaw(pin) {
+  // A binding that was reassigned to null reads as null (its history is preserved).
+  if (pin._cleared) return { present: true, value: null };
+  const tr = pin.watchId != null ? debugState.trackedObjects.get(pin.watchId) : null;
+  if (!tr || !tr.obj) return { present: false, value: undefined };
+  if (pin.kind === 'field') {
+    const obj = tr.obj;
+    let value;
+    if (obj.fields && obj.fields.get) { const e = obj.fields.get(String(pin.field).toLowerCase()); value = e ? e.value : undefined; }
+    return { present: true, value };
+  }
+  return { present: true, value: tr.obj };
+}
+
+function _watchValHtml(v) {
+  if (v === undefined) return '<span class="dbg-watch-muted">—</span>';
+  if (v === null) return '<span class="cv-null">null</span>';
+  const t = typeof v;
+  if (t === 'string') return `<span class="cv-str">"${_esc(v.length > 60 ? v.slice(0, 60) + '…' : v)}"</span>`;
+  if (t === 'number') return `<span class="cv-num">${_esc(String(v))}</span>`;
+  if (t === 'boolean') return `<span class="cv-bool">${v}</span>`;
+  return `<span class="dbg-watch-objsum">${_esc(_watchDispSnapshot(v))}</span>`;
+}
+
+function _watchDeltaHtml(d) {
+  if (d === undefined) return '<span class="dbg-watch-muted">undefined</span>';
+  if (d === null) return '<span class="cv-null">null</span>';
+  const t = typeof d;
+  if (t === 'number') return `<span class="cv-num">${_esc(String(d))}</span>`;
+  if (t === 'boolean') return `<span class="cv-bool">${d}</span>`;
+  const s = String(d);
+  return `<span class="cv-str">${_esc(s.length > 44 ? s.slice(0, 44) + '…' : s)}</span>`;
+}
+
+// Merge a pin's timeline across its full chain of tracked identities (it may have
+// followed one or more reassignments), interleaving replacement markers by step so
+// the developer sees a single continuous history even when the object was swapped.
+function _watchPinHistory(pin) {
+  const chain = (pin.watchChain && pin.watchChain.length) ? pin.watchChain
+    : (pin.watchId != null ? [pin.watchId] : []);
+  let rows = [];
+  const seen = new Set();
+  for (const wid of chain) {
+    if (seen.has(wid)) continue; seen.add(wid);
+    let deltas = debugState.watchHistory.get(wid) || [];
+    if (pin.kind === 'field') deltas = deltas.filter(h => (h.field || null) === (pin.field || null));
+    rows = rows.concat(deltas);
+  }
+  if (pin.replacements && pin.replacements.length) rows = rows.concat(pin.replacements);
+  rows.sort((a, b) => (a.step || 0) - (b.step || 0));
+  return rows;
+}
+
 function renderWatchPanel() {
   const container = _$('#dbg-watch-body');
   if (!container) return;
 
-  if (debugState.watchExpressions.length === 0) {
-    container.innerHTML = '<div class="dbg-empty">No watch expressions. Add one below.</div>';
+  const hasExprs = debugState.watchExpressions.length > 0;
+  const hasPins = debugState.watchPins.length > 0;
+  if (!hasExprs && !hasPins) {
+    container.innerHTML = '<div class="dbg-empty">No watches yet. Add an expression below, or hover a value while paused and click 📌 to follow it by identity (live value · history · data flow).</div>';
     return;
   }
 
@@ -6449,58 +7534,246 @@ function renderWatchPanel() {
   const watchScope = frame ? { ...(frame.classFields || {}), ...frame.variables } : {};
 
   let html = '';
-  for (const watch of debugState.watchExpressions) {
-    let value;
-    let error = null;
-    try {
-      if (frame) {
-        // Try resolving as property path first
-        value = resolveProperty(watchScope, watch.expr);
-        if (value === undefined) {
-          value = evaluateExpression(watch.expr, watchScope);
-        }
-      } else {
-        value = undefined;
-      }
-    } catch (e) {
-      error = e.message;
-    }
 
-    html += `<div class="dbg-watch-entry" data-watch-id="${watch.id}">`;
-    html += `<div class="dbg-watch-row">`;
-    html += `<span class="dbg-watch-expr">${_esc(watch.expr)}</span>`;
-    if (error) {
-      html += `<span class="dbg-watch-error">${_esc(error)}</span>`;
-    } else if (value !== undefined && value !== null && typeof value === 'object') {
-      html += `<span class="dbg-watch-val">${formatValue(value)}</span>`;
+  // --- Pinned identity watches (live value + delta history) ---
+  if (hasPins) {
+    html += `<div class="dbg-watch-section">📌 Pinned <span class="dbg-watch-section-hint">⟳ binding follows a variable across reassignment · ⦿ instance follows one object · ${debugState.trackedObjects.size}/${debugState._watchTrackedCap}</span></div>`;
+    for (const pin of debugState.watchPins) {
+      const { present, value } = _watchLiveRaw(pin);
+      const hist = _watchPinHistory(pin);
+      const typeLabel = pin.typeName ? _esc(pin.typeName) : (pin.kind === 'field' ? 'field' : 'object');
+      const follows = pin.bindExpr && _isStableBinding(pin.bindExpr);
+      const modeBadge = follows
+        ? `<span class="dbg-watch-pin-mode follows" title="Follows this variable across reassignment — if it becomes a different object (e.g. request → a server response), the swap is marked in the timeline and watching continues on the new object.">⟳ binding</span>`
+        : `<span class="dbg-watch-pin-mode" title="Locked to this specific object instance and follows it by identity regardless of its position.">⦿ instance</span>`;
+      html += `<div class="dbg-watch-pin${present ? '' : ' unbound'}" data-pin-id="${pin.id}">`;
+      html += `<div class="dbg-watch-pin-row">`;
+      html += `<span class="dbg-watch-pin-icon">${present ? '📍' : '📌'}</span>`;
+      html += `<span class="dbg-watch-pin-label" title="${_esc(pin.label)}">${_esc(pin.label)}</span>`;
+      html += `<span class="dbg-watch-pin-type">${typeLabel}</span>`;
+      html += modeBadge;
+      html += `<span class="dbg-watch-pin-val">${present ? _watchValHtml(value) : '<span class="dbg-watch-muted" title="This object belongs to a previous run — it re-binds when its path is next seen while paused.">waiting for this run</span>'}</span>`;
+      html += `<span class="dbg-watch-pin-hist${hist.length ? '' : ' empty'}" title="Value changes recorded this run — click to see the timeline">🕘 ${hist.length}</span>`;
+      html += `<button class="dbg-watch-pin-flow" title="Show this object in the Data Flow tab">⤳</button>`;
+      html += `<button class="dbg-watch-pin-remove" title="Stop watching">✕</button>`;
       html += `</div>`;
-      html += `<div class="dbg-watch-expand hidden">${renderVariableTree(value, 0, 4)}</div>`;
-    } else {
-      html += `<span class="dbg-watch-val">${formatValue(value)}</span>`;
+      // Inline delta timeline (newest first) — each row jumps to where it changed.
+      html += `<div class="dbg-watch-pin-timeline hidden">`;
+      if (!hist.length) {
+        html += `<div class="dbg-watch-delta-empty">No changes recorded yet${present ? '' : ' (not bound this run)'}.</div>`;
+      } else {
+        for (let i = hist.length - 1; i >= 0; i--) {
+          const h = hist[i];
+          const loc = `${_esc((h.className || '?').split('.').pop())}.${_esc(h.methodName || '?')}:${h.line != null ? h.line : '?'}`;
+          if (h.__marker) {
+            // Reassignment / replacement divider — where the watched object changed.
+            const arrowTo = h.cleared
+              ? '<span class="cv-null">null</span>'
+              : `<span class="dbg-watch-repl-new">${_esc(h.newType || 'object')}</span>`;
+            html += `<div class="dbg-watch-replace" data-file="${_esc(h.file || '')}" data-line="${h.line != null ? h.line : ''}" title="The watched binding was ${h.cleared ? 'cleared to null' : 'reassigned to a different object'} here — click to jump">`;
+            html += `<span class="dbg-watch-repl-icon">⟳</span>`;
+            html += `<span class="dbg-watch-repl-old">${_esc(h.oldType || 'object')}</span>`;
+            html += `<span class="dbg-watch-delta-arrow">→</span>`;
+            html += arrowTo;
+            html += `<span class="dbg-watch-repl-tag">${h.cleared ? 'cleared' : 'replaced'}</span>`;
+            html += `<span class="dbg-watch-delta-loc">${loc}</span>`;
+            html += `</div>`;
+            continue;
+          }
+          html += `<div class="dbg-watch-delta" data-file="${_esc(h.file || '')}" data-line="${h.line != null ? h.line : ''}" title="Jump to where this changed">`;
+          html += `<span class="dbg-watch-delta-field">${_esc(h.field || '')}</span>`;
+          html += `<span class="dbg-watch-delta-old">${_watchDeltaHtml(h.oldDisp)}</span>`;
+          html += `<span class="dbg-watch-delta-arrow">→</span>`;
+          html += `<span class="dbg-watch-delta-new">${_watchDeltaHtml(h.newDisp)}</span>`;
+          html += `<span class="dbg-watch-delta-loc">${loc}</span>`;
+          html += `</div>`;
+        }
+      }
+      html += `</div></div>`;
+    }
+  }
+
+  // --- Expression watches (existing) ---
+  if (hasExprs) {
+    if (hasPins) html += `<div class="dbg-watch-section">🔎 Expressions</div>`;
+    for (const watch of debugState.watchExpressions) {
+      let value;
+      let error = null;
+      try {
+        if (frame) {
+          value = resolveProperty(watchScope, watch.expr);
+          if (value === undefined) value = evaluateExpression(watch.expr, watchScope);
+        } else {
+          value = undefined;
+        }
+      } catch (e) {
+        error = e.message;
+      }
+
+      html += `<div class="dbg-watch-entry" data-watch-id="${watch.id}">`;
+      html += `<div class="dbg-watch-row">`;
+      html += `<span class="dbg-watch-expr">${_esc(watch.expr)}</span>`;
+      if (error) {
+        html += `<span class="dbg-watch-error">${_esc(error)}</span>`;
+      } else if (value !== undefined && value !== null && typeof value === 'object') {
+        html += `<span class="dbg-watch-val">${formatValue(value)}</span>`;
+        html += `</div>`;
+        html += `<div class="dbg-watch-expand hidden">${renderVariableTree(value, 0, 4)}</div>`;
+      } else {
+        html += `<span class="dbg-watch-val">${formatValue(value)}</span>`;
+        html += `</div>`;
+      }
+      html += `<button class="dbg-watch-remove" onclick="window._dbgRemoveWatch(${watch.id})" title="Remove">✕</button>`;
       html += `</div>`;
     }
-    html += `<button class="dbg-watch-remove" onclick="window._dbgRemoveWatch(${watch.id})" title="Remove">✕</button>`;
-    html += `</div>`;
   }
+
   container.innerHTML = html;
 
-  // Attach click-to-expand handlers
+  // Expression rows: click-to-expand the value tree.
   container.querySelectorAll('.dbg-watch-entry').forEach(entry => {
     const row = entry.querySelector('.dbg-watch-row');
     const expand = entry.querySelector('.dbg-watch-expand');
     if (row && expand) {
       row.style.cursor = 'pointer';
-      row.addEventListener('click', () => {
-        expand.classList.toggle('hidden');
-      });
+      row.addEventListener('click', () => { expand.classList.toggle('hidden'); });
     }
+  });
+
+  // Pinned rows: history toggle, jump-to-change, data-flow focus, remove.
+  container.querySelectorAll('.dbg-watch-pin').forEach(el => {
+    const pinId = parseInt(el.getAttribute('data-pin-id'), 10);
+    const timeline = el.querySelector('.dbg-watch-pin-timeline');
+    const histBtn = el.querySelector('.dbg-watch-pin-hist');
+    if (histBtn && timeline) {
+      histBtn.style.cursor = 'pointer';
+      histBtn.addEventListener('click', (e) => { e.stopPropagation(); timeline.classList.toggle('hidden'); });
+    }
+    el.querySelector('.dbg-watch-pin-remove')?.addEventListener('click', (e) => { e.stopPropagation(); watchUnpin(pinId); });
+    el.querySelector('.dbg-watch-pin-flow')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const pin = debugState.watchPins.find(p => p.id === pinId);
+      if (pin) { debugState.dataFlow.focusWatchId = pin.watchId; switchToDebugTab('dbg-dataflow'); try { renderDataFlowPanel(); } catch (_) {} }
+    });
+    el.querySelectorAll('.dbg-watch-delta, .dbg-watch-replace').forEach(row => {
+      row.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const file = row.getAttribute('data-file'); const line = parseInt(row.getAttribute('data-line'), 10);
+        if (file && Number.isFinite(line)) navigateToFile(file, line);
+      });
+    });
   });
 }
 
 window._dbgRemoveWatch = function(watchId) {
   debugState.watchExpressions = debugState.watchExpressions.filter(w => w.id !== watchId);
+  saveWatchDefs();
   renderWatchPanel();
 };
+
+
+/* ================================================================
+   DATA FLOW PANEL — how tracked objects move through methods
+   ----------------------------------------------------------------
+   Overview: per method, which pinned objects it READ vs MODIFIED (deduped, with
+   counts). Focus one object (chip) to see its ordered method flow. Every row
+   jumps to the method/line. Purely from real engine field access — no guesses.
+   ================================================================ */
+function _watchLabelFor(watchId) {
+  const pin = debugState.watchPins.find(p => p.watchId === watchId);
+  if (pin) return pin.label;
+  const tr = debugState.trackedObjects.get(watchId);
+  if (tr && tr.obj && tr.obj.classInfo) return tr.obj.classInfo.name || 'object';
+  return `object#${watchId}`;
+}
+
+function _dfObjChip(ev) {
+  const label = _esc(_watchLabelFor(ev.watchId));
+  const cnt = ev.count > 1 ? ` ×${ev.count}` : '';
+  return `<span class="dbg-df-obj ${ev.access === 'write' ? 'write' : 'read'}">${label}${cnt}</span>`;
+}
+
+function _dfShortMethod(ev) {
+  return `${_esc((ev.className || '?').split('.').pop())}.${_esc(ev.methodName || '?')}`;
+}
+
+function _dataFlowChipsHtml(df) {
+  const ids = [...new Set(debugState.watchPins.map(p => p.watchId).filter(x => x != null))];
+  let h = '<div class="dbg-df-chips">';
+  h += `<span class="dbg-df-chip${df.focusWatchId == null ? ' active' : ''}" data-focus="">All objects</span>`;
+  for (const id of ids) h += `<span class="dbg-df-chip${df.focusWatchId === id ? ' active' : ''}" data-focus="${id}">${_esc(_watchLabelFor(id))}</span>`;
+  h += '</div>';
+  return h;
+}
+
+function _dataFlowOverviewHtml(df) {
+  const methods = [];
+  const byKey = new Map();
+  for (const ev of df.events) {
+    let m = byKey.get(ev.methodKey);
+    if (!m) { m = { key: ev.methodKey, className: ev.className, methodName: ev.methodName, file: ev.file, line: ev.line, reads: [], writes: [] }; byKey.set(ev.methodKey, m); methods.push(m); }
+    (ev.access === 'write' ? m.writes : m.reads).push(ev);
+  }
+  if (!methods.length) return '<div class="dbg-empty">No data flow captured yet. Resume the run — reads and writes on pinned objects appear here per method.</div>';
+  let h = '<div class="dbg-df-table"><div class="dbg-df-head"><span>Method</span><span>Reads</span><span>Modifies</span></div>';
+  for (const m of methods) {
+    h += `<div class="dbg-df-mrow" data-file="${_esc(m.file || '')}" data-line="${m.line != null ? m.line : ''}">`;
+    h += `<span class="dbg-df-method" title="Jump to ${_esc(m.key)}">${_esc((m.className || '?').split('.').pop())}.${_esc(m.methodName || '?')}</span>`;
+    h += `<span class="dbg-df-cell">${m.reads.map(_dfObjChip).join('') || '<span class="dbg-watch-muted">—</span>'}</span>`;
+    h += `<span class="dbg-df-cell">${m.writes.map(_dfObjChip).join('') || '<span class="dbg-watch-muted">—</span>'}</span>`;
+    h += `</div>`;
+  }
+  h += '</div>';
+  return h;
+}
+
+function _dataFlowFocusHtml(df, watchId) {
+  const evs = df.events.filter(e => e.watchId === watchId).slice().sort((a, b) => (a.firstStep || 0) - (b.firstStep || 0));
+  if (!evs.length) return '<div class="dbg-empty">No reads or writes recorded for this object yet.</div>';
+  let h = `<div class="dbg-df-flow-head">Method flow for <b>${_esc(_watchLabelFor(watchId))}</b> — in execution order:</div><div class="dbg-df-flow">`;
+  for (const ev of evs) {
+    h += `<div class="dbg-df-frow" data-file="${_esc(ev.file || '')}" data-line="${ev.line != null ? ev.line : ''}" title="Jump to this method">`;
+    h += `<span class="dbg-df-badge ${ev.access === 'write' ? 'write' : 'read'}">${ev.access === 'write' ? 'MODIFIED' : 'READ'}</span>`;
+    h += `<span class="dbg-df-method">${_dfShortMethod(ev)}<span class="dbg-df-line">:${ev.line != null ? ev.line : '?'}</span></span>`;
+    h += `<span class="dbg-df-count">${ev.count > 1 ? '×' + ev.count : ''}</span>`;
+    h += `</div>`;
+  }
+  h += `</div>`;
+  return h;
+}
+
+function renderDataFlowPanel() {
+  const container = _$('#dbg-dataflow-body');
+  if (!container) return;
+  const df = debugState.dataFlow;
+  if (!debugState.watchPins.length) {
+    container.innerHTML = '<div class="dbg-empty">No tracked objects. While paused, hover a value and click 📌 to follow it — this tab then shows which methods read it and which modify it.</div>';
+    return;
+  }
+  // A focus target that no longer exists falls back to the overview.
+  if (df.focusWatchId != null && !debugState.watchPins.some(p => p.watchId === df.focusWatchId)) df.focusWatchId = null;
+
+  let html = _dataFlowChipsHtml(df);
+  html += df.focusWatchId != null ? _dataFlowFocusHtml(df, df.focusWatchId) : _dataFlowOverviewHtml(df);
+  container.innerHTML = html;
+
+  container.querySelectorAll('.dbg-df-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const raw = chip.getAttribute('data-focus');
+      df.focusWatchId = raw === '' ? null : parseInt(raw, 10);
+      renderDataFlowPanel();
+    });
+  });
+  const jump = (el) => {
+    const file = el.getAttribute('data-file'); const line = parseInt(el.getAttribute('data-line'), 10);
+    if (file && Number.isFinite(line)) navigateToFile(file, line);
+  };
+  container.querySelectorAll('.dbg-df-mrow, .dbg-df-frow').forEach(row => {
+    row.style.cursor = 'pointer';
+    row.addEventListener('click', () => jump(row));
+  });
+}
+
 
 function renderVarEntry(key, val, scopeType = 'local', iterInfo = null) {
   const isExpandable = val !== null && typeof val === 'object';
@@ -6807,10 +8080,17 @@ function renderConsoleTreeValue(v, depth, opts) {
   // double-click can edit them and write the change back into the LIVE engine object.
   // Absent/false → byte-for-byte the original read-only markup (console + tests rely on it).
   const editable = !!(opts && opts.editable);
+  const watch = !!(opts && opts.watch);
   const path = (opts && opts.path) || [];
+  // 📌 pin affordance (hover-tree watch mode only). Emitted ONLY when opts.watch is
+  // set, so the console/test default markup stays byte-identical. Live/active state
+  // is painted by _attachHoverPins after render.
+  const pinFor = (p) => watch ? `<span class="cv-pin" data-wp="${_esc(JSON.stringify(p))}">📌</span>` : '';
   const leaf = (cls, inner, etype) => {
-    if (!editable) return `<span class="${cls}">${inner}</span>`;
-    return `<span class="${cls} cv-editable" data-ep="${_esc(JSON.stringify(path))}" data-et="${etype}" title="Double-click to edit (debugger override)">${inner}</span>`;
+    const core = editable
+      ? `<span class="${cls} cv-editable" data-ep="${_esc(JSON.stringify(path))}" data-et="${etype}" title="Double-click to edit (debugger override)">${inner}</span>`
+      : `<span class="${cls}">${inner}</span>`;
+    return core + pinFor(path);
   };
   if (v === null) return leaf('cv-null', 'null', 'null');
   if (v === undefined) return '<span class="cv-undef">undefined</span>';
@@ -6826,14 +8106,14 @@ function renderConsoleTreeValue(v, depth, opts) {
 
   const isArr = Array.isArray(v);
   const keys = isArr ? null : Object.keys(v);
-  if (isArr && v.length === 0) return '<span class="cv-empty">[]</span>';
-  if (!isArr && keys.length === 0) return '<span class="cv-empty">{}</span>';
+  if (isArr && v.length === 0) return '<span class="cv-empty">[]</span>' + pinFor(path);
+  if (!isArr && keys.length === 0) return '<span class="cv-empty">{}</span>' + pinFor(path);
 
   const preview = isArr
     ? `Array(${v.length})`
     : `{${keys.slice(0, 5).map(_esc).join(', ')}${keys.length > 5 ? ', …' : ''}}`;
 
-  const childOpts = (key) => editable ? { editable: true, path: path.concat(key) } : undefined;
+  const childOpts = (key) => (editable || watch) ? { editable, watch, path: path.concat(key) } : undefined;
   const open = depth === 0;
   let kids = '';
   if (isArr) {
@@ -6851,6 +8131,7 @@ function renderConsoleTreeValue(v, depth, opts) {
   return `<div class="cv-node">`
     + `<span class="cv-toggle"><span class="cv-arrow">${open ? '▼' : '▶'}</span>`
     + `<span class="cv-preview">${_esc(preview)}</span></span>`
+    + pinFor(path)
     + `<div class="cv-children${open ? '' : ' collapsed'}">${kids}</div>`
     + `</div>`;
 }
@@ -6936,6 +8217,114 @@ function _hoverSetLeaf(parent, seg, value, E) {
     return false;
   }
   return false;
+}
+
+/* ================================================================
+   HOVER → WATCH PINNING (follow a live value BY IDENTITY)
+   ----------------------------------------------------------------
+   Clicking the 📌 on a node/leaf in the hover tree pins that exact live engine
+   object (or the object owning a pinned field) so the Watch tab and Data Flow
+   follow it by reference — even when it is buried inside a huge collection and
+   its position later changes. We resolve the SAME live ref the edit-in-place path
+   uses (sandbox-eval the root expression, then descend by path), so the observer
+   sees the very object the user pointed at.
+   ================================================================ */
+
+// A value we can follow by identity: an engine object/collection (not a primitive).
+function _isTrackable(v, E) {
+  return !!(v && typeof v === 'object' && (Array.isArray(v)
+    || (E && (v instanceof E.ApexObject || v instanceof E.ApexMap || v instanceof E.ApexSet))));
+}
+
+// Resolve { target, parent, key } for a hover path against a live root. path=[]
+// addresses the root itself (no parent).
+function _resolveWatchTarget(root, path, E) {
+  if (!Array.isArray(path) || path.length === 0) return { target: root, parent: null, key: null };
+  const pr = _hoverResolveParent(root, path, E);
+  if (!pr) return { target: undefined, parent: undefined, key: undefined };
+  return { target: _hoverChildVal(pr.parent, pr.key, E), parent: pr.parent, key: pr.key };
+}
+
+// Toggle a watch pin for the node at `path` under the live `root`. Object nodes are
+// pinned by identity; primitive leaves pin the OWNING object with a field focus.
+function _toggleWatchPin(root, path, rootPath, E) {
+  const { target, parent, key } = _resolveWatchTarget(root, path, E);
+  const label = rootPath + (Array.isArray(path) && path.length ? _pathToText(path) : '');
+  if (_isTrackable(target, E)) {
+    if (watchIsTracked(target)) {
+      debugState.watchPins.filter(p => p.watchId === target.__watchId && p.kind === 'object')
+        .forEach(p => watchUnpin(p.id));
+      window.showToast?.(`Unpinned ${label}`);
+    } else {
+      // Full path to the object itself — used to re-bind by identity on a new run.
+      const bindExpr = rootPath + (Array.isArray(path) && path.length ? _pathToText(path) : '');
+      const pin = watchAddPin(target, { kind: 'object', label, typeName: _watchTypeName(target), path, bindExpr });
+      if (pin) { pin._bindFrame = _watchTopFrame(); window.showToast?.(`👁 Watching ${label}`); switchToDebugTab('dbg-watch'); }
+    }
+  } else {
+    // Primitive leaf → follow the OWNING object, focused on this field.
+    if (!(E && parent instanceof E.ApexObject)) {
+      window.showToast?.('Pin an object, or a field directly on an object, to watch it.');
+      return;
+    }
+    const existing = debugState.watchPins.find(p => p.kind === 'field' && (p.field || null) === key
+      && (debugState.trackedObjects.get(p.watchId) || {}).obj === parent);
+    if (existing) { watchUnpin(existing.id); window.showToast?.(`Unpinned ${label}`); return; }
+    // Re-bind expression targets the PARENT object; the field is tracked separately.
+    const parentPath = Array.isArray(path) ? path.slice(0, -1) : [];
+    const bindExpr = rootPath + (parentPath.length ? _pathToText(parentPath) : '');
+    const pin = watchAddPin(parent, { kind: 'field', field: key, label, typeName: _watchTypeName(parent), path, bindExpr });
+    if (pin) { pin._bindFrame = _watchTopFrame(); window.showToast?.(`👁 Watching ${label}`); switchToDebugTab('dbg-watch'); }
+  }
+  try { renderWatchPanel(); } catch (_) {}
+  try { renderDataFlowPanel(); } catch (_) {}
+}
+
+// Wire the 📌 pins in a freshly-rendered hover body. One async root resolve, then
+// cheap in-memory descents for each pin's live/active state and click handling.
+async function _attachHoverPins(panel, body, rootPath) {
+  const E = (typeof window !== 'undefined') ? window.ApexEngine : null;
+  const eng = debugState.engineSession;
+  if (!eng) return;
+  const frame = eng.topFrame && eng.topFrame();
+  const resolveRoot = async () => {
+    try { return await eng.evalExpressionSandboxed(rootPath, frame, false); } catch (_) { return undefined; }
+  };
+  let root = await resolveRoot();
+  const pins = Array.from(body.querySelectorAll('[data-wp]'));
+  const paint = () => {
+    for (const icon of pins) {
+      let p; try { p = JSON.parse(icon.getAttribute('data-wp')); } catch (_) { continue; }
+      const { target, parent, key } = _resolveWatchTarget(root, p, E);
+      let on = false;
+      if (_isTrackable(target, E)) on = watchIsTracked(target);
+      else on = debugState.watchPins.some(pin => pin.kind === 'field' && (pin.field || null) === key
+        && (debugState.trackedObjects.get(pin.watchId) || {}).obj === parent);
+      icon.classList.toggle('active', on);
+      icon.textContent = on ? '📍' : '📌';
+      icon.title = on ? 'Stop watching this value' : 'Watch this value (live · history · data flow)';
+    }
+  };
+  paint();
+  for (const icon of pins) {
+    icon.addEventListener('click', async (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      let p; try { p = JSON.parse(icon.getAttribute('data-wp')); } catch (_) { return; }
+      root = await resolveRoot();               // refresh in case state advanced
+      _toggleWatchPin(root, p, rootPath, E);
+      paint();
+    });
+  }
+}
+
+// Programmatically activate a bottom debug tab (used when pinning a watch).
+function switchToDebugTab(target) {
+  const tab = document.querySelector(`#debug-panel .dbg-panel-tab[data-tab="${target}"]`);
+  if (!tab) return;
+  document.querySelectorAll('#debug-panel .dbg-panel-tab').forEach(t => t.classList.remove('active'));
+  tab.classList.add('active');
+  document.querySelectorAll('#debug-panel .dbg-tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById(target)?.classList.add('active');
 }
 
 function _stripQuotes(s) {
@@ -7157,7 +8546,7 @@ function showRequestModal(filePath, methodName, signatureLine) {
   renderRequestHistory(filePath, methodName);
 }
 
-const DBG_REQ_HISTORY_KEY = 'congacode.debugRequestHistory';
+const DBG_REQ_HISTORY_KEY = 'apexstudio.debugRequestHistory';
 
 function loadRequestHistory() {
   try {
@@ -7277,7 +8666,7 @@ const _codeLensMap = new Map();
 function registerDebugProviders() {
   if (typeof monaco === 'undefined') return;
 
-  const CMD_ID = 'congacode.debugMethod';
+  const CMD_ID = 'apexstudio.debugMethod';
 
   // CodeLens: "▶ Debug with Request" above each method
   monaco.languages.registerCodeLensProvider('apex', {
@@ -7621,18 +9010,20 @@ function _showHoverTree(editor, range, path, typeName, value) {
   const clean = _cleanHoverValue(value);
   // Values are editable only while genuinely paused in a live engine session at the
   // live edge (not while viewing recorded history, and not during a free run) — an
-  // override must land in the state the code is about to use next.
+  // override must land in the state the code is about to use next. Watch-pinning is
+  // available under the same condition, because it needs a live object reference.
   const editable = !!(debugState.engineMode && debugState.engineSession && debugState.paused
     && !debugState.engineViewingHistory);
+  const watchable = editable;
   el.innerHTML =
     `<div class="dbg-hover-tree-head">` +
       `<span class="dbg-hover-tree-path">${_esc(path)}</span>` +
       `<span class="dbg-hover-tree-type">${_esc(typeName || '')}</span>` +
-      (editable ? `<span class="dbg-hover-tree-edithint" title="Double-click any value to override it in the live object (in-memory only; the org is never modified).">✎ editable</span>` : '') +
+      (editable ? `<span class="dbg-hover-tree-edithint" title="Double-click any value to override it in the live object (in-memory only; the org is never modified). Click 📌 to watch a value across the run.">✎ editable · 📌 watch</span>` : '') +
       `<button class="dbg-hover-tree-copy" title="Copy full JSON">📋</button>` +
     `</div>` +
     `<div class="dbg-hover-tree-body"></div>`;
-  _renderHoverBodyInto(el, clean, editable, path);
+  _renderHoverBodyInto(el, clean, editable, path, watchable);
   const copyBtn = el.querySelector('.dbg-hover-tree-copy');
   if (copyBtn) copyBtn.onclick = () => {
     let text; try { text = JSON.stringify(clean, null, 2); } catch { text = String(clean); }
@@ -7666,12 +9057,14 @@ function _showHoverTree(editor, range, path, typeName, value) {
 // Render the hover tree body + wire toggles and (when editable) the double-click
 // editors. Shared by the initial show and by the re-render after a committed edit,
 // so an override immediately re-materialises the panel from fresh live values.
-function _renderHoverBodyInto(el, clean, editable, rootPath) {
+function _renderHoverBodyInto(el, clean, editable, rootPath, watchable) {
   const body = el.querySelector('.dbg-hover-tree-body');
   if (!body) return;
-  body.innerHTML = renderConsoleTreeValue(clean, 0, editable ? { editable: true, path: [] } : undefined);
+  const opts = (editable || watchable) ? { editable, watch: !!watchable, path: [] } : undefined;
+  body.innerHTML = renderConsoleTreeValue(clean, 0, opts);
   _attachTreeToggles(body);
   if (editable) _attachHoverEditors(el, body, rootPath);
+  if (watchable) _attachHoverPins(el, body, rootPath);
 }
 
 // Wire double-click-to-edit on every tagged primitive leaf in the hover tree.
@@ -7773,7 +9166,7 @@ async function _applyHoverEdit(panel, rootPath, path, value) {
   window.showToast?.(`Set ${_pathToText(path).replace(/^\./, '') || rootPath} = ${_fmtEdit(value)}`);
   try {
     const fresh = _cleanHoverValue(engineValToPlain(root));
-    _renderHoverBodyInto(panel, fresh, true, rootPath);
+    _renderHoverBodyInto(panel, fresh, true, rootPath, true);
   } catch (_) { /* re-render is best-effort; the edit itself already applied */ }
   return true;
 }
@@ -8280,20 +9673,20 @@ function registerBreakpointEditorActions(editor) {
   };
   try {
     editor.addAction({
-      id: 'congacode.toggleBreakpoint',
-      label: 'CongaCode: Toggle Breakpoint',
+      id: 'apexstudio.toggleBreakpoint',
+      label: 'Apex Debug Studio: Toggle Breakpoint',
       contextMenuGroupId: 'debug', contextMenuOrder: 1.0,
       run: (ed) => { const fp = fileOf(); if (fp) toggleBreakpoint(fp, ed.getPosition().lineNumber); },
     });
     editor.addAction({
-      id: 'congacode.conditionalBreakpoint',
-      label: 'CongaCode: Add / Edit Conditional Breakpoint…',
+      id: 'apexstudio.conditionalBreakpoint',
+      label: 'Apex Debug Studio: Add / Edit Conditional Breakpoint…',
       contextMenuGroupId: 'debug', contextMenuOrder: 1.1,
       run: (ed) => { const fp = fileOf(); if (fp) editConditionalBreakpoint(fp, ed.getPosition().lineNumber); },
     });
     editor.addAction({
-      id: 'congacode.logpoint',
-      label: 'CongaCode: Add / Edit Logpoint…',
+      id: 'apexstudio.logpoint',
+      label: 'Apex Debug Studio: Add / Edit Logpoint…',
       contextMenuGroupId: 'debug', contextMenuOrder: 1.2,
       run: (ed) => { const fp = fileOf(); if (fp) editLogpoint(fp, ed.getPosition().lineNumber); },
     });
@@ -8371,6 +9764,8 @@ function initDebugPanelTabs() {
    ================================================================ */
 
 function initApexDebugger() {
+  loadSystemModePref();
+  updateSystemModeUi();
   registerDebugProviders();
   registerDebugHoverProvider();
 
@@ -8404,7 +9799,7 @@ function initApexDebugger() {
 
       // Register CodeLens command handler
       window.state.editor.addAction({
-        id: 'congacode.debugMethod',
+        id: 'apexstudio.debugMethod',
         label: '▶ Debug This Method',
         contextMenuGroupId: 'z_debug',
         contextMenuOrder: 0,
@@ -8487,20 +9882,34 @@ function initApexDebugger() {
     renderConsolePanel();
   });
 
+  // System-mode on/off toggle + debug-log cleanup in the ⚡ Org & Log tab. Turning system
+  // mode ON runs the consent+deploy flow (uploads the read-only helper class if the org
+  // doesn't already have it); turning it OFF is instant and keeps everything in user mode.
+  _$('#dbg-systemmode-toggle')?.addEventListener('click', () => { toggleSystemMode(); });
+  _$('#dbg-clearlogs')?.addEventListener('click', () => { clearDebugLogsFromUi(); });
+  updateSystemModeUi();
+
   // Close the debug panel (hides Console / Org & Log). Available any time — the
   // panel also stays visible after a session ends so output can be read first.
   _$('#dbg-panel-close')?.addEventListener('click', () => {
     hideDebugUI();
   });
 
+  // Reopen the debug panel from the status bar after it was closed. Restores the
+  // panels (with their retained output) whether or not a session is still active.
+  _$('#status-reopen-debug')?.addEventListener('click', () => {
+    showDebugUI();
+    updateDebugPanels();
+  });
+
   // Global keyboard handler for CodeLens command
-  document.addEventListener('congacode-debug-method', (e) => {
+  document.addEventListener('apexstudio-debug-method', (e) => {
     const { filePath, methodName, line } = e.detail;
     showRequestModal(filePath, methodName, line);
   });
 
   // Breakpoint toggle from keyboard (F9 via app.js)
-  document.addEventListener('congacode-toggle-breakpoint', (e) => {
+  document.addEventListener('apexstudio-toggle-breakpoint', (e) => {
     const { filePath, line } = e.detail;
     toggleBreakpoint(filePath, line);
   });
@@ -8543,6 +9952,9 @@ function initWatchInput() {
   const input = _$('#dbg-watch-input');
   if (!input) return;
 
+  // Restore persisted watch definitions (expressions + pin re-bind exprs) once.
+  try { loadWatchDefs(); renderWatchPanel(); } catch (_) {}
+
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -8550,6 +9962,7 @@ function initWatchInput() {
       if (!expr) return;
       debugState.watchExpressions.push({ expr, id: debugState.watchNextId++ });
       input.value = '';
+      saveWatchDefs();
       renderWatchPanel();
     }
   });
@@ -8715,12 +10128,16 @@ async function _runEvalApex(resolvedExpr) {
   const org = getActiveOrg();
   const apex = buildEvalApex(resolvedExpr);
   try {
-    const paths = await window.congacode.getPaths?.();
-    const dir = paths?.congacodeDir || paths?.home || '.';
+    // Anonymous-Apex eval reads its result from the FINEST debug log, so warm logging
+    // on demand (cached). This is the one org read with no REST equivalent; it's rare
+    // (only for statics/custom settings the engine can't resolve locally).
+    if (org?.org) { await ensureFinestLogging(org.org); debugState._generatedOrgLogs = true; }
+    const paths = await window.apexStudio.getPaths?.();
+    const dir = paths?.appDataDir || paths?.home || '.';
     const tmpFile = `${dir}/.cc_debug_eval.apex`;
-    await window.congacode.writeFile(tmpFile, apex);
+    await window.apexStudio.writeFile(tmpFile, apex);
     const cmd = `sf apex run --file "${tmpFile}" --json --target-org ${org.org}`;
-    const { stdout, stderr } = await window.congacode.sfExec(cmd, window.state?.folderPath, 60000);
+    const { stdout, stderr } = await window.apexStudio.sfExec(cmd, window.state?.folderPath, 60000);
     const cli = parseSfJson(stdout);
     const res = (cli && (cli.result || cli.data)) || {};
     const log = res.logs || '';
@@ -9039,11 +10456,16 @@ window.showRequestModal = showRequestModal;
 window.startDebugFromModal = startDebugFromModal;
 window.debugState = debugState;
 // Proactive system-mode helper check — called by the Salesforce module when the
-// user connects/switches to an org (prompts to deploy the helper if missing).
+// user connects/switches to an org (now only refreshes the toggle UI; never deploys).
 window.apexDebuggerCheckSystemHelper = onOrgConnectedCheckHelper;
+// System-mode opt-in toggle + debug-log cleanup, driven from the org bar.
+window.apexDebuggerToggleSystemMode = toggleSystemMode;
+window.apexDebuggerIsSystemMode = isSystemModeEnabled;
+window.apexDebuggerUpdateSystemModeUi = updateSystemModeUi;
+window.apexDebuggerClearDebugLogs = clearDebugLogsFromUi;
 
 // Node-only test hook: expose the pure log/replay helpers for regression testing
 // (guarded so it is a no-op in the browser/renderer). Mirrors apexengine.js.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { buildReplayTimeline, getEntrySignature, parseApexLog, parseApexDebugValue, evalReplayLogTemplate, renderConsoleTreeValue, _compactFirstLevelJson, replayStepPauses, evalReplayCondition, replayLogpointText, replayLogpointPayload, replayStepScope, planReplayEmit, selectedFrameIndex, _execSig, _bpPauseDecision, _bpLogText, _bpLogPayload, _logExpressionPayload, _unreachedBreakpointNotes, _heapRefLabel, activeBreakpoint, saveBreakpoints, loadBreakpoints, debugState, applyNamespaceToSoql, stripColumnFromSoql, captureEngineHistory, planEngineForward, updateReplayPositionUI, _parseEditedValue, _hoverResolveParent, _hoverSetLeaf, _hoverChildVal, _cleanHoverValue, _pathToText, ensureFinestLogging, _ensureFinestLoggingUncached, warmUpLiveOrg };
+  module.exports = { buildReplayTimeline, getEntrySignature, parseApexLog, parseApexDebugValue, evalReplayLogTemplate, renderConsoleTreeValue, _compactFirstLevelJson, replayStepPauses, evalReplayCondition, replayLogpointText, replayLogpointPayload, replayStepScope, planReplayEmit, selectedFrameIndex, _execSig, _bpPauseDecision, _bpLogText, _bpLogPayload, _logExpressionPayload, _unreachedBreakpointNotes, _heapRefLabel, activeBreakpoint, saveBreakpoints, loadBreakpoints, debugState, applyNamespaceToSoql, stripColumnFromSoql, captureEngineHistory, planEngineForward, updateReplayPositionUI, _parseEditedValue, _hoverResolveParent, _hoverSetLeaf, _hoverChildVal, _cleanHoverValue, _pathToText, ensureFinestLogging, _ensureFinestLoggingUncached, warmUpLiveOrg, recordFieldWrite, recordFieldRead, resetWatchRuntime, watchAddPin, watchUnpin, watchIsTracked, _watchSameValue, _watchDispSnapshot, _watchMethodKey, _watchPinHistory, syncWatchPins, _isStableBinding, _watchEnsureTracked, isSystemModeEnabled, setSystemMode, loadSystemModePref, toggleSystemMode, updateSystemModeUi, _looksLikeCliAuthError, soqlPermissionHint, clearMyDebugLogs, systemModePref, setSystemModeAuto, onOrgConnectedCheckHelper };
 }

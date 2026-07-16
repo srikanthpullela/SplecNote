@@ -296,18 +296,35 @@
   function hexencode(str) { if (typeof Buffer !== 'undefined') return Buffer.from(String(str), 'utf8').toString('hex'); return Array.from(new TextEncoder().encode(String(str))).map(b => b.toString(16).padStart(2, '0')).join(''); }
   function hexdecode(hex) { if (typeof Buffer !== 'undefined') return Buffer.from(String(hex), 'hex').toString('utf8'); const bytes = String(hex).match(/.{1,2}/g) || []; return new TextDecoder().decode(new Uint8Array(bytes.map(h => parseInt(h, 16)))); }
 
+  /* ================= watch / data-flow field observer =================
+     A single module-level hook so the ONE active engine can observe field
+     reads/writes on objects the UI has explicitly marked for tracking
+     (obj.__tracked === true, obj.__watchId a stable id). Untracked objects pay
+     only a cheap boolean property read on each access, so normal execution is
+     unaffected. Installed at run() start, cleared on stop(). The observer body
+     lives on the engine (_onFieldAccess) so it has full step/method context and
+     can ignore inspection reads (see there). */
+  let _fieldObserver = null;
+
   /* ================= user-class instance ================= */
   class ApexObject {
     constructor(classInfo) {
       this.classInfo = classInfo;           // ClassInfo
       this.fields = new Map();              // lower-name -> { name, value }
     }
-    getField(name) { const e = this.fields.get(name.toLowerCase()); return e ? e.value : undefined; }
+    getField(name) {
+      const e = this.fields.get(name.toLowerCase());
+      const v = e ? e.value : undefined;
+      if (this.__tracked && _fieldObserver) { try { _fieldObserver('read', this, name, v, v); } catch (_) {} }
+      return v;
+    }
     hasField(name) { return this.fields.has(name.toLowerCase()); }
     setField(name, value) {
       const lk = name.toLowerCase();
       const e = this.fields.get(lk);
+      const old = e ? e.value : undefined;
       if (e) e.value = value; else this.fields.set(lk, { name, value });
+      if (this.__tracked && _fieldObserver) { try { _fieldObserver('write', this, name, old, value); } catch (_) {} }
     }
   }
 
@@ -820,8 +837,33 @@
     requestPause() { this.pauseRequested = true; }
     stop() {
       this.stopped = true;
+      _fieldObserver = null;                 // stop observing tracked-field access
       const r = this._resume; this._resume = null;
       if (r) r('stop');
+    }
+
+    /* ---------- watch / data-flow field observer body ----------
+       Called by ApexObject.get/setField ONLY for objects the UI marked
+       obj.__tracked. Forwards to host.onFieldRead / host.onFieldWrite with the
+       current execution context. Ignores:
+         - sandbox evals (hover tooltips / console) — inspections, not real runs;
+         - accesses while PAUSED — during a pause the engine is suspended, so any
+           field access is UI-initiated (watch/hover render), never real execution.
+       Together these guarantee we only ever record genuine runtime data flow. */
+    _onFieldAccess(kind, obj, name, oldV, newV) {
+      if (this._sandboxEval || this.paused) return;
+      const host = this.host;
+      if (kind === 'read' ? !host.onFieldRead : !host.onFieldWrite) return;
+      const top = this.callStack.length ? this.callStack[this.callStack.length - 1] : null;
+      const ctx = {
+        obj, watchId: obj.__watchId, field: name,
+        line: this.currentLine, file: this.currentFile, step: this._steps,
+        className: top ? top.className : null, methodName: top ? top.methodName : null,
+      };
+      try {
+        if (kind === 'read') host.onFieldRead(ctx);
+        else { ctx.oldValue = oldV; ctx.newValue = newV; host.onFieldWrite(ctx); }
+      } catch (_) { /* UI errors never affect execution */ }
     }
 
     /* ---------- the V8-style pause gate ---------- */
@@ -1214,6 +1256,8 @@
     /* ---------- entry points ---------- */
     async run(className, methodName, argValues) {
       this.stopped = false; this._steps = 0;
+      const self = this;
+      _fieldObserver = (kind, obj, name, oldV, newV) => self._onFieldAccess(kind, obj, name, oldV, newV);
       // Reset per-session pause state so a RESTART re-honors breakpoints. Without
       // this, _lastBpKey retains the previous run's gate key and the breakpoint at
       // the same line+depth (e.g. the method's first line) is suppressed on re-run.
@@ -1254,11 +1298,19 @@
         this._reportDiagnosticsSummary();
         if (this.host.onError) this.host.onError(e);
         throw e;
+      } finally {
+        // Stop observing once the run is fully over (it stays active across pauses,
+        // since run() only settles when the method completes). Prevents any later
+        // UI-side field access on a still-__tracked object from being mis-recorded
+        // as real execution data-flow.
+        _fieldObserver = null;
       }
     }
 
     async runAnonymous(source, fileName) {
       this.stopped = false; this._steps = 0;
+      const self = this;
+      _fieldObserver = (kind, obj, name, oldV, newV) => self._onFieldAccess(kind, obj, name, oldV, newV);
       const stmts = Lang.parseStatements(source);
       const env = new Environment(null, 'anonymous');
       const frame = { className: '<anonymous>', methodName: 'execute', file: fileName || '<anonymous>', line: 1, env, thisRef: null, classInfo: null };
@@ -1273,6 +1325,7 @@
         throw e;
       } finally {
         this.callStack.pop();
+        _fieldObserver = null;   // stop observing once the anonymous run is over
       }
     }
 
@@ -2368,7 +2421,7 @@
           binds[b.expr] = this.normalizeBindValue(await this.evalExpr(ast, frame));
         } catch (err) { binds[b.expr] = null; }
       }      this.pendingBackend = 'SOQL query against org…';
-      this.log(`SOQL → org: ${e.raw.replace(/\s+/g, ' ').slice(0, 200)}`, 'soql');
+      this.log(`SOQL → org: ${e.raw.replace(/\s+/g, ' ').trim()}`, 'soql');
       try {
         if (this.host.query) {
           const rows = await this.host.query(e.raw, binds);
@@ -4038,7 +4091,7 @@
               binds = await this.resolveScopeBinds(raw, frame);
             }
             this.pendingBackend = 'Database.query against org…';
-            this.log(`Database.query → org: ${raw.replace(/\s+/g, ' ').slice(0, 200)}`, 'soql');
+            this.log(`Database.query → org: ${raw.replace(/\s+/g, ' ').trim()}`, 'soql');
             try {
               if (this.host.query) { const rows = await this.host.query(raw, binds); return Array.isArray(rows) ? rows : []; }
               return [];
@@ -4495,10 +4548,28 @@
   }
 
   /* ================= exports ================= */
+  // Mark / unmark a live engine object for watch + data-flow observation. The UI
+  // obtains the real reference (from hover / variables) and calls these so it never
+  // has to poke engine-internal flags directly. Only ApexObject participates in the
+  // get/setField observer; other containers can still be pinned for live-value
+  // display but won't emit field deltas.
+  function trackObject(obj, watchId) {
+    if (!obj || typeof obj !== 'object') return false;
+    obj.__tracked = true;
+    if (watchId != null) obj.__watchId = watchId;
+    return true;
+  }
+  function untrackObject(obj) {
+    if (!obj || typeof obj !== 'object') return false;
+    try { delete obj.__tracked; } catch (_) { obj.__tracked = false; }
+    return true;
+  }
+
   const API = {
     ApexEngine, ApexError, ApexMap, ApexSet, ApexObject, ApexDate, ApexDatetime, ApexTime, ApexBlob, ApexEnumValue,
     ApexJsonGenerator, ApexJsonParser,
     Environment, toApexString, typeNameOf, apexEquals, formatValue: toApexString, isSObject, sobjType,
+    trackObject, untrackObject,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   if (typeof globalThis !== 'undefined') globalThis.ApexEngine = API;

@@ -1,4 +1,4 @@
-# CongaCode — Complete Project Reference
+# Apex Debug Studio — Complete Project Reference
 
 > A modern Notepad++/Sublime Text/VS Code-style desktop text editor for macOS, built with Electron + Monaco Editor.
 
@@ -29,7 +29,7 @@
 ## Quick Start
 
 ```bash
-cd "/Users/spullela/AI Projects/CongaCode"
+cd "/Users/spullela/AI Projects/Apex Debug Studio"
 source ~/.nvm/nvm.sh && nvm use 22
 npx electron .
 ```
@@ -57,20 +57,20 @@ npm start
 ## Project Structure
 
 ```
-CongaCode/
+ApexDebugStudio/
 ├── package.json              # App config, dependencies, electron-builder config
 ├── package-lock.json
 ├── .nvmrc                    # Contains "22" — node version
 ├── .gitignore
 ├── README.md
-├── CONGACODE.md              # THIS FILE — full project reference
+├── APEXDEBUGSTUDIO.md              # THIS FILE — full project reference
 ├── build/
 │   ├── icon.icns             # macOS app icon
 │   ├── icon.ico              # Windows app icon
 │   └── icon.png              # PNG source icon
 ├── dist/                     # Build output (generated)
-│   ├── CongaCode-1.0.0-arm64.dmg       # macOS installer (~106 MB)
-│   ├── CongaCode-1.0.0-arm64-mac.zip   # macOS zip (~103 MB)
+│   ├── Apex Debug Studio-1.0.0-arm64.dmg       # macOS installer (~106 MB)
+│   ├── Apex Debug Studio-1.0.0-arm64-mac.zip   # macOS zip (~103 MB)
 │   └── mac-arm64/                       # Unpacked .app
 ├── node_modules/             # Dependencies (npm install)
 └── src/
@@ -137,14 +137,14 @@ npm run dev
 **To run in background (keeps terminal free):**
 
 ```bash
-cd "/Users/spullela/AI Projects/CongaCode" && source ~/.nvm/nvm.sh && nvm use 22 && npx electron . &
+cd "/Users/spullela/AI Projects/Apex Debug Studio" && source ~/.nvm/nvm.sh && nvm use 22 && npx electron . &
 ```
 
 **To kill and restart:**
 
 ```bash
-pkill -f "Electron.*CongaCode" 2>/dev/null; sleep 1
-cd "/Users/spullela/AI Projects/CongaCode" && source ~/.nvm/nvm.sh && nvm use 22 && npx electron .
+pkill -f "Electron.*Apex Debug Studio" 2>/dev/null; sleep 1
+cd "/Users/spullela/AI Projects/Apex Debug Studio" && source ~/.nvm/nvm.sh && nvm use 22 && npx electron .
 ```
 
 ---
@@ -152,19 +152,19 @@ cd "/Users/spullela/AI Projects/CongaCode" && source ~/.nvm/nvm.sh && nvm use 22
 ## Building for macOS
 
 ```bash
-cd "/Users/spullela/AI Projects/CongaCode"
+cd "/Users/spullela/AI Projects/Apex Debug Studio"
 source ~/.nvm/nvm.sh && nvm use 22
 npx electron-builder --mac
 ```
 
 **Output** (in `dist/`):
-- `CongaCode-1.0.0-arm64.dmg` — macOS disk image installer (~106 MB)
-- `CongaCode-1.0.0-arm64-mac.zip` — Compressed app (~103 MB)
+- `Apex Debug Studio-1.0.0-arm64.dmg` — macOS disk image installer (~106 MB)
+- `Apex Debug Studio-1.0.0-arm64-mac.zip` — Compressed app (~103 MB)
 
 > **Note**: Code signing is skipped (no Apple Developer ID certificate). macOS Gatekeeper will show a warning on first launch. Bypass with: **Right-click → Open**.
 
 **Build configuration** is in `package.json` under the `"build"` key:
-- App ID: `com.congacode.app`
+- App ID: `com.apexdebugstudio.app`
 - Category: `public.app-category.developer-tools`
 - Dark mode support: enabled
 - ASAR packaging: enabled (monaco-editor unpacked)
@@ -190,11 +190,11 @@ npx electron-builder --mac
 ┌──────────────┴──────────────────────────────────────┐
 │                 PRELOAD SCRIPT                       │
 │  src/preload/preload.js                             │
-│  • Exposes `window.congacode` API                   │
+│  • Exposes `window.apexStudio` API                   │
 │  • Whitelist of valid IPC channels                  │
 │  • contextIsolation: true, nodeIntegration: false   │
 └──────────────┬──────────────────────────────────────┘
-               │ window.congacode.*
+               │ window.apexStudio.*
 ┌──────────────┴──────────────────────────────────────┐
 │                RENDERER PROCESS                      │
 │  src/renderer/index.html + styles.css + app.js      │
@@ -227,11 +227,11 @@ The Electron main process. Responsibilities:
 - **Native menus**: Full macOS menu bar — File, Edit, Selection, View, Navigate, Help
 - **New window**: `createNewWindow()` opens a fresh window with `?new=1` query param
 - **Terminal integration**: `open -a Terminal` with PATH augmented for `/opt/homebrew/bin:/usr/local/bin`
-- **Data paths**: `~/CongaCode/.session.json`, `~/CongaCode/.recent.json`, `~/CongaCode/AutoSave/`
+- **Data paths**: `~/ApexDebugStudio/.session.json`, `~/ApexDebugStudio/.recent.json`, `~/ApexDebugStudio/AutoSave/`
 
 ### `src/preload/preload.js` (69 lines)
 
-Secure IPC bridge. Exposes `window.congacode` with:
+Secure IPC bridge. Exposes `window.apexStudio` with:
 
 - **Dialogs**: `openFileDialog()`, `openFolderDialog()`, `saveFileDialog()`
 - **File system**: `readFile()`, `writeFile()`, `readDir()`, `stat()`, `deleteFile()`, `rename()`, `createDir()`, `getAllFiles()`, `searchInFiles()`
@@ -258,7 +258,7 @@ The UI layout:
 
 All styling:
 
-- **14 theme definitions** as CSS custom properties (e.g., `[data-theme="dark"]`, `[data-theme="conga"]`)
+- **14 theme definitions** as CSS custom properties (e.g., `[data-theme="dark"]`, `[data-theme="apex"]`)
 - **Layout**: Flexbox-based sidebar + editor layout with resizable sidebar
 - **Components**: Tabs, file tree (with chevron arrows), search bars, modals, context menus, status bar, welcome screen
 - **No-editor overlay**: VS Code-style watermark with clickable keyboard shortcuts
@@ -304,7 +304,7 @@ All renderer logic — the biggest file. Major sections:
 ### Core Editing
 - **Monaco Editor** — Full VS Code editing engine with syntax highlighting for 50+ languages
 - **Multi-tab interface** — Create, close, switch, reorder tabs
-- **Auto-save** — Unsaved content auto-saved to `~/CongaCode/AutoSave/`
+- **Auto-save** — Unsaved content auto-saved to `~/ApexDebugStudio/AutoSave/`
 - **Session persistence** — Tabs and state restored on restart
 - **File icons** — Emoji-based file type icons in tabs, Quick Open, and search results
 
@@ -336,7 +336,7 @@ All renderer logic — the biggest file. Major sections:
 - **Status bar** — Line:column position, language, encoding
 
 ### Themes (14)
-- Dark (Default), Light, Monokai, Dracula, Nord, Solarized Dark, Sublime Mariana, One Dark Pro, Material Ocean, GitHub Dark, Tomorrow Night, Ayu Dark, Gruvbox Dark, **Conga Theme**
+- Dark (Default), Light, Monokai, Dracula, Nord, Solarized Dark, Sublime Mariana, One Dark Pro, Material Ocean, GitHub Dark, Tomorrow Night, Ayu Dark, Gruvbox Dark, **Apex Dark**
 
 ### Window
 - **New window** (`⇧⌘N`) — Opens empty
@@ -443,9 +443,9 @@ All 14 themes are defined as CSS custom properties in `styles.css` AND as Monaco
 | `tomorrow-night` | Tomorrow Night | vs-dark |
 | `ayu-dark` | Ayu Dark | vs-dark |
 | `gruvbox` | Gruvbox Dark | vs-dark |
-| `conga` | Conga Theme | vs-dark |
+| `apex` | Apex Dark | vs-dark |
 
-**Conga Theme** uses the Monokai color palette (`#272822` bg, `#f8f8f2` fg) with ~60 token rules including:
+**Apex Dark** uses the Monokai color palette (`#272822` bg, `#f8f8f2` fg) with ~60 token rules including:
 - Functions: green (`#a6e22e`)
 - Keywords: pink bold (`#f92672`)
 - Strings: yellow (`#e6db74`)
@@ -505,10 +505,10 @@ Opened with `⇧⌘P`. Contains 36 commands:
 
 ## Data & Persistence
 
-All app data is stored in `~/CongaCode/`:
+All app data is stored in `~/ApexDebugStudio/`:
 
 ```
-~/CongaCode/
+~/ApexDebugStudio/
 ├── .session.json     # Tabs, active tab, window bounds (auto-saved on quit)
 ├── .recent.json      # Recently opened file paths (max entries)
 └── AutoSave/         # Auto-saved unsaved file content
@@ -516,7 +516,7 @@ All app data is stored in `~/CongaCode/`:
 
 - **Session** (`saveSession()`): Saved on `beforeunload` and periodically. Contains tab titles, file paths, content, active tab ID, window position/size.
 - **Recent files** (`addRecent()`): Appended on every file open. Used in Quick Open (⌘P) and sidebar.
-- **Auto-save** (`scheduleAutoSave()`): Debounced 2-second timer on content change. Saves to `~/CongaCode/AutoSave/<filename>`.
+- **Auto-save** (`scheduleAutoSave()`): Debounced 2-second timer on content change. Saves to `~/ApexDebugStudio/AutoSave/<filename>`.
 
 ---
 
@@ -540,8 +540,8 @@ Loaded via AMD (RequireJS) from `node_modules/monaco-editor/min/vs/`. In the `as
 
 ## Common Issues & Fixes
 
-### App shows "Electron" in menu bar instead of "CongaCode"
-- Fixed: `app.setName('CongaCode')` is called before anything else in `main.js`
+### App shows "Electron" in menu bar instead of "Apex Debug Studio"
+- Fixed: `app.setName('Apex Debug Studio')` is called before anything else in `main.js`
 
 ### Monaco editor not loading
 - Ensure `node_modules/monaco-editor/` exists: `npm install`
@@ -553,7 +553,7 @@ Loaded via AMD (RequireJS) from `node_modules/monaco-editor/min/vs/`. In the `as
 
 ### macOS Gatekeeper blocks the built app
 - Right-click the `.app` → **Open** → click **Open** in the dialog
-- Or: `xattr -cr "/path/to/CongaCode.app"`
+- Or: `xattr -cr "/path/to/Apex Debug Studio.app"`
 
 ### npm install times out
 - Use the Artifactory proxy with longer timeout:
@@ -598,7 +598,7 @@ Quick reference for finding things in the source code.
 | `cacheDom()` | 32 |
 | `THEMES` array | 88 |
 | `defineMonacoThemes()` | 105 |
-| Conga theme token rules | inside defineMonacoThemes |
+| Apex Dark theme token rules | inside defineMonacoThemes |
 | `initMonaco()` | 475 |
 | `createTab()` | 517 |
 | `activateTab()` | 549 |
@@ -696,4 +696,4 @@ Quick reference for finding things in the source code.
 
 ---
 
-*This file is the single source of truth for the CongaCode project. Keep it updated when making changes.*
+*This file is the single source of truth for the Apex Debug Studio project. Keep it updated when making changes.*

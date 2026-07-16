@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * apexdebug-harness.js — headless driver for the CongaCode Apex live-interpreter.
+ * apexdebug-harness.js — headless driver for the Apex Debug Studio Apex live-interpreter.
  *
  * Runs the SAME engine the GUI debugger uses (src/renderer/modules/apexengine.js +
  * apexlang.js) against a REAL Salesforce org, with no Electron window and no manual
@@ -24,7 +24,7 @@
  *   --org <alias>         Target org alias/username (default: sf default target-org).
  *   --project <dir>       SFDX project dir for cross-class step-into + namespace (default: --file's dir).
  *   --namespace <ns>      Managed-package namespace for SOQL/Apex retry (default: auto-detect).
- *   --log <path>          Transcript log file (default: ~/CongaCode/logs/harness-<ts>.log).
+ *   --log <path>          Transcript log file (default: ~/ApexDebugStudio/logs/harness-<ts>.log).
  *   --no-org             Run without an org (SOQL returns 0 rows; useful for pure-logic bugs).
  *   --no-system-mode     Don't deploy/use the CCDebugQuery helper; run SOQL in user mode
  *                        (FLS-hidden managed-package fields will error with "No such column").
@@ -72,7 +72,7 @@ if (ARGS.help || (!ARGS.file && !ARGS.stdin)) {
 }
 
 /* ------------------------------ logging ----------------------------- */
-const LOG_DIR = path.join(os.homedir(), 'CongaCode', 'logs');
+const LOG_DIR = path.join(os.homedir(), 'ApexDebugStudio', 'logs');
 const ts = new Date().toISOString().replace(/[:.]/g, '-');
 const LOG_FILE = ARGS.log || path.join(LOG_DIR, `harness-${ts}.log`);
 try { fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true }); } catch (_) { /* best effort */ }
@@ -646,7 +646,7 @@ function deriveClassName(source) {
 async function main() {
   await resolveDefaultOrg();
   out('='.repeat(70));
-  out(`CongaCode Apex harness — ${new Date().toISOString()}`);
+  out(`Apex Debug Studio Apex harness — ${new Date().toISOString()}`);
   out(`org:      ${liveOrg() ? TARGET_ORG : '(none / --no-org)'}`);
   out(`log:      ${LOG_FILE}`);
 

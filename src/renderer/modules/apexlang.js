@@ -1,5 +1,5 @@
 /* ========================================================================
-   CongaCode — Apex Language Front-End (apexlang.js)
+   Apex Debug Studio — Apex Language Front-End (apexlang.js)
    Real lexer + recursive-descent parser for Apex → full AST.
    Used by apexengine.js (the live interpreter) the same way V8's parser
    feeds its interpreter. No DOM dependencies — also loadable in Node

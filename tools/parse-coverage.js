@@ -2,7 +2,7 @@
 /*
  * Apex engine parse-coverage harness.
  *
- * Runs the CongaCode ApexEngine over a corpus of .cls files entirely headless
+ * Runs the Apex Debug Studio ApexEngine over a corpus of .cls files entirely headless
  * (no org, no GUI) and reports how many the engine can PARSE/COMPILE, with a
  * categorized breakdown of failures. This is the objective baseline the engine
  * is improved against.

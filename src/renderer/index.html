@@ -1,20 +1,38 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="github-dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: file: blob:; script-src 'self' 'unsafe-inline'; connect-src *;" />
-  <title>CongaCode</title>
+  <title>Apex Debug Studio</title>
   <link rel="stylesheet" href="styles.css" />
   <script>
-    // Apply saved theme before first paint to prevent flash
+    // Apply saved theme before first paint to prevent flash. Default = GitHub Dark.
+    // One-time: upgrade the legacy default ('dark'/none) to GitHub Dark. A flag
+    // (set by app.js after it also migrates the session) makes this run only once,
+    // so a user who later explicitly picks Dark keeps it.
     try {
-      const t = localStorage.getItem('congacode-theme');
-      if (t) document.documentElement.setAttribute('data-theme', t);
+      var MIG = 'apexstudio-theme-ghd-migrated';
+      var t = localStorage.getItem('apexstudio-theme') || localStorage.getItem('congacode-theme');
+      if (!localStorage.getItem(MIG) && (!t || t === 'dark')) {
+        t = 'github-dark';
+        try { localStorage.setItem('apexstudio-theme', 'github-dark'); } catch(_) {}
+      }
+      document.documentElement.setAttribute('data-theme', t ? (t === 'conga' ? 'apex' : t) : 'github-dark');
     } catch(e) {}
   </script>
 </head>
 <body>
+  <!-- Branded boot splash — painted immediately, masks Monaco load, dismissed by app.js after init() -->
+  <div id="app-splash" role="status" aria-label="Loading Apex Debug Studio">
+    <div class="splash-inner">
+      <img src="logo-large.svg" alt="" class="splash-logo" onerror="this.onerror=null;this.src='logo-large.png'" />
+      <div class="splash-title">Apex Debug Studio</div>
+      <div class="splash-tagline">Live Apex debugging, reimagined.</div>
+      <div class="splash-progress"><div class="splash-progress-bar"></div></div>
+    </div>
+  </div>
+
   <!-- Title bar -->
   <div id="titlebar">
     <div id="titlebar-drag"></div>
@@ -24,7 +42,7 @@
         <line x1="5.5" y1="2" x2="5.5" y2="14" stroke="currentColor" stroke-width="1.2"/>
       </svg>
     </button>
-    <span id="titlebar-title">CongaCode</span>
+    <span id="titlebar-title">Apex Debug Studio</span>
     <div id="titlebar-tools" class="titlebar-tools">
       <button class="titlebar-tool-btn" id="tbtn-api" title="API Client (⌃⇧A)">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
@@ -360,6 +378,7 @@
           <div class="dbg-panel-tabs">
             <button class="dbg-panel-tab active" data-tab="dbg-variables">Variables</button>
             <button class="dbg-panel-tab" data-tab="dbg-watch">Watch</button>
+            <button class="dbg-panel-tab" data-tab="dbg-dataflow">Data Flow</button>
             <button class="dbg-panel-tab" data-tab="dbg-callstack">Call Stack</button>
             <button class="dbg-panel-tab" data-tab="dbg-console">Console</button>
             <button class="dbg-panel-tab" data-tab="dbg-breakpoints">Breakpoints</button>
@@ -390,6 +409,11 @@
               <div class="dbg-empty">No active call stack</div>
             </div>
           </div>
+          <div id="dbg-dataflow" class="dbg-tab-content">
+            <div id="dbg-dataflow-body" class="dbg-scroll-body">
+              <div class="dbg-empty">No tracked objects. While paused, hover a value and click 📌 to follow it — this tab then shows which methods read it and which modify it.</div>
+            </div>
+          </div>
           <div id="dbg-console" class="dbg-tab-content">
             <div id="dbg-console-body" class="dbg-scroll-body">
               <div class="dbg-empty">Console — your System.debug() output appears here as the code runs.</div>
@@ -405,6 +429,11 @@
             </div>
           </div>
           <div id="dbg-orgactivity" class="dbg-tab-content">
+            <div class="dbg-org-controls">
+              <span class="dbg-org-controls-label">Read mode</span>
+              <button id="dbg-systemmode-toggle" class="sf-btn-sysmode" title="User mode (default) reads only what the connected user can see. Turn on System mode to read FLS-hidden managed-package fields — it deploys a small read-only helper class to the org if one isn't already there.">🔒 User mode</button>
+              <button id="dbg-clearlogs" class="tool-hdr-btn dbg-clearlogs-btn" title="Delete this tool's Apex debug logs from the connected org (debug logs only, never business data)">🧹 Clear debug logs</button>
+            </div>
             <div id="dbg-orgactivity-body" class="dbg-scroll-body">
               <div class="dbg-empty">Turn on the ⚡ Live Org toggle to run the entry method against the connected org (read-only — changes are rolled back). Toggle it OFF then ON, or press Restart ⟳, to run again.</div>
             </div>
@@ -422,8 +451,9 @@
         <span id="status-eol">LF</span>
         <span id="status-indent">Spaces: 2</span>
         <span id="status-minimap" class="status-clickable" title="Toggle Minimap">Minimap</span>
-        <span id="status-theme" class="status-clickable" title="Change Theme">Theme: Dark</span>
+        <span id="status-theme" class="status-clickable" title="Change Theme">Theme: GitHub Dark</span>
         <span id="status-sf-org" class="status-clickable status-sf-org" title="Click to select Salesforce Org">⚡ Select Org</span>
+        <span id="status-reopen-debug" class="status-clickable hidden" title="Reopen the debug panel">🐞 Debug panel</span>
         <span id="status-autosave" class="status-autosave">● Auto-saved</span>
       </div>
     </main>
@@ -570,8 +600,9 @@
   <div id="welcome-screen">
     <div class="welcome-content">
       <div class="welcome-header">
-        <img src="logo-large.png" alt="CongaCode" class="welcome-logo" />
-        <!-- <p class="welcome-subtitle">Editing evolved</p> -->
+        <img src="logo-large.svg" alt="Apex Debug Studio" class="welcome-logo" onerror="this.onerror=null;this.src='logo-large.png'" />
+        <h1 class="welcome-title">Apex Debug Studio</h1>
+        <p class="welcome-subtitle">Live Apex debugging, reimagined.</p>
       </div>
 
       <!-- Spotlight Search Bar -->
@@ -921,7 +952,7 @@
             <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
           </div>
           <pre id="screenshot-code" class="screenshot-code"></pre>
-          <div id="screenshot-watermark-text" class="screenshot-watermark">CongaCode</div>
+          <div id="screenshot-watermark-text" class="screenshot-watermark">Apex Debug Studio</div>
         </div>
       </div>
     </div>
@@ -1155,6 +1186,8 @@
         <option value="">Checking orgs...</option>
       </select>
       <span id="sf-org-label" class="sf-org-detail"></span>
+      <button id="sf-systemmode-toggle" class="sf-btn-sysmode" title="User mode (default) — reads only what the connected user can see; nothing is deployed. Click to enable system mode for hidden managed-package fields.">🔒 User mode</button>
+      <button id="sf-clearlogs" class="tool-hdr-btn" title="Delete this tool's Apex debug logs from the connected org (debug logs only, never business data)">🧹 Clear logs</button>
       <button id="sf-org-refresh" class="tool-hdr-btn" title="Refresh org list">⟳</button>
       <button id="sf-org-login" class="sf-btn-login" title="Authenticate new org">+ Add Org</button>
     </div>

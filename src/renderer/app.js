@@ -1,5 +1,5 @@
 /* ========================================================================
-   CongaCode — Renderer (app.js)
+   Apex Debug Studio — Renderer (app.js)
    ======================================================================== */
 
 'use strict';
@@ -20,7 +20,7 @@ const state = {
   recentSectionOpen: false,
   recentHeight: 150,       // starting height for recent section
   autoSaveTimers: {},
-  theme: 'dark',
+  theme: 'github-dark',
   welcomeVisible: true,
   treeSectionOpen: true,
   recentlyClosed: [],      // stack of { title, filePath, content } for Cmd+Shift+T
@@ -174,7 +174,7 @@ const THEMES = [
   { id: 'tomorrow-night',   label: 'Tomorrow Night',    base: 'vs-dark' },
   { id: 'ayu-dark',         label: 'Ayu Dark',          base: 'vs-dark' },
   { id: 'gruvbox',          label: 'Gruvbox Dark',      base: 'vs-dark' },
-  { id: 'conga',             label: 'Conga Theme',       base: 'vs-dark' },
+  { id: 'apex',             label: 'Apex Dark',         base: 'vs-dark' },
 ];
 
 function defineMonacoThemes(monaco) {
@@ -372,7 +372,7 @@ function defineMonacoThemes(monaco) {
       ],
       colors: { 'editor.background': '#282828', 'editor.foreground': '#ebdbb2', 'editor.selectionBackground': '#3c383680' },
     },
-    conga: {
+    apex: {
       base: 'vs-dark', inherit: true,
       rules: [
         // Comments
@@ -579,7 +579,7 @@ function initMonaco() {
       });
       // Add "File History" to editor right-click context menu
       state.editor.addAction({
-        id: 'congacode.fileHistory',
+        id: 'apexstudio.fileHistory',
         label: 'File History',
         contextMenuGroupId: '9_cutcopypaste',
         contextMenuOrder: 99,
@@ -591,7 +591,7 @@ function initMonaco() {
 
       // Salesforce submenu in editor right-click
       state.editor.addAction({
-        id: 'congacode.salesforce',
+        id: 'apexstudio.salesforce',
         label: '⚡ Salesforce',
         contextMenuGroupId: 'z_salesforce',
         contextMenuOrder: 0,
@@ -825,7 +825,7 @@ function markTabModified(id, modified) {
 
 function updateTitleBar(tab) {
   const mod = tab && tab.modified ? '● ' : '';
-  dom.titlebarTitle.textContent = tab ? `${mod}${tab.title} — CongaCode` : 'CongaCode';
+  dom.titlebarTitle.textContent = tab ? `${mod}${tab.title} — Apex Debug Studio` : 'Apex Debug Studio';
 }
 
 /* ================================================================
@@ -834,10 +834,10 @@ function updateTitleBar(tab) {
 
 async function openFileDialog() {
   try {
-    const filePaths = await window.congacode.openFileDialog();
+    const filePaths = await window.apexStudio.openFileDialog();
     if (!filePaths || filePaths.length === 0) return;
     for (const fp of filePaths) {
-      const content = await window.congacode.readFile(fp);
+      const content = await window.apexStudio.readFile(fp);
       if (content != null) await openFile(fp, content);
     }
   } catch (err) {
@@ -854,12 +854,12 @@ async function openFile(filePath, content) {
   // For image files, create a placeholder tab (content will be shown via image preview)
   if (isImageFile(name)) {
     createTab(name, filePath, '', 'plaintext');
-    await window.congacode.addRecent(filePath);
+    await window.apexStudio.addRecent(filePath);
     return;
   }
 
   createTab(name, filePath, content);
-  await window.congacode.addRecent(filePath);
+  await window.apexStudio.addRecent(filePath);
 }
 window.openFile = openFile;
 
@@ -886,9 +886,9 @@ async function saveFile(tabOrId) {
     content += '\n';
   }
   if (!tab.filePath) {
-    // Untitled — auto-save to ~/CongaCode/AutoSave/YYYY-MM-DD/
+    // Untitled — auto-save to ~/ApexDebugStudio/AutoSave/YYYY-MM-DD/
     const today = new Date().toISOString().slice(0, 10);
-    const dir = await window.congacode.getAutoSavePath(today);
+    const dir = await window.apexStudio.getAutoSavePath(today);
     // Use tab title, sanitize it, and add .txt extension
     const safeName = (tab.title || 'Untitled').replace(/[^a-zA-Z0-9._\- ]/g, '_').trim() || 'Untitled';
     const baseName = safeName.includes('.') ? safeName : `${safeName}.txt`;
@@ -897,20 +897,20 @@ async function saveFile(tabOrId) {
     const ext = baseName.substring(baseName.lastIndexOf('.'));
     const stem = baseName.substring(0, baseName.lastIndexOf('.'));
     let i = 1;
-    while (await window.congacode.stat(filePath)) {
+    while (await window.apexStudio.stat(filePath)) {
       filePath = `${dir}/${stem}-${i}${ext}`;
       i++;
     }
-    await window.congacode.writeFile(filePath, content);
+    await window.apexStudio.writeFile(filePath, content);
     tab.filePath = filePath;
     tab.title = filePath.split('/').pop();
     renderTabs();
     updateTitleBar(tab);
     updateBreadcrumbs();
     // Add to recent files so it appears on the welcome page
-    await window.congacode.addRecent(filePath);
+    await window.apexStudio.addRecent(filePath);
   } else {
-    await window.congacode.writeFile(tab.filePath, content);
+    await window.apexStudio.writeFile(tab.filePath, content);
   }
   markTabModified(tab.id, false);
   showAutoSaved();
@@ -929,7 +929,7 @@ async function saveAsFile() {
   }
 
   const defaultName = tab.filePath || tab.title;
-  const newPath = await window.congacode.saveFileDialog(defaultName);
+  const newPath = await window.apexStudio.saveFileDialog(defaultName);
   if (!newPath) return;
 
   // Trim trailing whitespace if applicable
@@ -940,7 +940,7 @@ async function saveAsFile() {
     content += '\n';
   }
 
-  await window.congacode.writeFile(newPath, content);
+  await window.apexStudio.writeFile(newPath, content);
 
   const newName = newPath.split('/').pop();
   const oldWasRichText = tab._richTextMode;
@@ -972,7 +972,7 @@ async function saveAsFile() {
   updateStatusLanguage(tab);
   if (state.folderPath) await refreshTree();
   showToast(`Saved as ${newName}`, 'success', 2000);
-  await window.congacode.addRecent(newPath);
+  await window.apexStudio.addRecent(newPath);
 }
 
 function showAutoSaved() {
@@ -1019,7 +1019,7 @@ async function saveSession() {
       content: t.filePath ? null : (t.model ? t.model.getValue() : ''),
     }));
     const activeTab = state.tabs.find((t) => t.id === state.activeTabId);
-    await window.congacode.saveSession({
+    await window.apexStudio.saveSession({
       tabs,
       activeIndex: restorable.findIndex((t) => t.id === state.activeTabId),
       activeFilePath: activeTab && activeTab.filePath ? activeTab.filePath : null,
@@ -1043,21 +1043,29 @@ async function restoreSession() {
   const params = new URLSearchParams(window.location.search);
   const isNewWindow = params.get('new') === '1';
 
+  // Close the one-time GitHub-Dark migration window on the very first boot after
+  // this update. We capture whether it was pending, then immediately set the flag
+  // so anything the user picks from here on is respected (see migrateLegacyTheme).
+  try {
+    ghdMigrationPending = !localStorage.getItem('apexstudio-theme-ghd-migrated');
+    localStorage.setItem('apexstudio-theme-ghd-migrated', '1');
+  } catch { ghdMigrationPending = false; }
+
   // Tell a WINDOW RELOAD (Cmd/Ctrl+R · "Reload Window") apart from a cold app launch.
   // sessionStorage survives a renderer reload but is empty in a brand-new process /
   // window — so finding the flag means "this document was reloaded". We fully restore
   // the workspace only on reload; a cold start keeps the deliberate welcome screen.
   let isReload = false;
   try {
-    isReload = sessionStorage.getItem('congacode-window-live') === '1';
-    sessionStorage.setItem('congacode-window-live', '1');
+    isReload = sessionStorage.getItem('apexstudio-window-live') === '1';
+    sessionStorage.setItem('apexstudio-window-live', '1');
   } catch {}
 
   // New windows are always a clean slate (but keep the theme preference).
   if (isNewWindow) {
     try {
-      const session = await window.congacode.loadSession();
-      if (session?.theme) { state.theme = session.theme; applyTheme(state.theme); }
+      const session = await window.apexStudio.loadSession();
+      if (session?.theme) { state.theme = migrateLegacyTheme(session.theme); applyTheme(state.theme); }
     } catch {}
     state.sidebarVisible = false;
     applySidebarState();
@@ -1065,10 +1073,10 @@ async function restoreSession() {
   }
 
   try {
-    const session = await window.congacode.loadSession();
+    const session = await window.apexStudio.loadSession();
     if (!session) return;
     // User preferences always come back.
-    if (session.theme) { state.theme = session.theme; applyTheme(state.theme); }
+    if (session.theme) { state.theme = migrateLegacyTheme(session.theme); applyTheme(state.theme); }
     if (session.sidebarWidth) state.sidebarWidth = session.sidebarWidth;
 
     if (isReload) {
@@ -1104,7 +1112,7 @@ async function restoreWorkspace(session) {
       if (!t) continue;
       try {
         if (t.filePath) {
-          const content = await window.congacode.readFile(t.filePath);
+          const content = await window.apexStudio.readFile(t.filePath);
           if (content != null) await openFile(t.filePath, content); // skip files that vanished
         } else if (t.content != null) {
           createTab(t.title || null, null, t.content); // unsaved/untitled buffer
@@ -1155,11 +1163,11 @@ async function openFolder(dirPath) {
     // Update terminal CWD if terminal is open
     if (state.terminalVisible && !state.terminalCwd) {
       state.terminalCwd = dirPath;
-      window.congacode.terminalSetCwd(dirPath);
+      window.apexStudio.terminalSetCwd(dirPath);
       updateTerminalCwd();
     }
     // Add folder to recent list
-    await window.congacode.addRecent(dirPath);
+    await window.apexStudio.addRecent(dirPath);
     dom.fileTreeEmpty.classList.add('hidden');
     dom.fileTree.innerHTML = '';
     dom.rootFolderBar.classList.remove('hidden');
@@ -1183,7 +1191,7 @@ async function openFolder(dirPath) {
 
 async function openFolderDialog() {
   try {
-    const dirPath = await window.congacode.openFolderDialog();
+    const dirPath = await window.apexStudio.openFolderDialog();
     if (!dirPath) return;
     hideWelcome();
     await openFolder(dirPath);
@@ -1195,7 +1203,7 @@ async function openFolderDialog() {
 async function renderTreeDir(dirPath, parentEl, depth) {
   let entries;
   try {
-    entries = await window.congacode.readDir(dirPath);
+    entries = await window.apexStudio.readDir(dirPath);
   } catch (err) {
     console.error('readDir error:', err);
     return;
@@ -1274,7 +1282,7 @@ async function renderTreeDir(dirPath, parentEl, depth) {
         dom.fileTree.querySelectorAll('.tree-item.active').forEach((el) => el.classList.remove('active'));
         item.classList.add('active');
         try {
-          const content = await window.congacode.readFile(entry.path);
+          const content = await window.apexStudio.readFile(entry.path);
           await openFile(entry.path, content);
         } catch (err) {
           console.error('Failed to open file:', err);
@@ -1395,14 +1403,14 @@ function initContextMenu() {
         const name = await showInputDialog('New File', 'New file name:');
         if (!name) return;
         const fp = `${parentDir}/${name}`;
-        await window.congacode.writeFile(fp, '');
+        await window.apexStudio.writeFile(fp, '');
         await refreshTree();
         break;
       }
       case 'new-folder': {
         const name = await showInputDialog('New Folder', 'New folder name:');
         if (!name) return;
-        await window.congacode.createDir(`${parentDir}/${name}`);
+        await window.apexStudio.createDir(`${parentDir}/${name}`);
         await refreshTree();
         break;
       }
@@ -1411,13 +1419,13 @@ function initContextMenu() {
         const newName = await showInputDialog('Rename', 'Rename to:', oldName);
         if (!newName || newName === oldName) return;
         const newPath = tp.substring(0, tp.lastIndexOf('/')) + '/' + newName;
-        await window.congacode.rename(tp, newPath);
+        await window.apexStudio.rename(tp, newPath);
         await refreshTree();
         break;
       }
       case 'delete': {
         if (!(await showConfirmDialog('Delete', `Delete "${tp.split('/').pop()}"?`))) return;
-        await window.congacode.deleteFile(tp);
+        await window.apexStudio.deleteFile(tp);
         await refreshTree();
         break;
       }
@@ -1426,7 +1434,7 @@ function initContextMenu() {
         break;
       }
       case 'reveal-finder': {
-        try { await window.congacode.revealInFinder(tp); } catch (err) { console.error('reveal error:', err); }
+        try { await window.apexStudio.revealInFinder(tp); } catch (err) { console.error('reveal error:', err); }
         break;
       }
       case 'file-history': {
@@ -1436,7 +1444,7 @@ function initContextMenu() {
         break;
       }
       case 'open-terminal': {
-        try { await window.congacode.openInTerminal(parentDir); } catch (err) { console.error('open terminal error:', err); }
+        try { await window.apexStudio.openInTerminal(parentDir); } catch (err) { console.error('open terminal error:', err); }
         break;
       }
       // Salesforce context actions
@@ -1524,7 +1532,7 @@ function initTabContextMenu() {
         break;
       case 'tab-reveal-finder':
         if (tab.filePath) {
-          try { await window.congacode.revealInFinder(tab.filePath); } catch (err) { console.error(err); }
+          try { await window.apexStudio.revealInFinder(tab.filePath); } catch (err) { console.error(err); }
         }
         break;
       case 'tab-file-history':
@@ -1535,7 +1543,7 @@ function initTabContextMenu() {
       case 'tab-open-terminal': {
         if (tab.filePath) {
           const dir = tab.filePath.substring(0, tab.filePath.lastIndexOf('/'));
-          try { await window.congacode.openInTerminal(dir); } catch (err) { console.error(err); }
+          try { await window.apexStudio.openInTerminal(dir); } catch (err) { console.error(err); }
         }
         break;
       }
@@ -1544,7 +1552,7 @@ function initTabContextMenu() {
           const confirmed = await showConfirmDialog('Delete File', `Are you sure you want to permanently delete "${tab.title}"? This action cannot be undone.`);
           if (!confirmed) break;
           try {
-            const ok = await window.congacode.deleteFile(tab.filePath);
+            const ok = await window.apexStudio.deleteFile(tab.filePath);
             if (ok) {
               closeTab(tab.id);
               if (state.folderPath) await refreshTree();
@@ -1613,7 +1621,7 @@ function startInlineTabRename(tab) {
     const dir = tab.filePath.substring(0, tab.filePath.lastIndexOf('/'));
     const newPath = dir + '/' + newName;
     try {
-      const ok = await window.congacode.rename(tab.filePath, newPath);
+      const ok = await window.apexStudio.rename(tab.filePath, newPath);
       if (!ok) { showToast('Rename failed', 'error', 3000); renderTabs(); return; }
       tab.filePath = newPath;
       tab.title = newName;
@@ -1633,7 +1641,7 @@ function startInlineTabRename(tab) {
       updateStatusLanguage(tab);
       if (state.folderPath) await refreshTree();
       showToast(`Renamed to ${newName}`, 'success', 2000);
-      await window.congacode.addRecent(newPath);
+      await window.apexStudio.addRecent(newPath);
     } catch (err) {
       showToast(`Rename failed: ${err.message}`, 'error', 3000);
       renderTabs();
@@ -1858,7 +1866,7 @@ async function getRecentFilePaths() {
     }
   }
   try {
-    const recents = await window.congacode.getRecent();
+    const recents = await window.apexStudio.getRecent();
     for (const entry of (recents || [])) {
       const fp = typeof entry === 'string' ? entry : (entry && entry.path);
       if (!fp || seen.has(fp)) continue;
@@ -1879,7 +1887,7 @@ function hideQuickOpen() {
 async function loadQuickOpenFiles() {
   if (state.folderPath) {
     try {
-      quickOpenFiles = await window.congacode.getAllFiles(state.folderPath);
+      quickOpenFiles = await window.apexStudio.getAllFiles(state.folderPath);
     } catch {
       quickOpenFiles = [];
     }
@@ -1909,7 +1917,7 @@ function renderQuickOpenResults(files) {
     item.addEventListener('click', async () => {
       hideQuickOpen();
       try {
-        const content = await window.congacode.readFile(fp);
+        const content = await window.apexStudio.readFile(fp);
         await openFile(fp, content);
       } catch (err) { console.error('quick open error:', err); }
     });
@@ -1967,7 +1975,7 @@ function initQuickOpen() {
 
 const COMMANDS = [
   { id: 'new-tab',        label: 'New Tab',            shortcut: '⌘N',    action: () => createTab() },
-  { id: 'new-window',     label: 'New Window',         shortcut: '⇧⌘N',   action: () => window.congacode.newWindow() },
+  { id: 'new-window',     label: 'New Window',         shortcut: '⇧⌘N',   action: () => window.apexStudio.newWindow() },
   { id: 'open-file',      label: 'Open File',          shortcut: '⌘O',    action: openFileDialog },
   { id: 'open-folder',    label: 'Open Folder',        shortcut: '⇧⌘O',   action: openFolderDialog },
   { id: 'save',           label: 'Save',               shortcut: '⌘S',    action: () => { const t = state.tabs.find((t) => t.id === state.activeTabId); if (t) saveFile(t); } },
@@ -2165,7 +2173,7 @@ async function doGlobalSearch() {
   try {
     const caseSensitive = dom.globalSearchCase.checked;
     const isRegex = dom.globalSearchRegex.checked;
-    const results = await window.congacode.searchInFiles(state.folderPath, query, { caseSensitive, isRegex });
+    const results = await window.apexStudio.searchInFiles(state.folderPath, query, { caseSensitive, isRegex });
 
     // Check if this search was aborted
     if (controller.signal.aborted) return;
@@ -2204,7 +2212,7 @@ async function doGlobalSearch() {
           // Hide overlay so user can see the file, results stay for when they come back
           dom.globalSearchOverlay.classList.add('hidden');
           try {
-            const content = await window.congacode.readFile(file.filePath);
+            const content = await window.apexStudio.readFile(file.filePath);
             await openFile(file.filePath, content);
             // Jump to the line
             const ln = match.line || match.lineNumber;
@@ -2348,11 +2356,23 @@ function renderThemeList(themes) {
   }
 }
 
+// One-time upgrade of the legacy default theme ('dark') to the new GitHub Dark
+// default. `ghdMigrationPending` (captured once at boot in restoreSession) is true
+// only on the first launch after this update, so it never overrides a theme the
+// user explicitly selects afterward.
+let ghdMigrationPending = false;
+function migrateLegacyTheme(themeId) {
+  if (ghdMigrationPending && (!themeId || themeId === 'dark')) themeId = 'github-dark';
+  return themeId === 'conga' ? 'apex' : themeId;
+}
+
 function applyTheme(themeId) {
+  // Legacy rebrand migration: the old "conga" theme id is now "apex".
+  if (themeId === 'conga') themeId = 'apex';
   state.theme = themeId;
   document.documentElement.setAttribute('data-theme', themeId);
   // Persist theme to localStorage for instant load on next startup
-  try { localStorage.setItem('congacode-theme', themeId); } catch(e) {}
+  try { localStorage.setItem('apexstudio-theme', themeId); } catch(e) {}
   if (state.editor) {
     monaco.editor.setTheme(monacoThemeId(themeId));
   }
@@ -2471,7 +2491,7 @@ function toggleRecentSection() {
 
 async function loadRecentFiles() {
   try {
-    const recentFiles = await window.congacode.getRecent();
+    const recentFiles = await window.apexStudio.getRecent();
     renderRecentList(recentFiles || []);
     renderWelcomeRecent(recentFiles || []);
   } catch {
@@ -2515,7 +2535,7 @@ function renderRecentList(files) {
       item.innerHTML = `<span class="recent-item-name">${escHtml(entry.name)}</span><span class="recent-item-path">${escHtml(entry.shortDir)}</span>`;
       item.addEventListener('click', async () => {
         try {
-          const content = await window.congacode.readFile(entry.path);
+          const content = await window.apexStudio.readFile(entry.path);
           await openFile(entry.path, content);
         } catch (err) { console.error('open recent error:', err); }
       });
@@ -2577,7 +2597,7 @@ function renderWelcomeRecent(files) {
       item.title = entry.path;
       item.addEventListener('click', async () => {
         try {
-          const content = await window.congacode.readFile(entry.path);
+          const content = await window.apexStudio.readFile(entry.path);
           await openFile(entry.path, content);
         } catch (err) { console.error('open recent error:', err); }
       });
@@ -2715,7 +2735,7 @@ async function showRecentPanel() {
   const list = $('#recent-panel-list');
   list.innerHTML = '<div style="padding:16px;color:var(--text-muted);">Loading...</div>';
 
-  const files = await window.congacode.getRecent() || [];
+  const files = await window.apexStudio.getRecent() || [];
   list.innerHTML = '';
 
   if (files.length === 0) {
@@ -2747,7 +2767,7 @@ async function showRecentPanel() {
         item.title = fp;
         item.addEventListener('click', async () => {
           try {
-            const content = await window.congacode.readFile(fp);
+            const content = await window.apexStudio.readFile(fp);
             await openFile(fp, content);
             hideRecentPanel();
           } catch (err) { console.error('open recent error:', err); }
@@ -2771,7 +2791,7 @@ async function showRecentPanel() {
       item.title = entry.path;
       item.addEventListener('click', async () => {
         try {
-          const content = await window.congacode.readFile(entry.path);
+          const content = await window.apexStudio.readFile(entry.path);
           await openFile(entry.path, content);
           hideRecentPanel();
         } catch (err) { console.error('open recent error:', err); }
@@ -2801,7 +2821,7 @@ async function groupRecentFilesWithStat(files) {
 
   for (const fp of files) {
     try {
-      const stat = await window.congacode.stat(fp);
+      const stat = await window.apexStudio.stat(fp);
       if (stat && stat.isDirectory) {
         directoryPaths.push(fp);
         continue;
@@ -2956,9 +2976,9 @@ async function runSystemSearch(query, gen) {
 
   try {
     // Run searches in parallel: file name search + workspace content search
-    const fileSearchPromise = window.congacode.systemSearch(query);
+    const fileSearchPromise = window.apexStudio.systemSearch(query);
     const contentSearchPromise = state.folderPath
-      ? window.congacode.searchInFiles(state.folderPath, query, { caseSensitive: false, isRegex: false })
+      ? window.apexStudio.searchInFiles(state.folderPath, query, { caseSensitive: false, isRegex: false })
       : Promise.resolve([]);
 
     const [fileResults, contentResults] = await Promise.all([fileSearchPromise, contentSearchPromise]);
@@ -3150,7 +3170,7 @@ async function openSystemSearchResult(result) {
         }
       }
 
-      const content = await window.congacode.readFile(result.path);
+      const content = await window.apexStudio.readFile(result.path);
       await openFile(result.path, content);
       // If this was a content match, jump to the matching line
       if (result._contentMatch && result._line && state.editor) {
@@ -3262,7 +3282,7 @@ async function runWelcomeSearch(query, gen) {
   if (!results || !list) return;
 
   try {
-    const items = await window.congacode.systemSearch(query);
+    const items = await window.apexStudio.systemSearch(query);
     // Discard stale results if a newer search was started
     if (gen !== _wsSearchGen) return;
     _wsSearchResults = items;
@@ -3318,7 +3338,7 @@ async function openWelcomeSearchResult(result) {
     await openFolder(result.path);
   } else {
     try {
-      const content = await window.congacode.readFile(result.path);
+      const content = await window.apexStudio.readFile(result.path);
       await openFile(result.path, content);
     } catch (err) {
       console.error('Failed to open welcome search result:', err);
@@ -3487,13 +3507,13 @@ function initWelcome() {
   $('#btn-welcome-new')?.addEventListener('click', () => createTab());
   $('#btn-welcome-open')?.addEventListener('click', openFileDialog);
   $('#btn-welcome-folder')?.addEventListener('click', openFolderDialog);
-  $('#btn-welcome-new-window')?.addEventListener('click', () => window.congacode.newWindow());
+  $('#btn-welcome-new-window')?.addEventListener('click', () => window.apexStudio.newWindow());
   // "More..." button to show full recent panel
   $('#btn-welcome-more-recent')?.addEventListener('click', () => showRecentPanel());
   // Recent panel close & clear
   $('#btn-recent-close')?.addEventListener('click', () => hideRecentPanel());
   $('#btn-recent-clear')?.addEventListener('click', async () => {
-    await window.congacode.clearRecent();
+    await window.apexStudio.clearRecent();
     hideRecentPanel();
     await loadRecentFiles();
   });
@@ -3520,7 +3540,7 @@ function initNoEditorShortcuts() {
       case 'command-palette': showCommandPalette(); break;
       case 'search-files':    showGlobalSearch();   break;
       case 'toggle-terminal': {
-        if (state.folderPath) { window.congacode.openInTerminal(state.folderPath); }
+        if (state.folderPath) { window.apexStudio.openInTerminal(state.folderPath); }
         break;
       }
     }
@@ -3621,7 +3641,7 @@ function initKeyboard() {
     // Cmd+N → New tab
     if (cmd && !shift && !alt && e.key === 'n') { e.preventDefault(); createTab(); return; }
     // Cmd+Shift+N → New window
-    if (cmd && shift && !alt && e.key === 'N') { e.preventDefault(); window.congacode.newWindow(); return; }
+    if (cmd && shift && !alt && e.key === 'N') { e.preventDefault(); window.apexStudio.newWindow(); return; }
     // Cmd+O → Open file
     if (cmd && !shift && !alt && e.key === 'o') { e.preventDefault(); openFileDialog(); return; }
     // Cmd+Shift+O → Open folder
@@ -3687,7 +3707,7 @@ function initKeyboard() {
         if (pos && model) {
           const fp = model.uri.fsPath || model.uri.path;
           if (fp.endsWith('.cls') || fp.endsWith('.trigger')) {
-            const ev = new CustomEvent('congacode-toggle-breakpoint', { detail: { filePath: fp, line: pos.lineNumber } });
+            const ev = new CustomEvent('apexstudio-toggle-breakpoint', { detail: { filePath: fp, line: pos.lineNumber } });
             document.dispatchEvent(ev);
           }
         }
@@ -3904,7 +3924,7 @@ function initKeyboard() {
    21. IPC HANDLERS (from main process)
    ================================================================ */
 function initIpcHandlers() {
-  const api = window.congacode;
+  const api = window.apexStudio;
   // File menu
   api.on('file:new', () => createTab());
   api.on('file:open-dialog', () => openFileDialog());
@@ -3972,12 +3992,12 @@ function initDragDrop() {
     e.stopPropagation();
     for (const file of e.dataTransfer.files) {
       try {
-        const stats = await window.congacode.stat(file.path);
+        const stats = await window.apexStudio.stat(file.path);
         if (stats && stats.isDirectory) {
           await openFolder(file.path);
           return; // open first dropped folder and stop
         } else {
-          const content = await window.congacode.readFile(file.path);
+          const content = await window.apexStudio.readFile(file.path);
           await openFile(file.path, content);
         }
       } catch (err) { console.error('drag drop error:', err); }
@@ -4194,7 +4214,7 @@ function updateBreadcrumbs() {
     // Left-click: reveal folder in Finder / open file
     crumb.addEventListener('click', () => {
       if (!isLast) {
-        window.congacode.revealInFinder(segmentPath);
+        window.apexStudio.revealInFinder(segmentPath);
       }
     });
 
@@ -4235,10 +4255,10 @@ function initBreadcrumbContextMenu() {
 
     switch (action) {
       case 'bc-reveal-finder':
-        try { await window.congacode.revealInFinder(bcContextPath); } catch (err) { console.error(err); }
+        try { await window.apexStudio.revealInFinder(bcContextPath); } catch (err) { console.error(err); }
         break;
       case 'bc-open-terminal':
-        try { await window.congacode.openInTerminal(dirPath); } catch (err) { console.error(err); }
+        try { await window.apexStudio.openInTerminal(dirPath); } catch (err) { console.error(err); }
         break;
       case 'bc-copy-path':
         await navigator.clipboard.writeText(bcContextPath);
@@ -4260,10 +4280,10 @@ async function showImagePreview(filePath) {
   const ext = filePath.split('.').pop().toLowerCase();
   if (ext === 'svg') {
     // SVG can be loaded directly
-    const content = await window.congacode.readFile(filePath);
+    const content = await window.apexStudio.readFile(filePath);
     dom.imagePreviewImg.src = 'data:image/svg+xml;base64,' + btoa(content);
   } else {
-    const base64 = await window.congacode.readBinary(filePath);
+    const base64 = await window.apexStudio.readBinary(filePath);
     if (base64) {
       const mime = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', bmp: 'image/bmp', webp: 'image/webp', ico: 'image/x-icon', tiff: 'image/tiff', tif: 'image/tiff' };
       dom.imagePreviewImg.src = `data:${mime[ext] || 'image/png'};base64,${base64}`;
@@ -4272,7 +4292,7 @@ async function showImagePreview(filePath) {
 
   // Show file info
   try {
-    const stat = await window.congacode.stat(filePath);
+    const stat = await window.apexStudio.stat(filePath);
     const size = stat?.size || 0;
     const sizeStr = size > 1024*1024 ? (size/1024/1024).toFixed(1) + ' MB' : size > 1024 ? (size/1024).toFixed(1) + ' KB' : size + ' B';
     dom.imagePreviewInfo.textContent = `${filePath.split('/').pop()} — ${sizeStr}`;
@@ -4316,7 +4336,7 @@ async function updateMarkdownPreview() {
   }
   const content = tab.model.getValue();
   try {
-    const html = await window.congacode.renderMarkdown(content);
+    const html = await window.apexStudio.renderMarkdown(content);
     dom.markdownContent.innerHTML = html || '';
   } catch {
     dom.markdownContent.innerHTML = '<div class="outline-empty">Error rendering markdown</div>';
@@ -4479,7 +4499,7 @@ async function showFileHistoryInPanel(filePath) {
   dom.historyList.innerHTML = `<div class="history-empty">Loading git history for ${escHtml(name)}…</div>`;
 
   try {
-    const commits = await window.congacode.gitFileLog(state.folderPath, relPath, 50);
+    const commits = await window.apexStudio.gitFileLog(state.folderPath, relPath, 50);
     if (!commits || commits.length === 0) {
       dom.historyList.innerHTML = `<div class="history-empty">No git history for ${escHtml(name)}</div>`;
       return;
@@ -4543,7 +4563,7 @@ async function showFileHistoryInPanel(filePath) {
 async function showCommitDiff(absPath, relPath, commit) {
   try {
     // Fetch the file content at this commit
-    const content = await window.congacode.gitShowAt(
+    const content = await window.apexStudio.gitShowAt(
       state.folderPath, commit.fullHash, relPath
     );
 
@@ -4740,7 +4760,7 @@ function makeTabDraggable(el, tab) {
 let fileWatchDebounce = null;
 
 function initFileWatcher() {
-  window.congacode.on('watch:change', (data) => {
+  window.apexStudio.on('watch:change', (data) => {
     // Debounce tree refresh to avoid excessive updates
     clearTimeout(fileWatchDebounce);
     fileWatchDebounce = setTimeout(async () => {
@@ -4750,7 +4770,7 @@ function initFileWatcher() {
         const tab = state.tabs.find(t => t.filePath === data.path);
         if (tab && data.event === 'change') {
           try {
-            const content = await window.congacode.readFile(data.path);
+            const content = await window.apexStudio.readFile(data.path);
             if (content !== null && content !== tab.model.getValue()) {
               // File changed externally — update if not modified by user
               if (!tab.modified) {
@@ -4767,7 +4787,7 @@ function initFileWatcher() {
 
 async function startWatching(dirPath) {
   try {
-    await window.congacode.watchFolder(dirPath);
+    await window.apexStudio.watchFolder(dirPath);
   } catch (err) {
     console.error('startWatching error:', err);
   }
@@ -4775,7 +4795,7 @@ async function startWatching(dirPath) {
 
 async function stopWatching(dirPath) {
   try {
-    await window.congacode.unwatchFolder(dirPath);
+    await window.apexStudio.unwatchFolder(dirPath);
   } catch {}
 }
 
@@ -4791,7 +4811,7 @@ async function refreshGitStatus() {
     return;
   }
   try {
-    const status = await window.congacode.gitStatus(state.folderPath);
+    const status = await window.apexStudio.gitStatus(state.folderPath);
     state.gitStatus = status;
     if (status) {
       dom.statusGit.classList.remove('hidden');
@@ -4834,7 +4854,7 @@ function getGitBadge(filePath) {
    ================================================================ */
 async function loadSettings() {
   try {
-    state.settings = await window.congacode.readSettings();
+    state.settings = await window.apexStudio.readSettings();
   } catch {
     state.settings = {};
   }
@@ -4843,7 +4863,7 @@ async function loadSettings() {
 
 async function saveSettings(newSettings) {
   state.settings = { ...state.settings, ...newSettings };
-  await window.congacode.writeSettings(state.settings);
+  await window.apexStudio.writeSettings(state.settings);
 }
 
 function openSettingsTab() {
@@ -5107,7 +5127,7 @@ function showTerminal() {
   dom.terminalResizer.classList.remove('hidden');
   if (!state.terminalCwd) {
     state.terminalCwd = state.folderPath || '';
-    if (state.terminalCwd) window.congacode.terminalSetCwd(state.terminalCwd);
+    if (state.terminalCwd) window.apexStudio.terminalSetCwd(state.terminalCwd);
   }
   updateTerminalCwd();
   dom.terminalInput.focus();
@@ -5142,7 +5162,7 @@ async function runTerminalCommand(cmd) {
   dom.terminalInput.value = '';
   dom.terminalInput.disabled = true;
   try {
-    const result = await window.congacode.terminalRun(cmd);
+    const result = await window.apexStudio.terminalRun(cmd);
     if (result.clear) dom.terminalOutput.innerHTML = '';
     if (result.error) appendTerminalLine(result.error, 'term-error');
     if (result.cwd) {
@@ -5184,7 +5204,7 @@ function initTerminal() {
     }
     if (e.ctrlKey && e.key === 'c') {
       if (terminalRunning) {
-        window.congacode.terminalKill();
+        window.apexStudio.terminalKill();
         appendTerminalLine('^C', 'term-error');
       }
       return;
@@ -5212,7 +5232,7 @@ function initTerminal() {
   $('#btn-terminal-close').addEventListener('click', hideTerminal);
   $('#btn-terminal-clear').addEventListener('click', () => { dom.terminalOutput.innerHTML = ''; });
   $('#btn-terminal-kill').addEventListener('click', () => {
-    window.congacode.terminalKill();
+    window.apexStudio.terminalKill();
     appendTerminalLine('^C (killed)', 'term-error');
   });
   // Terminal resizer
@@ -5336,12 +5356,12 @@ async function showDiffForCurrentFile() {
 
 async function showDiffView(relPath, absPath) {
   try {
-    const original = await window.congacode.gitShow(state.folderPath, relPath);
+    const original = await window.apexStudio.gitShow(state.folderPath, relPath);
     if (original == null) {
       showToast('No previous version found (new file or not in git)', 'info', 3000);
       return;
     }
-    const current = await window.congacode.readFile(absPath);
+    const current = await window.apexStudio.readFile(absPath);
     if (current == null) return;
     const diffTitle = `\u2194 ${relPath.split('/').pop()}`;
     const existingDiff = state.tabs.find(t => t.title === diffTitle);
@@ -5507,7 +5527,7 @@ async function loadBlameData() {
   const tab = state.tabs.find(t => t.id === state.activeTabId);
   if (!tab || !tab.filePath || !state.folderPath) { state.blameData = null; return; }
   try {
-    state.blameData = await window.congacode.gitBlame(state.folderPath, tab.filePath);
+    state.blameData = await window.apexStudio.gitBlame(state.folderPath, tab.filePath);
   } catch { state.blameData = null; }
 }
 
@@ -5609,8 +5629,8 @@ async function showGitInfoPopup() {
 
   // Fetch info & log in parallel
   const [info, commits] = await Promise.all([
-    window.congacode.gitInfo(state.folderPath).catch(() => null),
-    window.congacode.gitLog(state.folderPath, 10).catch(() => null),
+    window.apexStudio.gitInfo(state.folderPath).catch(() => null),
+    window.apexStudio.gitLog(state.folderPath, 10).catch(() => null),
   ]);
 
   if (!info) {
@@ -6541,7 +6561,7 @@ async function sendApiRequest() {
   }
 
   try {
-    const res = await window.congacode.sendApiRequest({ method, url: fullUrl, headers, body });
+    const res = await window.apexStudio.sendApiRequest({ method, url: fullUrl, headers, body });
 
     // Status
     const statusEl = $('#api-response-status');
@@ -6779,7 +6799,7 @@ function flattenPostmanItems(items, folderPrefix = '') {
 
 async function importApiCollection() {
   try {
-    const paths = await window.congacode.openFileDialog();
+    const paths = await window.apexStudio.openFileDialog();
     if (!paths || paths.length === 0) return;
     // Only pick .json files
     const jsonPaths = paths.filter(p => p.endsWith('.json'));
@@ -6787,7 +6807,7 @@ async function importApiCollection() {
 
     let imported = 0;
     for (const fp of jsonPaths) {
-      const raw = await window.congacode.readFile(fp);
+      const raw = await window.apexStudio.readFile(fp);
       if (!raw) { showToast(`Could not read ${fp}`, 'error'); continue; }
       let data;
       try { data = JSON.parse(raw); } catch { showToast(`Invalid JSON: ${fp}`, 'error'); continue; }
@@ -6799,8 +6819,8 @@ async function importApiCollection() {
         state.apiCollections.push({ name, requests });
         imported += requests.length;
       }
-      // Detect format: CongaCode native export
-      else if (data._congacode && Array.isArray(data.collections)) {
+      // Detect format: Apex Debug Studio native export (accepts legacy marker too)
+      else if ((data._apexdebugstudio || data._congacode) && Array.isArray(data.collections)) {
         data.collections.forEach(col => {
           state.apiCollections.push({ name: col.name || 'Imported', requests: col.requests || [] });
           imported += (col.requests || []).length;
@@ -6863,9 +6883,9 @@ async function exportApiCollection() {
     const postmanCollection = buildPostmanExport(col);
     const json = JSON.stringify(postmanCollection, null, 2);
     const defaultName = col.name.replace(/[^a-zA-Z0-9_-]/g, '_') + '.postman_collection.json';
-    const savePath = await window.congacode.saveFileDialog(defaultName);
+    const savePath = await window.apexStudio.saveFileDialog(defaultName);
     if (!savePath) continue;
-    const ok = await window.congacode.writeFile(savePath, json);
+    const ok = await window.apexStudio.writeFile(savePath, json);
     if (ok) showToast(`Exported "${col.name}" successfully`, 'info');
     else showToast('Export failed', 'error');
   }
@@ -7565,7 +7585,7 @@ function initBookmarks() {
 
   clearBtn?.addEventListener('click', async () => {
     state.bookmarks = [];
-    await window.congacode.saveBookmarks([]);
+    await window.apexStudio.saveBookmarks([]);
     renderBookmarks();
     showToast('All bookmarks cleared', 'info');
   });
@@ -7576,7 +7596,7 @@ function initBookmarks() {
 
 async function loadBookmarks() {
   try {
-    state.bookmarks = await window.congacode.loadBookmarks() || [];
+    state.bookmarks = await window.apexStudio.loadBookmarks() || [];
   } catch { state.bookmarks = []; }
 }
 
@@ -7605,7 +7625,7 @@ function addLineBookmark() {
   };
 
   state.bookmarks.push(bookmark);
-  window.congacode.saveBookmarks(state.bookmarks);
+  window.apexStudio.saveBookmarks(state.bookmarks);
   renderBookmarks();
   showToast(`Bookmarked line ${line} in ${tab.title}`, 'info');
 }
@@ -7626,7 +7646,7 @@ function addFreeBookmark(text) {
   };
 
   state.bookmarks.push(bookmark);
-  window.congacode.saveBookmarks(state.bookmarks);
+  window.apexStudio.saveBookmarks(state.bookmarks);
   renderBookmarks();
   showToast('Bookmark added', 'info');
 }
@@ -7671,7 +7691,7 @@ function renderBookmarks() {
         activateTab(tab.id);
       } else if (b.filePath && !b.filePath.startsWith('Untitled')) {
         try {
-          const content = await window.congacode.readFile(b.filePath);
+          const content = await window.apexStudio.readFile(b.filePath);
           if (content != null) await openFile(b.filePath, content);
         } catch {}
       }
@@ -7691,7 +7711,7 @@ function renderBookmarks() {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       state.bookmarks.splice(+btn.dataset.idx, 1);
-      window.congacode.saveBookmarks(state.bookmarks);
+      window.apexStudio.saveBookmarks(state.bookmarks);
       renderBookmarks();
     });
   });
@@ -7769,7 +7789,7 @@ async function exportScreenshot() {
   const canvas = await renderScreenshotCanvas();
   if (!canvas) return;
   const dataUrl = canvas.toDataURL('image/png');
-  const saved = await window.congacode.saveScreenshot(dataUrl);
+  const saved = await window.apexStudio.saveScreenshot(dataUrl);
   if (saved) showToast('Screenshot saved to ' + saved, 'info');
 }
 
@@ -7842,7 +7862,7 @@ function renderScreenshotCanvas() {
       ctx.fillStyle = 'rgba(255,255,255,0.15)';
       ctx.font = '11px -apple-system, sans-serif';
       ctx.textAlign = 'right';
-      ctx.fillText('CongaCode', canvas.width - padding - 8, canvas.height - padding - 8);
+      ctx.fillText('Apex Debug Studio', canvas.width - padding - 8, canvas.height - padding - 8);
     }
 
     resolve(canvas);
@@ -7887,7 +7907,7 @@ function initDbClient() {
   });
 
   browseBtn?.addEventListener('click', async () => {
-    const files = await window.congacode.openFileDialog();
+    const files = await window.apexStudio.openFileDialog();
     if (files && files[0]) {
       state.dbFilePath = files[0];
       $('#db-filepath').textContent = files[0].split('/').pop();
@@ -7897,7 +7917,7 @@ function initDbClient() {
   openBtn?.addEventListener('click', async () => {
     if (!state.dbFilePath) { showToast('Select a file first', 'warning'); return; }
     try {
-      const result = await window.congacode.dbOpen(state.dbFilePath);
+      const result = await window.apexStudio.dbOpen(state.dbFilePath);
       if (!result.ok) { showToast(result.error, 'warning'); return; }
       state.dbType = result.type;
       state.dbTables = result.tables || [];
@@ -7950,7 +7970,7 @@ async function runDbQuery(tableName) {
   if (statusEl) statusEl.textContent = 'Running...';
   try {
     const start = Date.now();
-    const result = await window.congacode.dbQuery(state.dbFilePath, query, tableName || query);
+    const result = await window.apexStudio.dbQuery(state.dbFilePath, query, tableName || query);
     const elapsed = Date.now() - start;
     if (!result.ok) {
       if (statusEl) statusEl.textContent = 'Error: ' + result.error;
@@ -7991,6 +8011,14 @@ function renderDbResults(columns, rows) {
 /* ================================================================
    25. INIT
    ================================================================ */
+// Dismiss the branded boot splash with a fade-out. Idempotent.
+function hideSplash() {
+  const el = document.getElementById('app-splash');
+  if (!el || el.classList.contains('splash-hidden')) return;
+  el.classList.add('splash-hidden');
+  setTimeout(() => el.classList.add('splash-done'), 480);
+}
+
 async function init() {
   cacheDom();
   applyTheme(state.theme);
@@ -8107,4 +8135,11 @@ async function init() {
 }
 
 // Boot
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', () => {
+  // Safety net: never let the splash trap the user, even if init stalls.
+  const splashSafety = setTimeout(hideSplash, 8000);
+  Promise.resolve()
+    .then(init)
+    .catch((e) => console.error('init failed', e))
+    .finally(() => { clearTimeout(splashSafety); hideSplash(); });
+});
