@@ -1936,19 +1936,20 @@ function renderQuickOpenResults(files) {
       } catch (err) { console.error('quick open error:', err); }
     });
     item.addEventListener('mouseenter', () => {
-      quickOpenUpdateSelected(i);
+      quickOpenUpdateSelected(i, false);
     });
     dom.quickOpenResults.appendChild(item);
   }
 }
 
-function quickOpenUpdateSelected(idx) {
+function quickOpenUpdateSelected(idx, scroll = true) {
   const items = dom.quickOpenResults.querySelectorAll('.qo-item');
   if (items.length === 0) return;
   items.forEach((el) => el.classList.remove('selected'));
   quickOpenSelectedIndex = Math.max(0, Math.min(idx, items.length - 1));
   items[quickOpenSelectedIndex].classList.add('selected');
-  items[quickOpenSelectedIndex].scrollIntoView({ block: 'nearest' });
+  // Hover must not scroll (it would shift the list under the cursor → jitter loop).
+  if (scroll) items[quickOpenSelectedIndex].scrollIntoView({ block: 'nearest' });
 }
 
 function initQuickOpen() {
@@ -2094,18 +2095,18 @@ function renderCommandResults(commands) {
     item.className = 'cp-item' + (i === 0 ? ' selected' : '');
     item.innerHTML = `<span>${escHtml(cmd.label)}</span><span class="shortcut">${cmd.shortcut}</span>`;
     item.addEventListener('click', () => { hideCommandPalette(); cmd.action(); });
-    item.addEventListener('mouseenter', () => cmdPaletteUpdateSelected(i));
+    item.addEventListener('mouseenter', () => cmdPaletteUpdateSelected(i, false));
     dom.cmdPaletteResults.appendChild(item);
   }
 }
 
-function cmdPaletteUpdateSelected(idx) {
+function cmdPaletteUpdateSelected(idx, scroll = true) {
   const items = dom.cmdPaletteResults.querySelectorAll('.cp-item');
   if (items.length === 0) return;
   items.forEach(el => el.classList.remove('selected'));
   cmdPaletteSelectedIndex = Math.max(0, Math.min(idx, items.length - 1));
   items[cmdPaletteSelectedIndex].classList.add('selected');
-  items[cmdPaletteSelectedIndex].scrollIntoView({ block: 'nearest' });
+  if (scroll) items[cmdPaletteSelectedIndex].scrollIntoView({ block: 'nearest' });
 }
 
 function initCommandPalette() {
@@ -2362,7 +2363,7 @@ function renderThemeList(themes) {
       hideThemePicker();
     });
     item.addEventListener('mouseenter', () => {
-      themePickerUpdateSelected(i);
+      themePickerUpdateSelected(i, false);
       // Live preview on hover
       applyTheme(themes[i].id);
     });
@@ -2394,13 +2395,13 @@ function applyTheme(themeId) {
   saveSessionDebounced();
 }
 
-function themePickerUpdateSelected(idx) {
+function themePickerUpdateSelected(idx, scroll = true) {
   const items = dom.themePickerResults.querySelectorAll('.cp-item');
   if (items.length === 0) return;
   items.forEach(el => el.classList.remove('selected'));
   themePickerSelectedIndex = Math.max(0, Math.min(idx, items.length - 1));
   items[themePickerSelectedIndex].classList.add('selected');
-  items[themePickerSelectedIndex].scrollIntoView({ block: 'nearest' });
+  if (scroll) items[themePickerSelectedIndex].scrollIntoView({ block: 'nearest' });
 }
 
 function initThemePicker() {
@@ -3128,7 +3129,7 @@ async function runSystemSearch(query, gen) {
       el.addEventListener('click', () => openSystemSearchResult(allResults[idx]));
       el.addEventListener('mouseenter', () => {
         _sysSearchActive = idx;
-        updateSysSearchActive(dropdown.querySelectorAll('.sys-search-item'));
+        updateSysSearchActive(dropdown.querySelectorAll('.sys-search-item'), false);
       });
     });
   } catch (err) {
@@ -3147,9 +3148,9 @@ function highlightMatch(text, query) {
   return escHtml(before) + '<em>' + escHtml(match) + '</em>' + escHtml(after);
 }
 
-function updateSysSearchActive(items) {
+function updateSysSearchActive(items, scroll = true) {
   items.forEach((el, i) => el.classList.toggle('active', i === _sysSearchActive));
-  if (_sysSearchActive >= 0 && items[_sysSearchActive]) {
+  if (scroll && _sysSearchActive >= 0 && items[_sysSearchActive]) {
     items[_sysSearchActive].scrollIntoView({ block: 'nearest' });
   }
 }
@@ -3326,7 +3327,7 @@ async function runWelcomeSearch(query, gen) {
       el.addEventListener('click', () => openWelcomeSearchResult(items[i]));
       el.addEventListener('mouseenter', () => {
         _wsSearchActive = i;
-        updateWsSearchActive(list.querySelectorAll('.ws-result-item'));
+        updateWsSearchActive(list.querySelectorAll('.ws-result-item'), false);
       });
     });
   } catch (err) {
@@ -3336,9 +3337,9 @@ async function runWelcomeSearch(query, gen) {
   }
 }
 
-function updateWsSearchActive(items) {
+function updateWsSearchActive(items, scroll = true) {
   items.forEach((el, i) => el.classList.toggle('active', i === _wsSearchActive));
-  if (_wsSearchActive >= 0 && items[_wsSearchActive]) {
+  if (scroll && _wsSearchActive >= 0 && items[_wsSearchActive]) {
     items[_wsSearchActive].scrollIntoView({ block: 'nearest' });
   }
 }
@@ -5310,18 +5311,18 @@ function renderLanguageList(langs) {
     const check = l.id === currentLang ? '\u2713 ' : '';
     item.innerHTML = `<span>${check}${escHtml(l.label)}</span><span class="shortcut">${l.id}</span>`;
     item.addEventListener('click', () => { changeLanguage(l.id, l.label); hideLanguagePicker(); });
-    item.addEventListener('mouseenter', () => langPickerUpdateSelected(i));
+    item.addEventListener('mouseenter', () => langPickerUpdateSelected(i, false));
     dom.languagePickerResults.appendChild(item);
   }
 }
 
-function langPickerUpdateSelected(idx) {
+function langPickerUpdateSelected(idx, scroll = true) {
   const items = dom.languagePickerResults.querySelectorAll('.cp-item');
   if (items.length === 0) return;
   items.forEach(el => el.classList.remove('selected'));
   langPickerSelectedIndex = Math.max(0, Math.min(idx, items.length - 1));
   items[langPickerSelectedIndex].classList.add('selected');
-  items[langPickerSelectedIndex].scrollIntoView({ block: 'nearest' });
+  if (scroll) items[langPickerSelectedIndex].scrollIntoView({ block: 'nearest' });
 }
 
 function changeLanguage(langId, label) {

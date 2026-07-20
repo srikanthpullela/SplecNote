@@ -1843,6 +1843,25 @@ html, body {
 .sf-connect-progress .scp-title { font-weight: 600; }
 .sf-connect-progress .scp-status { color: var(--text-secondary); font-size: 12px; }
 .sf-connect-progress .scp-timer { color: var(--text-muted); font-size: 11px; }
+.sf-connect-progress .scp-cancel {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-left: auto;
+  padding: 4px 12px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.sf-connect-progress .scp-cancel:hover {
+  background: #f44747;
+  border-color: #f44747;
+  color: #fff;
+}
 @keyframes scpSpin { to { transform: rotate(360deg); } }
 
 /* ================================================================

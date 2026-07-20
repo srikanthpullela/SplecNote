@@ -67,6 +67,27 @@ function shellExec(command, opts = {}, cb) {
   return execFile(file, args, opts, cb);
 }
 
+// Fully terminate a spawned child AND all of its descendants.
+// `proc.kill()` only signals the immediate shell wrapper we spawn — the real
+// worker (e.g. the `sf` CLI's node process that binds the OAuth callback port)
+// is a grandchild and survives, keeping the port held. To reclaim the port we
+// must kill the whole tree: on Unix the child is spawned detached so it leads
+// its own process group (kill the negative pid); on Windows use taskkill /T.
+function killProcessTree(proc, signal) {
+  if (!proc || proc.killed || proc.pid == null) return;
+  const sig = signal || 'SIGTERM';
+  try {
+    if (IS_WINDOWS) {
+      try { execFile('taskkill', ['/pid', String(proc.pid), '/T', '/F'], () => {}); } catch (_) { /* ignore */ }
+    } else {
+      // Negative pid → signal the entire process group (child + grandchildren).
+      try { process.kill(-proc.pid, sig); } catch (_) {
+        try { proc.kill(sig); } catch (_) { /* already gone */ }
+      }
+    }
+  } catch (_) { /* already gone */ }
+}
+
 // marked is ESM-only, loaded via dynamic import
 let markedFn = null;
 async function getMarked() {
@@ -1365,11 +1386,14 @@ ipcMain.handle('sf:exec', async (_e, command, cwd, timeoutMs) => {
   const isLoginCmd = /\borg\s+login\s+web\b/.test(command);
   // Only one interactive web login can run at a time: the CLI binds a fixed
   // OAuth callback port (1717). If a previous login is still waiting (e.g. the
-  // user closed the browser without finishing), kill it before starting a new
-  // one so the retry doesn't fail with EADDRINUSE / "address already in use".
+  // user closed the browser without finishing), kill its whole process tree
+  // before starting a new one so the retry doesn't fail with EADDRINUSE /
+  // "address already in use". Killing the tree (not just the shell wrapper)
+  // frees the port; a short pause lets the OS actually release it.
   if (isLoginCmd && activeLoginProc && !activeLoginProc.killed) {
-    try { activeLoginProc.kill('SIGTERM'); } catch (_) { /* already gone */ }
+    killProcessTree(activeLoginProc, 'SIGKILL');
     activeLoginProc = null;
+    await new Promise((r) => setTimeout(r, 600));
   }
   return new Promise((resolve) => {
     let stdout = '';
@@ -1387,6 +1411,9 @@ ipcMain.handle('sf:exec', async (_e, command, cwd, timeoutMs) => {
       cwd: cwd || os.homedir(),
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Give login commands their own process group (non-Windows) so we can kill
+      // the CLI's OAuth-server grandchild and free port 1717 on cancel/retry.
+      detached: isLoginCmd && !IS_WINDOWS,
     });
     if (isLoginCmd) activeLoginProc = proc;
     // For login: detect the auth URL, open it in the default browser, and tell
@@ -1424,12 +1451,25 @@ ipcMain.handle('sf:exec', async (_e, command, cwd, timeoutMs) => {
     });
     setTimeout(() => {
       if (!resolved && proc && !proc.killed) {
-        proc.kill('SIGTERM');
+        killProcessTree(proc, 'SIGTERM');
         if (isLoginCmd && activeLoginProc === proc) activeLoginProc = null;
         done({ code: 137, stdout, stderr: 'Command timed out' });
       }
     }, timeout);
   });
+});
+
+// Cancel an in-flight interactive web login (user clicked "Cancel" on the
+// connect progress card, or closed the browser and wants to start fresh).
+// Kills the whole login process tree so the OAuth callback port is released
+// immediately and the next "+ Add Org" starts clean.
+ipcMain.handle('sf:cancel-login', async () => {
+  if (activeLoginProc && !activeLoginProc.killed) {
+    killProcessTree(activeLoginProc, 'SIGKILL');
+    activeLoginProc = null;
+    return { cancelled: true };
+  }
+  return { cancelled: false };
 });
 
 ipcMain.handle('sf:check-cli', async () => {
@@ -1965,6 +2005,8 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 app.on('before-quit', () => {
   // Clean up terminal
   if (terminalProc && !terminalProc.killed) terminalProc.kill('SIGTERM');
+  // Clean up any in-flight org login (detached → must be killed explicitly)
+  if (activeLoginProc && !activeLoginProc.killed) killProcessTree(activeLoginProc, 'SIGKILL');
   // Clean up file watchers
   for (const [key, watcher] of watchers) {
     watcher.close();

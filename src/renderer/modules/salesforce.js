@@ -47,6 +47,9 @@
   let _scpTimer = null;
   let _scpStart = 0;
   let _scpEl = null;
+  // Handler invoked when the user clicks "Cancel" on the connect progress card.
+  // loginNewOrg sets this while a login is in flight; cleared when it settles.
+  let _onConnectCancel = null;
 
   function showConnectProgress(title, status) {
     hideConnectProgress(true);
@@ -59,10 +62,17 @@
       '<div class="scp-title"></div>' +
       '<div class="scp-status"></div>' +
       '<div class="scp-timer"></div>' +
-      '</div>';
+      '</div>' +
+      '<button type="button" class="scp-cancel" title="Cancel sign-in">Cancel</button>';
     document.body.appendChild(el);
     el.querySelector('.scp-title').textContent = title || 'Connecting to Salesforce';
     el.querySelector('.scp-status').textContent = status || 'Starting…';
+    const cancelBtn = el.querySelector('.scp-cancel');
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', () => {
+        if (typeof _onConnectCancel === 'function') _onConnectCancel();
+      });
+    }
     _scpEl = el;
     _scpStart = Date.now();
     const timerEl = el.querySelector('.scp-timer');
@@ -89,6 +99,8 @@
     el.classList.add(ok ? 'scp-done' : 'scp-error');
     const sp = el.querySelector('.scp-spinner');
     if (sp) { sp.classList.add('scp-static'); sp.textContent = ok ? '✓' : '✗'; }
+    const cancelBtn = el.querySelector('.scp-cancel');
+    if (cancelBtn) cancelBtn.remove(); // nothing left to cancel once it's settled
     el.querySelector('.scp-title').textContent = ok ? 'Connected' : 'Connection failed';
     el.querySelector('.scp-status').textContent = msg || (ok ? 'Success' : 'Please try again');
     const t = el.querySelector('.scp-timer');
@@ -459,6 +471,10 @@
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Waiting...'; }
     updateStatusBarOrg('⚡ Authenticating...');
     showConnectProgress('Connecting to Salesforce', 'Opening your browser…');
+    // Let the user bail out of a stuck sign-in from the progress card. Cancelling
+    // kills the CLI login (freeing the OAuth port) and resets to a fresh state so
+    // they can immediately try again — with the same alias if they like.
+    _onConnectCancel = () => cancelConnect(myGen);
 
     // Live progress from the main process (fires when the browser is opened).
     let unsub = null;
@@ -481,7 +497,7 @@
       if (instanceUrl) cmd += ` --instance-url ${instanceUrl}`;
       const { code, stdout, stderr } = await sfExec(cmd, 60000);
 
-      // A newer attempt has taken over — let it own the UI, stay silent here.
+      // A newer attempt (or a cancel) has taken over — stay silent here.
       if (!current()) return;
 
       if (code === 0) {
@@ -502,6 +518,7 @@
       if (unsub) { try { unsub(); } catch (_) { /* ignore */ } }
       // Only the newest attempt resets shared UI / refreshes the org list.
       if (current()) {
+        _onConnectCancel = null;
         if (btn) { btn.disabled = false; btn.textContent = '+ Add Org'; }
         updateStatusBarOrg(); // reset status bar text
         await checkOrgConnection();
@@ -510,6 +527,28 @@
         notifySystemHelperOnConnect(sfState.orgConnected);
       }
     }
+  }
+
+  /**
+   * Cancel an in-flight browser sign-in from the progress card's Cancel button.
+   * Bumps the login generation so the (soon-to-exit) CLI process can't post a
+   * late error, tells the main process to kill the login tree (freeing the OAuth
+   * port), then quietly resets to a fresh state — no scary error shown.
+   */
+  async function cancelConnect(gen) {
+    if (gen != null && gen !== _loginGen) return; // already superseded/settled
+    _loginGen++;            // silence the in-flight attempt's resolution
+    _onConnectCancel = null;
+    hideConnectProgress(true);
+    try {
+      if (window.apexStudio && window.apexStudio.sfCancelLogin) {
+        await window.apexStudio.sfCancelLogin();
+      }
+    } catch (_) { /* best-effort */ }
+    const btn = $('#sf-org-login');
+    if (btn) { btn.disabled = false; btn.textContent = '+ Add Org'; }
+    updateStatusBarOrg();
+    toast('Sign-in cancelled — you can try again anytime.', 'info');
   }
 
   // ──────────────────────────────────────────────
@@ -595,12 +634,15 @@
         + (item.tags ? `<span style="margin-left:8px;font-size:10px;opacity:.5">${escHtml(item.tags)}</span>` : '')
         + (item.detail ? `<span style="margin-left:auto;font-size:10px;color:var(--text-muted)">${escHtml(item.detail)}</span>` : '');
       div.addEventListener('click', () => { hideOrgPicker(); item.action(); });
-      div.addEventListener('mouseenter', () => orgPickerUpdateSelected(i));
+      // Highlight on hover, but DON'T scrollIntoView — the pointer is already on
+      // the item. Scrolling here would shift the list under a stationary cursor,
+      // firing mouseenter on a new item → a self-perpetuating scroll loop.
+      div.addEventListener('mouseenter', () => orgPickerUpdateSelected(i, false));
       results.appendChild(div);
     }
   }
 
-  function orgPickerUpdateSelected(idx) {
+  function orgPickerUpdateSelected(idx, scroll = true) {
     const results = $('#org-picker-results');
     if (!results) return;
     const items = results.querySelectorAll('.cp-item');
@@ -608,7 +650,8 @@
     orgPickerSelectedIndex = Math.max(0, Math.min(idx, items.length - 1));
     if (items[orgPickerSelectedIndex]) {
       items[orgPickerSelectedIndex].classList.add('selected');
-      items[orgPickerSelectedIndex].scrollIntoView({ block: 'nearest' });
+      // Only scroll for keyboard navigation; hover must never scroll (loop guard).
+      if (scroll) items[orgPickerSelectedIndex].scrollIntoView({ block: 'nearest' });
     }
   }
 

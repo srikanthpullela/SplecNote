@@ -67,6 +67,7 @@ const apexStudioApi = {
 
   // Salesforce CLI
   sfExec: (command, cwd, timeoutMs) => ipcRenderer.invoke('sf:exec', command, cwd, timeoutMs),
+  sfCancelLogin: () => ipcRenderer.invoke('sf:cancel-login'),
   sfCheckCli: () => ipcRenderer.invoke('sf:check-cli'),
   sfOrgInfo: (cwd) => ipcRenderer.invoke('sf:org-info', cwd),
   sfOrgList: (cwd) => ipcRenderer.invoke('sf:org-list', cwd),
