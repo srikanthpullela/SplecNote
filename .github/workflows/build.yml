@@ -4,6 +4,12 @@ name: Build desktop apps
 # pull request to the default branch (and on demand). Each OS job produces
 # installable artifacts (macOS: .dmg + .zip, Windows: .exe (NSIS) + .zip) and
 # uploads them so they can be downloaded from the run summary.
+#
+# On every push to main (never on PRs), the mac/win jobs also publish those
+# same artifacts to the "v1.0.0" GitHub release under fixed, version-free
+# filenames (see `artifactName` in package.json). splecdevelopers.com links
+# to that fixed tag + fixed filenames, so this keeps the public download
+# links always pointing at the newest main build with no manual step.
 on:
   push:
     branches: [main, master]
@@ -15,6 +21,9 @@ on:
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -86,3 +95,33 @@ jobs:
             dist/*.exe
             dist/*.blockmap
             dist/latest*.yml
+
+      # Keep the public "v1.0.0" release's installers in sync with the newest
+      # main build, using the fixed artifactName filenames so the download
+      # links on splecdevelopers.com never need to change. Skipped on PRs and
+      # forks so only vetted main commits get published.
+      - name: Publish to GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload v1.0.0 dist/*.dmg dist/*.zip dist/*.exe --clobber --repo ${{ github.repository }}
+        shell: bash
+
+  publish-release-notes:
+    name: Update release notes
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update v1.0.0 release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit v1.0.0 --repo ${{ github.repository }} --notes "Public desktop builds for Apex Debug Studio (macOS and Windows).
+
+          This release is a rolling channel: every push to \`main\` rebuilds and republishes these same files, so the download links on splecdevelopers.com always serve the latest build.
+
+          Auto-published from commit ${{ github.sha }} on $(date -u +'%Y-%m-%d %H:%M UTC')."

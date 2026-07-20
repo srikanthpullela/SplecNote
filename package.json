@@ -59,6 +59,7 @@
         "zip"
       ],
       "darkModeSupport": true,
+      "artifactName": "Apex-Debug-Studio-mac.${ext}",
       "extendInfo": {
         "NSQuitAlwaysKeepsWindows": false
       }
@@ -88,7 +89,8 @@
       "target": [
         "nsis",
         "zip"
-      ]
+      ],
+      "artifactName": "Apex-Debug-Studio-win.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -96,7 +98,8 @@
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "artifactName": "Apex-Debug-Studio-Setup.${ext}"
     },
     "fileAssociations": [
       {
