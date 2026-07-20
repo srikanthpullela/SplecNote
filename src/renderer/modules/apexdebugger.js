@@ -1324,6 +1324,11 @@ async function startDebugSession(filePath, methodName, requestParams) {
   debugState.classFieldsCache.clear();
   debugState.orgQueryCache.clear();
   debugState.orgActivity = null;
+  // A fresh run retries the org from scratch: clear any auth circuit-breaker tripped on a
+  // previous run, plus the mode-agnostic org read caches, so nothing stale leaks in.
+  debugState._orgAuthBroken = null;
+  if (debugState.engineOrgEvalCache) debugState.engineOrgEvalCache.clear();
+  if (debugState.engineDescribeCache) debugState.engineDescribeCache.clear();
 
   // Parse class-level fields
   const classFields = parseClassFields(source);
@@ -1827,6 +1832,10 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
       // scary "record not found → will throw NPE" warning. The fetch still runs and
       // still throws on error so the engine can classify absence; it just stays quiet.
       const probe = !!(opts && opts.probe);
+      // Stop pressed (session ended) or the org's auth circuit is open for this run → don't
+      // fire another org call. Serve 0 rows so the run degrades to local preview instead of a
+      // cascade of identical failures (the reason was already logged once, up front).
+      if (_skipOrgCall()) return [];
       if (!liveOrgAvailable()) {
         if (!probe) addConsoleEntry('warn', 'SOQL needs a connected org — returning 0 rows. Connect an org for real data.');
         return [];
@@ -1855,6 +1864,10 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
           addConsoleEntry('info', '🛠 Applied your saved SOQL fix for this query.');
         }
         if (res.error) {
+          // Auth/session/IP-restriction failure → trip the circuit ONCE (friendly message),
+          // then degrade to local preview instead of throwing a scary QueryException and
+          // letting every subsequent query repeat the identical failure.
+          if (_tripOrgAuthCircuit(res.error)) return [];
           if (!probe) {
             // Offer an inline fix so a per-org schema mismatch doesn't dead-end the whole
             // session: the user edits the SOQL, runs it, and continues with the results.
@@ -1940,6 +1953,8 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
     // Never throws; returns { ok, value } or { ok:false, error }.
     evalOrg: async (apexExpr) => {
       if (!liveOrgAvailable()) return { ok: false, error: 'no org' };
+      // Stop pressed or org auth circuit open → don't resolve anything else against the org.
+      if (_skipOrgCall()) return { ok: false, error: debugState._orgAuthBroken ? 'org session unavailable' : 'stopped' };
       try {
         if (!debugState.engineOrgEvalCache) debugState.engineOrgEvalCache = new Map();
         if (debugState.engineOrgEvalCache.has(apexExpr)) return debugState.engineOrgEvalCache.get(apexExpr);
@@ -1966,7 +1981,11 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
           const preview = typeof out.value === 'object' && out.value !== null ? '{…}' : formatValue(out.value);
           addConsoleEntry('info', `↳ ${apexExpr} → ${preview} (real org value)`);
         } else {
-          addConsoleEntry('warn', `Org resolve failed for ${apexExpr}: ${out.error}`);
+          // If this is an org auth/IP failure, trip the circuit (ONE friendly message) instead
+          // of logging a raw "Org resolve failed … ip restricted" for every custom setting.
+          if (!_tripOrgAuthCircuit(out.error)) {
+            addConsoleEntry('warn', `Org resolve failed for ${apexExpr}: ${out.error}`);
+          }
         }
         return out;
       } catch (e) {
@@ -1984,6 +2003,7 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
     // resolve in a managed-package org (Apttus_Config2__ProductConfiguration__c).
     describeSObject: async (name) => {
       if (!liveOrgAvailable()) return { error: 'no org' };
+      if (_skipOrgCall()) return { names: [], error: debugState._orgAuthBroken ? 'org session unavailable' : 'stopped' };
       if (!debugState.engineDescribeCache) debugState.engineDescribeCache = new Map();
       // Key by connected org too: field lists differ per org (a field may exist in
       // one org but not another), so a describe cached under a prior org must never
@@ -2731,6 +2751,16 @@ async function toggleSystemMode() {
   const next = !isSystemModeEnabled();
   setSystemMode(next);
   if (next) {
+    // Switching INTO system mode: values already fetched in user mode are cached
+    // mode-agnostically (and, mid-run, already bound into the running execution), so clear
+    // the org read caches — anything read AFTER this re-fetches with full (system) access.
+    if (debugState.orgQueryCache) debugState.orgQueryCache.clear();
+    if (debugState.engineOrgEvalCache) debugState.engineOrgEvalCache.clear();
+    if (debugState.engineDescribeCache) debugState.engineDescribeCache.clear();
+    if (debugState.active) {
+      addConsoleEntry('info', '⚡ System mode ON — reads from here on use full access. Values already read earlier in THIS run stay as-is (masked/null); Restart the debug session for a complete system-mode pass.');
+      renderConsolePanel();
+    }
     const org = getActiveOrg();
     if (!org || !org.org) {
       addConsoleEntry('warn', 'System mode enabled, but no org is connected yet — connect an org, then it will offer to deploy the read-only helper when a hidden field is needed.');
@@ -3061,6 +3091,9 @@ async function onOrgConnectedCheckHelper(org) {
   // the next lookups re-evaluate against the org that's actually connected now.
   debugState._orgUserInfo = undefined;
   debugState._userFullAccess = undefined;
+  // A fresh connection may have restored a working session (e.g. re-auth after an
+  // IP-restricted refresh) — clear the auth circuit so org reads are retried.
+  debugState._orgAuthBroken = null;
   // Explicit user choice wins — never auto-flip it.
   if (systemModePref() !== 'auto') { updateSystemModeUi(); return; }
   if (!org || !org.org || !liveOrgAvailable()) { setSystemModeAuto(false); return; }
@@ -3118,7 +3151,51 @@ async function _runSoqlOnce(soql) {
 
 /** True when an error string looks like a CLI/auth/connection failure (not a real query error). */
 function _looksLikeCliAuthError(txt) {
-  return /No authorization information|not been authorized|Session expired|INVALID_SESSION|expired access\/refresh token|Could not.*refresh|No such (file|org)|command not found|ENOENT|Cannot read propert|Maximum call stack|timed out|ETIMEDOUT|self.signed|getaddrinfo|ECONNREFUSED/i.test(String(txt || ''));
+  return /No authorization information|not been authorized|Session expired|INVALID_SESSION|expired access\/refresh token|Could not.*refresh|Unable to refresh session|refresh token|ip restricted|invalid_grant|INVALID_LOGIN|No such (file|org)|command not found|ENOENT|Cannot read propert|Maximum call stack|timed out|ETIMEDOUT|self.signed|getaddrinfo|ECONNREFUSED/i.test(String(txt || ''));
+}
+
+/** Strictly an ORG auth/session/IP failure — the kind that re-connecting the org fixes.
+ *  Narrower than _looksLikeCliAuthError (which also covers local CLI/infra crashes). */
+function _looksLikeOrgAuthError(txt) {
+  return /ip restricted|ip_restricted|Unable to refresh session|refresh token|invalid_grant|INVALID_LOGIN|Session expired|INVALID_SESSION|expired access\/refresh token|Could not[\s\S]*refresh|No authorization information|not been authorized/i.test(String(txt || ''));
+}
+
+/** A friendly, developer-understandable explanation for an org auth/session failure, or null.
+ *  Kept plain-English and actionable — never a raw stack/CLI error. */
+function _friendlyAuthMessage(errText) {
+  const t = String(errText || '');
+  if (/ip restricted|ip_restricted|restricted ip/i.test(t)) {
+    return '🔒 Live Org paused — the org refused to refresh your session because your current IP address isn\'t allowed (Salesforce "Login IP Ranges" on the user\'s profile, or the connected app\'s "Enforce IP restrictions"). This is an org security setting, not a debugger bug. To read real values again: re-connect the org (＋ Add Org → sign in) from an allowed network/VPN, or have an admin add your IP to the org\'s Login IP Ranges. Until then, stepping continues in LOCAL PREVIEW (values are inferred, not read from the org).';
+  }
+  if (/Unable to refresh session|refresh token|invalid_grant|INVALID_LOGIN/i.test(t)) {
+    return '🔌 Live Org paused — your saved org session expired and couldn\'t be refreshed automatically. Re-connect the org (＋ Add Org → sign in) to resume reading real values. Stepping continues in LOCAL PREVIEW until then.';
+  }
+  if (/Session expired|INVALID_SESSION|not been authorized|No authorization information|expired access/i.test(t)) {
+    return '🔌 Live Org paused — the org session is no longer valid. Re-connect the org (＋ Add Org → sign in) to resume live data. Stepping continues in LOCAL PREVIEW until then.';
+  }
+  return null;
+}
+
+/** True while NO org call should be attempted: the debug session ended (Stop/finish), or the
+ *  org's auth circuit has tripped for this run (expired/IP-restricted session). Gating the org
+ *  seams on this stops (a) the post-Stop query cascade and (b) the identical-failure flood. */
+function _skipOrgCall() {
+  return !debugState.active || !!debugState._orgAuthBroken;
+}
+
+/** If the error is a genuine org auth/session/IP failure, trip the circuit for this run once
+ *  (logging ONE friendly message) and return true so callers can degrade to local preview
+ *  instead of cascading dozens of identical red errors. Non-auth errors return false. */
+function _tripOrgAuthCircuit(errText) {
+  if (!_looksLikeOrgAuthError(errText)) return false;
+  if (!debugState._orgAuthBroken) {
+    const msg = _friendlyAuthMessage(errText)
+      || '🔌 Live Org paused — the org couldn\'t be reached (connection/session problem). Re-connect the org to resume live data; stepping continues in local preview until then.';
+    debugState._orgAuthBroken = { reason: String(errText || ''), msg };
+    addConsoleEntry('warn', msg);
+    renderConsolePanel();
+  }
+  return true;
 }
 
 /** USER-MODE fetch: a single `sf data query` invocation (REST Query API). Creates NO debug log. */
