@@ -119,6 +119,7 @@ const apexStudioApi = {
       'nav:back', 'nav:forward',
       'session:restore', 'app:before-quit', 'help:shortcuts',
       'watch:change',
+      'sf:login-progress',
     ];
     if (valid.includes(channel)) {
       const listener = (_event, ...args) => callback(...args);

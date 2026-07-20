@@ -1264,7 +1264,7 @@ async function buildClassIndex() {
     const index = {};
     for (const f of allFiles) {
       if (f.endsWith('.cls') || f.endsWith('.trigger')) {
-        const name = f.split('/').pop().replace(/\.(cls|trigger)$/, '');
+        const name = f.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
         index[name] = f;
         // Also store lowercase for case-insensitive lookup
         index[name.toLowerCase()] = f;
@@ -1327,7 +1327,7 @@ async function startDebugSession(filePath, methodName, requestParams) {
 
   // Parse class-level fields
   const classFields = parseClassFields(source);
-  const className = filePath.split('/').pop().replace(/\.(cls|trigger)$/, '');
+  const className = filePath.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
   debugState.classFieldsCache.set(className, classFields);
 
   // Build class field variable scope (static + instance fields)
@@ -1736,13 +1736,13 @@ async function onEnginePause(info) {
     };
     const site = debugState.exceptionInfo.stack[0];
     if (site && site.file) {
-      const siteName = site.file.split('/').pop() || site.file;
+      const siteName = site.file.split(/[/\\]/).pop() || site.file;
       // The single most important line: exactly WHERE and WHY it was thrown.
       addConsoleEntry('error', `💥 ${e.type || 'Exception'} thrown at ${siteName}:${site.line} (${site.className}.${site.methodName}) — ${e.message || ''}`);
     }
     addConsoleEntry('error', `⏸ Paused on ${info.reason === 'caught-exception' ? 'caught ' : ''}exception: ${e.type || 'Exception'}: ${e.message || ''}`);
     if (e.stack && e.stack.length) {
-      addConsoleEntry('error', e.stack.map((f, i) => `      ${i === 0 ? '➤ throw ' : '  called '}at ${f.className}.${f.methodName} (${(f.file || '').split('/').pop()}:${f.line})`).join('\n'));
+      addConsoleEntry('error', e.stack.map((f, i) => `      ${i === 0 ? '➤ throw ' : '  called '}at ${f.className}.${f.methodName} (${(f.file || '').split(/[/\\]/).pop()}:${f.line})`).join('\n'));
     }
     addConsoleEntry('info', 'The exact throw line is marked 💥 in the code. ▶ Continue resumes into the catch block.');
     renderConsolePanel();
@@ -2018,7 +2018,7 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
       if (!file) return null;
       try {
         const src = await window.apexStudio.readFile(file);
-        if (src) addConsoleEntry('info', `↳ Loaded ${className} from ${file.split('/').pop()} (step-into available)`);
+        if (src) addConsoleEntry('info', `↳ Loaded ${className} from ${file.split(/[/\\]/).pop()} (step-into available)`);
         return src ? { source: src, path: file } : null;
       } catch (_) { return null; }
     },
@@ -2074,10 +2074,10 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
         };
         const site = debugState.exceptionInfo.stack[0];
         if (site && site.file) {
-          const siteName = site.file.split('/').pop() || site.file;
+          const siteName = site.file.split(/[/\\]/).pop() || site.file;
           addConsoleEntry('error', `💥 ${debugState.exceptionInfo.type} thrown at ${siteName}:${site.line} (${site.className}.${site.methodName}) — ${debugState.exceptionInfo.message}`);
         }
-        addConsoleEntry('error', err.apexStack.map((f, i) => `      ${i === 0 ? '➤ throw ' : '  called '}at ${f.className}.${f.methodName} (${(f.file || '').split('/').pop()}:${f.line})`).join('\n'));
+        addConsoleEntry('error', err.apexStack.map((f, i) => `      ${i === 0 ? '➤ throw ' : '  called '}at ${f.className}.${f.methodName} (${(f.file || '').split(/[/\\]/).pop()}:${f.line})`).join('\n'));
         // A fatal error is exactly where the user needs to look — open that file and
         // navigate to the throw line automatically, then mark it 💥.
         renderConsolePanel();
@@ -2107,7 +2107,7 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
     return false;
   }
 
-  const className = filePath.split('/').pop().replace(/\.(cls|trigger)$/, '');
+  const className = filePath.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
   if (!engine.registry.get(className)) return false;
   const methods = engine.registry.get(className).findMethods(methodName);
   if (!methods.length) return false;
@@ -4203,7 +4203,7 @@ async function runEntryMethodInOrg() {
   sig.__methodName = methodName;
   debugState.entryDeclLine = sig.signatureLine || 0;
 
-  const className = filePath.split('/').pop().replace(/\.(cls|trigger)$/, '');
+  const className = filePath.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
   const argValues = (debugState.parsedRequest?.params) || [];
 
   // Warn if the method appears to make callouts (can't be rolled back)
@@ -4749,11 +4749,11 @@ function buildReplayTimeline(log, classIndex, entry) {
   // and the full org activity + raw log remain available. Fully general: keyed off the
   // passed entry file + signature line, so it works for ANY entry method in ANY class.
   if (entry && entry.file && entry.line && result.steps.length) {
-    const entryBase = String(entry.file).split('/').pop();
+    const entryBase = String(entry.file).split(/[/\\]/).pop();
     let k = 0;
     while (k < result.steps.length) {
       const s = result.steps[k];
-      if (s.file && String(s.file).split('/').pop() === entryBase && s.line >= entry.line) break;
+      if (s.file && String(s.file).split(/[/\\]/).pop() === entryBase && s.line >= entry.line) break;
       k++;
     }
     if (k > 0 && k < result.steps.length) { result.steps = result.steps.slice(k); result.skippedInit = k; }
@@ -5200,11 +5200,11 @@ async function replayAdvance(predicate, stopAtBreakpoints) {
 function _reportUnreachedBreakpoints() {
   if (debugState._unreachedReported) return;
   const notes = _unreachedBreakpointNotes(debugState.breakpoints, debugState._replayLineIndex)
-    .map(n => `${n.kind} at ${(n.file || '').split('/').pop()}:${n.line}`);
+    .map(n => `${n.kind} at ${(n.file || '').split(/[/\\]/).pop()}:${n.line}`);
   if (!notes.length) return;
   debugState._unreachedReported = true;
   const last = debugState.replayTimeline[debugState.replayTimeline.length - 1];
-  const endedAt = last ? `${(last.file || '').split('/').pop()}:${last.line}` : 'the end';
+  const endedAt = last ? `${(last.file || '').split(/[/\\]/).pop()}:${last.line}` : 'the end';
   const why = debugState.replayFatalError
     ? `execution ended early at ${endedAt} — ${debugState.replayFatalError.split('\n')[0]}`
     : `those lines did not run in this execution (a branch that wasn't taken, a method that wasn't called, or a return before them). Execution ended at ${endedAt}`;
@@ -5852,7 +5852,7 @@ async function stepIntoMethod(className, methodName, argsRaw, currentFrame, assi
     }
 
     // Parse class fields for the target class
-    const clsName = filePath.split('/').pop().replace(/\.(cls|trigger)$/, '');
+    const clsName = filePath.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
     let classFieldVars = {};
     if (!debugState.classFieldsCache.has(clsName)) {
       const classFields = parseClassFields(source);
@@ -6331,7 +6331,7 @@ function paintExceptionMarkers() {
   if (!openFile || !info.stack || !info.stack.length) return;
   const label = `${info.type || 'Exception'}: ${info.message || ''}`.trim();
   const throwSite = info.stack[0] || {};
-  const throwName = (throwSite.file || '').split('/').pop() || throwSite.file || '';
+  const throwName = (throwSite.file || '').split(/[/\\]/).pop() || throwSite.file || '';
   const decos = [];
   const seen = new Set();
   info.stack.forEach((f, idx) => {
@@ -6449,7 +6449,7 @@ async function revealExecutingLocation(line, file, stack) {
     return;
   }
 
-  const shortName = (file || '').split('/').pop() || file || '';
+  const shortName = (file || '').split(/[/\\]/).pop() || file || '';
   // Do NOT mirror "Running… file:line" / "waiting for org…" onto the toolbar pill.
   // The nearest VISIBLE ancestor line already shows the live in-progress band
   // (elapsed timer + what it's waiting on), and org fetches show the yellow banner.
@@ -7887,7 +7887,7 @@ function renderCallStackPanel() {
     const isTop = i === topIdx;
     const isSel = i === selIdx;
     const level = i + 1; // 1 = entry (bottom), topIdx+1 = current (top)
-    const fileName = frame.file ? String(frame.file).split('/').pop() : '(source unavailable)';
+    const fileName = frame.file ? String(frame.file).split(/[/\\]/).pop() : '(source unavailable)';
     const method = `${_esc(frame.className || '')}${frame.methodName ? '.' + _esc(frame.methodName) : ''}` || '(anonymous)';
     const cls = ['dbg-stack-frame'];
     if (isTop) cls.push('current');
@@ -8397,7 +8397,7 @@ function renderBreakpointsPanel() {
     groups.push([filePath, lines, bpMap]);
     count += lines.length;
   }
-  groups.sort((a, b) => (a[0].split('/').pop() || '').localeCompare(b[0].split('/').pop() || ''));
+  groups.sort((a, b) => (a[0].split(/[/\\]/).pop() || '').localeCompare(b[0].split(/[/\\]/).pop() || ''));
 
   // Reflect the total on the tab so the user can always see how many are set.
   const tabBtn = document.querySelector('.dbg-panel-tab[data-tab="dbg-breakpoints"]');
@@ -8410,7 +8410,7 @@ function renderBreakpointsPanel() {
 
   let html = '';
   for (const [filePath, lines, bpMap] of groups) {
-    const filename = filePath.split('/').pop();
+    const filename = filePath.split(/[/\\]/).pop();
     html += `<div class="dbg-bp-group">`;
     html += `<div class="dbg-bp-group-head" title="${_esc(filePath)}">`
       + `<span class="dbg-bp-group-name">${_esc(filename)}</span>`
@@ -8509,7 +8509,7 @@ function showRequestModal(filePath, methodName, signatureLine) {
 
   const titleEl = _$('#dbg-modal-title');
   if (titleEl) {
-    const className = filePath.split('/').pop().replace(/\.(cls|trigger)$/, '');
+    const className = filePath.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
     titleEl.textContent = `Debug: ${className}.${methodName}()`;
   }
 
@@ -8562,7 +8562,7 @@ function saveRequestHistoryEntry(filePath, methodName, jsonText) {
   // Skip the default placeholder / empty payloads (strip // comments + whitespace).
   const stripped = text.replace(/\/\/.*$/gm, '').replace(/\s+/g, '');
   if (!stripped || stripped === '{}') return;
-  const className = (filePath || '').split('/').pop().replace(/\.(cls|trigger)$/, '');
+  const className = (filePath || '').split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
   const hist = loadRequestHistory().filter(e => !(e.json === text && e.method === methodName && e.className === className));
   hist.unshift({ json: text, method: methodName, className, filePath, ts: Date.now() });
   try { localStorage.setItem(DBG_REQ_HISTORY_KEY, JSON.stringify(hist.slice(0, 25))); } catch (_) {}
@@ -8690,7 +8690,7 @@ function registerDebugProviders() {
           // Skip annotations-only lines
           if (lines[i].trim().startsWith('@')) continue;
           // Skip constructors (method name matches class name)
-          const fileName = uri.path.split('/').pop().replace(/\.(cls|trigger)$/, '');
+          const fileName = uri.path.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
           if (match[1] === fileName) continue;
 
           const filePath = uri.fsPath || uri.path;

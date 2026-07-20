@@ -166,7 +166,7 @@
 
     let html = '';
     for (const [filePath, fileItems] of Object.entries(byFile)) {
-      const fileName = filePath.split('/').pop();
+      const fileName = filePath.split(/[/\\]/).pop();
       html += `<div class="todo-file-group">
         <div class="todo-file-header">
           <span class="todo-file-icon">${getFileIconForName(fileName)}</span>

@@ -1161,7 +1161,7 @@
     _noteGap(detail, kind, ctx) {
       const isCrash = kind === 'engine-crash';
       const line = ctx && ctx.line;
-      const file = ctx && ctx.file ? String(ctx.file).split('/').pop() : null;
+      const file = ctx && ctx.file ? String(ctx.file).split(/[/\\]/).pop() : null;
       const rec = { kind: kind || 'engine-gap', detail: String(detail), line, file, at: ctx && ctx.what };
       this.diagnostics.push(rec);
       // Hover/console sandbox evals must stay silent — they probe expressions and

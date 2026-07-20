@@ -37,6 +37,75 @@
     if (window.showToast) window.showToast(msg, type);
   }
 
+  // ──────────────────────────────────────────────
+  // Persistent "Connecting to Salesforce" progress card (bottom-right).
+  // A normal toast auto-dismisses after a few seconds, so during the ~60s
+  // browser-login wait the user would see nothing. This card stays up with a
+  // spinner + live elapsed timer and updates as the flow progresses, so it's
+  // always obvious that something is happening.
+  // ──────────────────────────────────────────────
+  let _scpTimer = null;
+  let _scpStart = 0;
+  let _scpEl = null;
+
+  function showConnectProgress(title, status) {
+    hideConnectProgress(true);
+    const el = document.createElement('div');
+    el.id = 'sf-connect-progress';
+    el.className = 'sf-connect-progress';
+    el.innerHTML =
+      '<div class="scp-spinner" aria-hidden="true"></div>' +
+      '<div class="scp-body">' +
+      '<div class="scp-title"></div>' +
+      '<div class="scp-status"></div>' +
+      '<div class="scp-timer"></div>' +
+      '</div>';
+    document.body.appendChild(el);
+    el.querySelector('.scp-title').textContent = title || 'Connecting to Salesforce';
+    el.querySelector('.scp-status').textContent = status || 'Starting…';
+    _scpEl = el;
+    _scpStart = Date.now();
+    const timerEl = el.querySelector('.scp-timer');
+    const tick = () => {
+      const s = Math.floor((Date.now() - _scpStart) / 1000);
+      timerEl.textContent = `${s}s elapsed · waits up to 60s`;
+    };
+    tick();
+    _scpTimer = setInterval(tick, 1000);
+    return el;
+  }
+
+  function setConnectProgress(status) {
+    if (_scpEl) {
+      const s = _scpEl.querySelector('.scp-status');
+      if (s) s.textContent = status;
+    }
+  }
+
+  function finishConnectProgress(ok, msg) {
+    if (!_scpEl) return;
+    if (_scpTimer) { clearInterval(_scpTimer); _scpTimer = null; }
+    const el = _scpEl;
+    el.classList.add(ok ? 'scp-done' : 'scp-error');
+    const sp = el.querySelector('.scp-spinner');
+    if (sp) { sp.classList.add('scp-static'); sp.textContent = ok ? '✓' : '✗'; }
+    el.querySelector('.scp-title').textContent = ok ? 'Connected' : 'Connection failed';
+    el.querySelector('.scp-status').textContent = msg || (ok ? 'Success' : 'Please try again');
+    const t = el.querySelector('.scp-timer');
+    if (t) t.textContent = '';
+    setTimeout(() => hideConnectProgress(), ok ? 2500 : 5000);
+  }
+
+  function hideConnectProgress(immediate) {
+    if (_scpTimer) { clearInterval(_scpTimer); _scpTimer = null; }
+    const el = _scpEl || document.getElementById('sf-connect-progress');
+    if (el) {
+      if (immediate) { el.remove(); }
+      else { el.classList.add('scp-out'); setTimeout(() => el.remove(), 250); }
+    }
+    _scpEl = null;
+  }
+
   /** Navigate to a line in the editor with a brief highlight flash */
   async function goToLineWithFlash(filePath, lineNum, content) {
     // Close SF panel if open
@@ -324,7 +393,22 @@
     const btn = $('#sf-org-login');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Waiting...'; }
     updateStatusBarOrg('⚡ Authenticating...');
-    toast('Opening browser for Salesforce login... (60s timeout)', 'info');
+    showConnectProgress('Connecting to Salesforce', 'Opening your browser…');
+
+    // Live progress from the main process (fires when the browser is opened).
+    let unsub = null;
+    try {
+      if (window.apexStudio && window.apexStudio.on) {
+        unsub = window.apexStudio.on('sf:login-progress', (data) => {
+          if (data && data.phase === 'browser-opened') {
+            setConnectProgress('Browser opened — finish the login there, then come back…');
+          }
+        });
+      }
+    } catch (_) { /* progress is best-effort */ }
+    // Fallback nudges in case no signal arrives, so the text never looks frozen.
+    const t1 = setTimeout(() => setConnectProgress('Complete the Salesforce login in your browser…'), 5000);
+    const t2 = setTimeout(() => setConnectProgress('Still waiting for you to authorize in the browser…'), 20000);
 
     try {
       let cmd = 'sf org login web';
@@ -334,18 +418,25 @@
 
       if (code === 0) {
         toast(`Org ${alias || ''} authenticated successfully!`, 'success');
+        finishConnectProgress(true, `Authenticated${alias ? ' as ' + alias : ''}`);
       } else {
         const errMsg = stderr || stdout || 'Authentication failed or was cancelled';
         toast(errMsg.split('\n')[0], 'error');
+        finishConnectProgress(false, errMsg.split('\n')[0]);
       }
     } catch (err) {
       const msg = err.message || '';
       if (msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('timed out')) {
         toast('Authentication timed out — browser login was not completed in 60s', 'warning');
+        finishConnectProgress(false, 'Timed out — login not completed in 60s');
       } else {
         toast(`Login error: ${msg}`, 'error');
+        finishConnectProgress(false, msg || 'Login error');
       }
     } finally {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      if (unsub) { try { unsub(); } catch (_) { /* ignore */ } }
       if (btn) { btn.disabled = false; btn.textContent = '+ Add Org'; }
       updateStatusBarOrg(); // reset status bar text
       await checkOrgConnection();
@@ -580,7 +671,7 @@
   function parseEndpoints(content, filePath) {
     const endpoints = [];
     const lines = content.split('\n');
-    const fileName = filePath.split('/').pop().replace('.cls', '');
+    const fileName = filePath.split(/[/\\]/).pop().replace('.cls', '');
 
     // Check for @RestResource at class level
     const restMatch = content.match(/@RestResource\s*\(\s*urlMapping\s*=\s*'([^']+)'/i);
@@ -700,7 +791,7 @@
 
     detectSalesforceProject(folder);
     const resultsDiv = $('#sf-api-results');
-    const fileName = singleFile ? singleFile.split('/').pop() : null;
+    const fileName = singleFile ? singleFile.split(/[/\\]/).pop() : null;
     resultsDiv.innerHTML = `<div class="sf-empty">⏳ Scanning ${fileName || 'all files'} for endpoints...</div>`;
 
     const files = singleFile ? [singleFile] : await gatherApexFiles(folder);
@@ -775,7 +866,7 @@
     if (ep.urlMapping) metaHtml += `<br><strong>URL:</strong> ${escapeHtml(ep.urlMapping)}`;
     if (ep.httpMethod) metaHtml += `<br><strong>HTTP Method:</strong> ${ep.httpMethod}`;
     if (ep.returnType) metaHtml += `<br><strong>Returns:</strong> ${escapeHtml(ep.returnType)}`;
-    metaHtml += `<br><strong>File:</strong> ${escapeHtml(ep.filePath.split('/').pop())} (line ${ep.line})`;
+    metaHtml += `<br><strong>File:</strong> ${escapeHtml(ep.filePath.split(/[/\\]/).pop())} (line ${ep.line})`;
     meta.innerHTML = metaHtml;
 
     // Render parameters
@@ -845,7 +936,7 @@
           const qs = Object.entries(params).filter(([,v]) => v).map(([k,v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
           if (qs) url += `?${qs}`;
         }
-        const cmd = `cd "${folder}" && sf api request rest "${url}" --method ${method}${tof}${bodyFlag} 2>&1`;
+        const cmd = `sf api request rest "${url}" --method ${method}${tof}${bodyFlag} 2>&1`;
         output.textContent = `$ sf api request rest "${url}" --method ${method}${tof}\n\n⏳ Running...`;
         const { code, stdout, stderr } = await sfExec(cmd, 60000);
         const responseText = stdout || stderr || '(no output)';
@@ -903,11 +994,17 @@
           return;
         }
 
-        // Execute anonymous Apex via sf apex run using temp file
-        const escapedApex = apexCode.replace(/'/g, "'\\''");
-        const cmd = `cd "${folder}" && tmpf=$(mktemp /tmp/ads_apex_XXXXXX.apex) && printf '%s' '${escapedApex}' > "$tmpf" && sf apex run --file "$tmpf"${tof} --json 2>&1; rm -f "$tmpf"`;
+        // Execute anonymous Apex via `sf apex run` using a temp file written
+        // through the main process — cross-platform (no mktemp/printf/rm, none
+        // of which exist on Windows). sfExec already runs in the project folder.
+        const paths = await window.apexStudio.getPaths?.();
+        const tmpDir = paths?.appDataDir || paths?.home || folder || '.';
+        const tmpFile = `${tmpDir}/.ads_endpoint_test.apex`;
+        await window.apexStudio.writeFile(tmpFile, apexCode);
+        const cmd = `sf apex run --file "${tmpFile}"${tof} --json 2>&1`;
         output.textContent = `Anonymous Apex:\n${apexCode}\n\n⏳ Executing on org...`;
         const { code, stdout, stderr } = await sfExec(cmd, 60000);
+        try { await window.apexStudio.deleteFile?.(tmpFile); } catch (_) { /* best effort */ }
 
         let resultText = '';
         try {
@@ -990,7 +1087,7 @@
   function parseTestClass(content, filePath) {
     if (!/@isTest/i.test(content)) return null;
     const lines = content.split('\n');
-    const fileName = filePath.split('/').pop().replace('.cls', '');
+    const fileName = filePath.split(/[/\\]/).pop().replace('.cls', '');
     const methods = [];
     const seen = new Set();
 
@@ -1024,7 +1121,7 @@
     if (!folder) { toast('Open a folder first', 'warn'); return; }
 
     const resultsDiv = $('#sf-tests-results');
-    const fileName = singleFile ? singleFile.split('/').pop() : null;
+    const fileName = singleFile ? singleFile.split(/[/\\]/).pop() : null;
     resultsDiv.innerHTML = `<div class="sf-empty">⏳ Scanning ${fileName || 'all files'} for test classes...</div>`;
 
     clearConsole();
@@ -1299,7 +1396,7 @@
 
     // Real CLI execution
     const tof = targetOrgFlag();
-    const cmd = `cd "${folder}" && sf apex run test --synchronous --result-format json --code-coverage${tof} 2>&1`;
+    const cmd = `sf apex run test --synchronous --result-format json --code-coverage${tof} 2>&1`;
     clog(`$ sf apex run test --synchronous --result-format json --code-coverage${tof}`, 'sf-console-cmd');
     const spinner = clogSpinner('Executing tests on org...');
 
@@ -1420,7 +1517,7 @@
     clearConsole();
     clog(`═══ RUN CLASS: ${tc.className} ═══`, 'sf-console-header-line');
     clog(`Methods: ${tc.methods.length}`, 'sf-console-dim');
-    clog(`File: ${tc.filePath.split('/').pop()}`, 'sf-console-dim');
+    clog(`File: ${tc.filePath.split(/[/\\]/).pop()}`, 'sf-console-dim');
     if (sfState.orgConnected && sfState.orgInfo) {
       clog(`Org: ${sfState.orgInfo.username}`, 'sf-console-dim');
     }
@@ -1448,7 +1545,7 @@
 
     const folder = getFolderPath();
     const tof = targetOrgFlag();
-    const cmd = `cd "${folder}" && sf apex run test --class-names ${tc.className} --synchronous --result-format json${tof} 2>&1`;
+    const cmd = `sf apex run test --class-names ${tc.className} --synchronous --result-format json${tof} 2>&1`;
     clog(`$ sf apex run test --class-names ${tc.className} --synchronous --result-format json${tof}`, 'sf-console-cmd');
     const spinner = clogSpinner('Executing on org...');
 
@@ -1565,7 +1662,7 @@
     } else {
       const folder = getFolderPath();
       const tof = targetOrgFlag();
-      const cmd = `cd "${folder}" && sf apex run test --tests ${tc.className}.${method.name} --synchronous --result-format json${tof} 2>&1`;
+      const cmd = `sf apex run test --tests ${tc.className}.${method.name} --synchronous --result-format json${tof} 2>&1`;
       clog(`$ sf apex run test --tests ${tc.className}.${method.name} --synchronous --result-format json${tof}`, 'sf-console-cmd');
       const spinner = clogSpinner(`  Executing on org...`);
 
@@ -1942,7 +2039,7 @@
     }
     _flowPickerFiles = apexFiles.map(fp => ({
       path: fp,
-      name: fp.split('/').pop(),
+      name: fp.split(/[/\\]/).pop(),
       dir: fp.replace(folder + '/', '').replace(/\/[^/]+$/, ''),
     }));
     _flowPickerFiles.sort((a, b) => a.name.localeCompare(b.name));
@@ -2024,7 +2121,7 @@
     closeFlowPicker();
     _flowFilePath = filePath;
     const nameEl = $('#sf-flow-filename');
-    if (nameEl) nameEl.textContent = filePath.split('/').pop();
+    if (nameEl) nameEl.textContent = filePath.split(/[/\\]/).pop();
     // Read and auto-generate flow
     try {
       _flowContent = await readFile(filePath);
@@ -2032,7 +2129,7 @@
         _flowNodes = parseApexFlow(_flowContent);
         sfState.flowData = _flowNodes;
         renderFlowDiagram(_flowNodes);
-        toast(`Flow: ${_flowNodes.length} nodes from ${filePath.split('/').pop()}`, 'success');
+        toast(`Flow: ${_flowNodes.length} nodes from ${filePath.split(/[/\\]/).pop()}`, 'success');
       } else {
         $('#sf-flow-canvas').innerHTML = '<div class="sf-empty">Could not read file.</div>';
       }
@@ -2053,7 +2150,7 @@
           _flowFilePath = activeTab.filePath;
           _flowContent = window.state.editor.getValue();
           const nameEl = $('#sf-flow-filename');
-          if (nameEl) nameEl.textContent = activeTab.filePath.split('/').pop();
+          if (nameEl) nameEl.textContent = activeTab.filePath.split(/[/\\]/).pop();
         } else {
           // No apex file open — show picker
           showFlowFilePicker();
@@ -2101,7 +2198,7 @@
       const content = await readFile(fp);
       if (!content) continue;
       _impactContentCache[fp] = content;
-      const baseName = fp.split('/').pop().replace(/\.(cls|trigger)$/, '');
+      const baseName = fp.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
 
       if (fp.endsWith('.trigger')) {
         const trigMatch = content.match(/trigger\s+(\w+)\s+on\s+(\w+)/i);
@@ -2230,7 +2327,7 @@
     if (scopeSelect.value === 'current') {
       const activeTab = window.state && window.state.tabs.find(t => t.id === window.state.activeTabId);
       if (activeTab && activeTab.filePath) {
-        const name = activeTab.filePath.split('/').pop().replace(/\.(cls|trigger)$/, '');
+        const name = activeTab.filePath.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
         targetClasses = [name];
       }
     } else {
@@ -2238,7 +2335,7 @@
         const status = await window.apexStudio.gitStatus(folder);
         if (status && status.files) {
           targetClasses = status.files
-            .map(f => f.path.split('/').pop().replace(/\.(cls|trigger)$/, ''))
+            .map(f => f.path.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, ''))
             .filter(n => sfState.classIndex[n] || sfState.triggerIndex[n]);
         }
       } catch {
@@ -2526,7 +2623,7 @@
     for (const fp of allFiles) {
       const content = _impactContentCache[fp] || await readFile(fp);
       if (!content) continue;
-      const fileName = fp.split('/').pop();
+      const fileName = fp.split(/[/\\]/).pop();
       const syntaxIssues = validateApexSyntax(content, fileName);
       issues.push(...syntaxIssues);
     }
@@ -2603,7 +2700,7 @@
       } catch {
         issues.push({
           type: 'warn',
-          file: fp.split('/').pop(),
+          file: fp.split(/[/\\]/).pop(),
           message: 'Missing -meta.xml companion file',
         });
       }
@@ -2614,7 +2711,7 @@
     for (const fp of allFiles) {
       const content = _impactContentCache[fp] || await readFile(fp);
       if (!content) continue;
-      const fileName = fp.split('/').pop();
+      const fileName = fp.split(/[/\\]/).pop();
       const bpIssues = checkBestPractices(content, fileName);
       issues.push(...bpIssues);
     }
@@ -2957,7 +3054,7 @@
       }
     }
 
-    const cmd = `cd "${folder}" && sf project deploy start${dryRunFlag}${sourceFlag}${tof} --json --wait 30 2>&1`;
+    const cmd = `sf project deploy start${dryRunFlag}${sourceFlag}${tof} --json --wait 30 2>&1`;
     const displayCmd = `sf project deploy start${dryRunFlag}${sourceFlag ? ' --source-dir ...' : ''}${tof} --wait 30`;
     clog(`$ ${displayCmd}`, 'sf-console-cmd');
     const spinner = clogSpinner(`${mode}...`);
@@ -3143,7 +3240,7 @@
     const logDiv = $('#sf-deploy-log');
     const tof = targetOrgFlag();
 
-    resultsDiv.innerHTML = `<div class="sf-empty">⏳ DEPLOYING ${targetPath.split('/').pop()}...</div>`;
+    resultsDiv.innerHTML = `<div class="sf-empty">⏳ DEPLOYING ${targetPath.split(/[/\\]/).pop()}...</div>`;
     logDiv.classList.remove('hidden');
     logDiv.textContent = '';
 
@@ -3152,8 +3249,8 @@
     clog(`Source: ${targetPath}`, 'sf-console-dim');
     if (sfState.selectedOrg) clog(`Target: ${sfState.selectedOrg}`, 'sf-console-dim');
 
-    const cmd = `cd "${folder}" && sf project deploy start --source-dir "${targetPath}"${tof} --json --wait 30 2>&1`;
-    clog(`$ sf project deploy start --source-dir "${targetPath.split('/').pop()}"${tof} --wait 30`, 'sf-console-cmd');
+    const cmd = `sf project deploy start --source-dir "${targetPath}"${tof} --json --wait 30 2>&1`;
+    clog(`$ sf project deploy start --source-dir "${targetPath.split(/[/\\]/).pop()}"${tof} --wait 30`, 'sf-console-cmd');
     const spinner = clogSpinner('DEPLOYING...');
 
     try {

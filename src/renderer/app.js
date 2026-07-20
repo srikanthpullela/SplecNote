@@ -7,6 +7,20 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
+/* ---- Cross-platform path helpers (Windows uses \, macOS/Linux use /) ---- */
+const _lastSep = (p) => Math.max(String(p).lastIndexOf('/'), String(p).lastIndexOf('\\'));
+const baseName = (p) => String(p == null ? '' : p).split(/[/\\]/).pop();
+const dirName = (p) => { const i = _lastSep(p); return i < 0 ? '' : String(p).substring(0, i); };
+const _pathSep = (p) => (String(p).includes('\\') ? '\\' : '/');
+// Approximate the user's home directory + native separator from a sample path
+// (e.g. /Users/name on macOS, C:\Users\name on Windows, /home/name on Linux).
+const _homeAndSep = (sample) => {
+  const sep = _pathSep(sample || '');
+  const parts = String(sample || '').split(/[/\\]/);
+  const home = parts.length >= 3 ? parts.slice(0, 3).join(sep) : '~';
+  return { home, sep };
+};
+
 /* ---- State ---- */
 const state = {
   editor: null,
@@ -557,7 +571,7 @@ function initMonaco() {
         language: 'plaintext',
         theme: monacoThemeId(state.theme),
         fontSize: 14,
-        fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
+        fontFamily: "'SF Mono', SFMono-Regular, Menlo, Monaco, 'Cascadia Code', Consolas, 'Courier New', monospace",
         minimap: { enabled: true },
         wordWrap: 'off',
         automaticLayout: true,
@@ -849,7 +863,7 @@ async function openFile(filePath, content) {
   // Check if already open
   const existing = state.tabs.find((t) => t.filePath === filePath);
   if (existing) { activateTab(existing.id); return; }
-  const name = filePath.split('/').pop();
+  const name = filePath.split(/[/\\]/).pop();
 
   // For image files, create a placeholder tab (content will be shown via image preview)
   if (isImageFile(name)) {
@@ -903,7 +917,7 @@ async function saveFile(tabOrId) {
     }
     await window.apexStudio.writeFile(filePath, content);
     tab.filePath = filePath;
-    tab.title = filePath.split('/').pop();
+    tab.title = filePath.split(/[/\\]/).pop();
     renderTabs();
     updateTitleBar(tab);
     updateBreadcrumbs();
@@ -942,7 +956,7 @@ async function saveAsFile() {
 
   await window.apexStudio.writeFile(newPath, content);
 
-  const newName = newPath.split('/').pop();
+  const newName = newPath.split(/[/\\]/).pop();
   const oldWasRichText = tab._richTextMode;
   tab.filePath = newPath;
   tab.title = newName;
@@ -1171,7 +1185,7 @@ async function openFolder(dirPath) {
     dom.fileTreeEmpty.classList.add('hidden');
     dom.fileTree.innerHTML = '';
     dom.rootFolderBar.classList.remove('hidden');
-    dom.rootFolderName.textContent = dirPath.split('/').pop();
+    dom.rootFolderName.textContent = dirPath.split(/[/\\]/).pop();
     await renderTreeDir(dirPath, dom.fileTree, 0);
     // If tree ended up empty, show a message
     if (dom.fileTree.children.length === 0) {
@@ -1396,7 +1410,7 @@ function initContextMenu() {
     if (!action) return;
     hideContextMenu();
     const tp = contextTarget.path;
-    const parentDir = contextTarget.isDir ? tp : tp.substring(0, tp.lastIndexOf('/'));
+    const parentDir = contextTarget.isDir ? tp : dirName(tp);
 
     switch (action) {
       case 'new-file': {
@@ -1415,16 +1429,16 @@ function initContextMenu() {
         break;
       }
       case 'rename': {
-        const oldName = tp.split('/').pop();
+        const oldName = tp.split(/[/\\]/).pop();
         const newName = await showInputDialog('Rename', 'Rename to:', oldName);
         if (!newName || newName === oldName) return;
-        const newPath = tp.substring(0, tp.lastIndexOf('/')) + '/' + newName;
+        const newPath = dirName(tp) + '/' + newName;
         await window.apexStudio.rename(tp, newPath);
         await refreshTree();
         break;
       }
       case 'delete': {
-        if (!(await showConfirmDialog('Delete', `Delete "${tp.split('/').pop()}"?`))) return;
+        if (!(await showConfirmDialog('Delete', `Delete "${tp.split(/[/\\]/).pop()}"?`))) return;
         await window.apexStudio.deleteFile(tp);
         await refreshTree();
         break;
@@ -1542,7 +1556,7 @@ function initTabContextMenu() {
         break;
       case 'tab-open-terminal': {
         if (tab.filePath) {
-          const dir = tab.filePath.substring(0, tab.filePath.lastIndexOf('/'));
+          const dir = dirName(tab.filePath);
           try { await window.apexStudio.openInTerminal(dir); } catch (err) { console.error(err); }
         }
         break;
@@ -1618,7 +1632,7 @@ function startInlineTabRename(tab) {
       renderTabs();
       return;
     }
-    const dir = tab.filePath.substring(0, tab.filePath.lastIndexOf('/'));
+    const dir = dirName(tab.filePath);
     const newPath = dir + '/' + newName;
     try {
       const ok = await window.apexStudio.rename(tab.filePath, newPath);
@@ -1911,7 +1925,7 @@ function renderQuickOpenResults(files) {
     const fp = files[i];
     const item = document.createElement('div');
     item.className = 'qo-item' + (i === 0 ? ' selected' : '');
-    const name = fp.split('/').pop();
+    const name = fp.split(/[/\\]/).pop();
     const relPath = state.folderPath ? fp.replace(state.folderPath + '/', '') : fp;
     item.innerHTML = `<span class="qo-icon">${getFileIcon(name)}</span><span>${escHtml(name)}</span><span class="path">${escHtml(relPath)}</span>`;
     item.addEventListener('click', async () => {
@@ -2192,7 +2206,7 @@ async function doGlobalSearch() {
       const relPath = file.filePath.replace(state.folderPath + '/', '');
       const header = document.createElement('div');
       header.className = 'gs-file-header';
-      header.innerHTML = `<span class="gs-file-icon">${getFileIcon(relPath.split('/').pop())}</span><span>${escHtml(relPath)}</span><span class="gs-file-count">${file.matches.length} matches</span>`;
+      header.innerHTML = `<span class="gs-file-icon">${getFileIcon(relPath.split(/[/\\]/).pop())}</span><span>${escHtml(relPath)}</span><span class="gs-file-count">${file.matches.length} matches</span>`;
 
       const matchesEl = document.createElement('div');
       let matchesVisible = true;
@@ -2617,7 +2631,7 @@ function renderWelcomeRecent(files) {
  * For well-known containers (Documents, Desktop, Downloads…), go one level deeper.
  */
 function groupRecentFiles(files) {
-  const home = '/Users/' + (files[0] || '').split('/')[2]; // approximate home dir
+  const { home, sep } = _homeAndSep(files[0] || '');
   const shorten = (p) => p.replace(new RegExp('^' + home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '~');
 
   // Common containers — not meaningful project roots on their own
@@ -2632,7 +2646,7 @@ function groupRecentFiles(files) {
 
   for (let i = 0; i < files.length; i++) {
     const fp = files[i];
-    const name = fp.split('/').pop();
+    const name = fp.split(/[/\\]/).pop();
     if (!name.includes('.')) {
       directoryPaths.push({ path: fp, mruIndex: i });
     } else {
@@ -2647,15 +2661,15 @@ function groupRecentFiles(files) {
   for (const item of fileItems) {
     const fp = item.path;
     const rel = fp.substring(home.length + 1); // e.g. "cpq-admin/resources/file.js"
-    const segments = rel.split('/');
+    const segments = rel.split(/[/\\]/);
 
     let projectRoot;
     if (segments.length <= 1) {
       projectRoot = home; // file directly in home
     } else if (containers.has(segments[0]) && segments.length >= 3) {
-      projectRoot = home + '/' + segments[0] + '/' + segments[1];
+      projectRoot = home + sep + segments[0] + sep + segments[1];
     } else {
-      projectRoot = home + '/' + segments[0];
+      projectRoot = home + sep + segments[0];
     }
 
     if (!projectMap.has(projectRoot)) {
@@ -2681,16 +2695,16 @@ function groupRecentFiles(files) {
       entry: {
         type: 'directory',
         path: d.path,
-        name: d.path.split('/').pop(),
-        shortDir: shorten(d.path.substring(0, d.path.lastIndexOf('/'))),
+        name: d.path.split(/[/\\]/).pop(),
+        shortDir: shorten(dirName(d.path)),
       },
     });
   }
 
   // File groups / individual files
   for (const [root, fps] of projectMap) {
-    const name = root.split('/').pop();
-    const shortDir = shorten(root.substring(0, root.lastIndexOf('/')));
+    const name = root.split(/[/\\]/).pop();
+    const shortDir = shorten(dirName(root));
     const mruIdx = projectMruIndex.get(root);
 
     if (fps.length > 1) {
@@ -2711,8 +2725,8 @@ function groupRecentFiles(files) {
         entry: {
           type: 'file',
           path: fp,
-          name: fp.split('/').pop(),
-          shortDir: shorten(fp.substring(0, fp.lastIndexOf('/'))),
+          name: fp.split(/[/\\]/).pop(),
+          shortDir: shorten(dirName(fp)),
         },
       });
     }
@@ -2763,7 +2777,7 @@ async function showRecentPanel() {
       for (const fp of entry.files) {
         const item = document.createElement('div');
         item.className = 'recent-panel-item recent-panel-subitem';
-        item.innerHTML = `<span class="recent-panel-name">${escHtml(fp.split('/').pop())}</span>`;
+        item.innerHTML = `<span class="recent-panel-name">${escHtml(fp.split(/[/\\]/).pop())}</span>`;
         item.title = fp;
         item.addEventListener('click', async () => {
           try {
@@ -2808,7 +2822,7 @@ async function showRecentPanel() {
  * of the same project are merged into one folder entry.
  */
 async function groupRecentFilesWithStat(files) {
-  const home = files[0] ? '/Users/' + files[0].split('/')[2] : '~';
+  const { home, sep } = _homeAndSep(files[0] || '');
   const shorten = (p) => p.replace(new RegExp('^' + home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '~');
 
   const containers = new Set([
@@ -2838,15 +2852,15 @@ async function groupRecentFilesWithStat(files) {
 
   for (const fp of fileItems) {
     const rel = fp.substring(home.length + 1);
-    const segments = rel.split('/');
+    const segments = rel.split(/[/\\]/);
 
     let projectRoot;
     if (segments.length <= 1) {
       projectRoot = home;
     } else if (containers.has(segments[0]) && segments.length >= 3) {
-      projectRoot = home + '/' + segments[0] + '/' + segments[1];
+      projectRoot = home + sep + segments[0] + sep + segments[1];
     } else {
-      projectRoot = home + '/' + segments[0];
+      projectRoot = home + sep + segments[0];
     }
 
     if (!projectMap.has(projectRoot)) {
@@ -2865,16 +2879,16 @@ async function groupRecentFilesWithStat(files) {
     entries.push({
       type: 'directory',
       path: fp,
-      name: fp.split('/').pop(),
-      shortDir: shorten(fp.substring(0, fp.lastIndexOf('/'))),
+      name: fp.split(/[/\\]/).pop(),
+      shortDir: shorten(dirName(fp)),
     });
   }
 
   // Output file groups
   for (const root of projectOrder) {
     const fps = projectMap.get(root);
-    const name = root.split('/').pop();
-    const shortDir = shorten(root.substring(0, root.lastIndexOf('/')));
+    const name = root.split(/[/\\]/).pop();
+    const shortDir = shorten(dirName(root));
 
     if (fps.length > 1) {
       entries.push({
@@ -2889,8 +2903,8 @@ async function groupRecentFilesWithStat(files) {
       entries.push({
         type: 'file',
         path: fp,
-        name: fp.split('/').pop(),
-        shortDir: shorten(fp.substring(0, fp.lastIndexOf('/'))),
+        name: fp.split(/[/\\]/).pop(),
+        shortDir: shorten(dirName(fp)),
       });
     }
   }
@@ -3069,7 +3083,7 @@ async function runSystemSearch(query, gen) {
       const basePath = state.folderPath || '';
       for (const file of validContent.slice(0, 20)) {
         const relPath = file.filePath.replace(basePath + '/', '');
-        const fileName = relPath.split('/').pop();
+        const fileName = relPath.split(/[/\\]/).pop();
         const icon = getFileIcon(fileName);
         // Show the file header
         html += `<div class="sys-search-content-file">${icon} ${escHtml(relPath)} <span class="sys-search-match-count">${file.matches.length} match${file.matches.length > 1 ? 'es' : ''}</span></div>`;
@@ -4173,13 +4187,14 @@ function updateBreadcrumbs() {
   dom.breadcrumbs.innerHTML = '';
 
   const fullPath = tab.filePath;
-  const pathParts = fullPath.split('/');
+  const psep = _pathSep(fullPath);
+  const pathParts = fullPath.split(/[/\\]/);
 
   // Determine display parts (relative if folder is open)
   let displayStart = 0;
   if (state.folderPath) {
-    const folderParts = state.folderPath.split('/');
-    if (fullPath.startsWith(state.folderPath + '/')) {
+    const folderParts = state.folderPath.split(/[/\\]/);
+    if (fullPath.startsWith(state.folderPath + '/') || fullPath.startsWith(state.folderPath + '\\')) {
       displayStart = folderParts.length;
     }
   }
@@ -4200,7 +4215,7 @@ function updateBreadcrumbs() {
     crumb.textContent = pathParts[i];
 
     // Store the full absolute path up to this segment
-    const segmentPath = pathParts.slice(0, i + 1).join('/');
+    const segmentPath = pathParts.slice(0, i + 1).join(psep);
     crumb.dataset.fullPath = segmentPath;
     crumb.dataset.isFile = isLast ? '1' : '0';
 
@@ -4250,7 +4265,7 @@ function initBreadcrumbContextMenu() {
 
     // For file items, get the parent directory for terminal/finder operations
     const dirPath = bcContextIsFile
-      ? bcContextPath.substring(0, bcContextPath.lastIndexOf('/'))
+      ? dirName(bcContextPath)
       : bcContextPath;
 
     switch (action) {
@@ -4295,9 +4310,9 @@ async function showImagePreview(filePath) {
     const stat = await window.apexStudio.stat(filePath);
     const size = stat?.size || 0;
     const sizeStr = size > 1024*1024 ? (size/1024/1024).toFixed(1) + ' MB' : size > 1024 ? (size/1024).toFixed(1) + ' KB' : size + ' B';
-    dom.imagePreviewInfo.textContent = `${filePath.split('/').pop()} — ${sizeStr}`;
+    dom.imagePreviewInfo.textContent = `${filePath.split(/[/\\]/).pop()} — ${sizeStr}`;
   } catch {
-    dom.imagePreviewInfo.textContent = filePath.split('/').pop();
+    dom.imagePreviewInfo.textContent = filePath.split(/[/\\]/).pop();
   }
 }
 
@@ -4492,7 +4507,7 @@ async function showFileHistoryInPanel(filePath) {
     return;
   }
 
-  const name = filePath.split('/').pop();
+  const name = filePath.split(/[/\\]/).pop();
   const relPath = filePath.replace(state.folderPath + '/', '');
 
   // Show loading state
@@ -4572,7 +4587,7 @@ async function showCommitDiff(absPath, relPath, commit) {
       return;
     }
 
-    const fileName = relPath.split('/').pop();
+    const fileName = relPath.split(/[/\\]/).pop();
     const viewTitle = `${commit.hash} — ${fileName}`;
     const existingTab = state.tabs.find(t => t.title === viewTitle);
     if (existingTab) { activateTab(existingTab.id); return; }
@@ -4628,7 +4643,7 @@ function openSplitEditor() {
     language: 'plaintext',
     theme: monacoThemeId(state.theme),
     fontSize: state.editor.getOption(monaco.editor.EditorOption.fontSize),
-    fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
+    fontFamily: "'SF Mono', SFMono-Regular, Menlo, Monaco, 'Cascadia Code', Consolas, 'Courier New', monospace",
     minimap: { enabled: false },
     automaticLayout: true,
     scrollBeyondLastLine: false,
@@ -5363,7 +5378,7 @@ async function showDiffView(relPath, absPath) {
     }
     const current = await window.apexStudio.readFile(absPath);
     if (current == null) return;
-    const diffTitle = `\u2194 ${relPath.split('/').pop()}`;
+    const diffTitle = `\u2194 ${relPath.split(/[/\\]/).pop()}`;
     const existingDiff = state.tabs.find(t => t.title === diffTitle);
     if (existingDiff) { activateTab(existingDiff.id); return; }
     const tab = createTab(diffTitle, null, '', guessLanguage(relPath));
@@ -5423,7 +5438,7 @@ function renderCommitViewer(tab) {
     automaticLayout: true,
     readOnly: true,
     fontSize: state.editor.getOption(monaco.editor.EditorOption.fontSize),
-    fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
+    fontFamily: "'SF Mono', SFMono-Regular, Menlo, Monaco, 'Cascadia Code', Consolas, 'Courier New', monospace",
     scrollBeyondLastLine: false,
     minimap: { enabled: false },
   });
@@ -5484,7 +5499,7 @@ function renderDiffEditor(tab) {
     readOnly: true,
     renderSideBySide: false,
     fontSize: state.editor.getOption(monaco.editor.EditorOption.fontSize),
-    fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
+    fontFamily: "'SF Mono', SFMono-Regular, Menlo, Monaco, 'Cascadia Code', Consolas, 'Courier New', monospace",
     scrollBeyondLastLine: false,
   });
   diffEditor.setModel({ original: tab._diffOriginalModel, modified: tab._diffModifiedModel });
@@ -5682,8 +5697,8 @@ async function showGitInfoPopup() {
     const statusLabels = { modified: 'M', added: 'A', deleted: 'D', untracked: 'U', renamed: 'R', conflicted: 'C' };
     const statusClass  = { modified: 'M', added: 'A', deleted: 'D', untracked: 'U', renamed: 'R', conflicted: 'C' };
     dom.gitInfoFiles.innerHTML = fileEntries.map(([filePath, status]) => {
-      const fileName = filePath.split('/').pop();
-      const dirPath = filePath.includes('/') ? filePath.substring(0, filePath.lastIndexOf('/')) : '';
+      const fileName = filePath.split(/[/\\]/).pop();
+      const dirPath = /[/\\]/.test(filePath) ? dirName(filePath) : '';
       const label = statusLabels[status] || '?';
       const cls = statusClass[status] || 'M';
       return `<div class="git-info-file-item" data-rel-path="${filePath}" data-abs-path="${state.folderPath}/${filePath}" title="${filePath}">
@@ -6485,7 +6500,7 @@ function initApiClient() {
         if (authType === 'bearer') auth.token = $('#api-auth-token')?.value || '';
         else if (authType === 'basic') { auth.username = $('#api-auth-user')?.value || ''; auth.password = $('#api-auth-pass')?.value || ''; }
         else if (authType === 'apikey') { auth.keyName = $('#api-auth-key-name')?.value || ''; auth.keyValue = $('#api-auth-key-val')?.value || ''; }
-        const reqName = await showInputDialog('Request Name', 'Name for this request:', currentUrl.split('/').pop() || currentUrl) || currentUrl;
+        const reqName = await showInputDialog('Request Name', 'Name for this request:', currentUrl.split(/[/\\]/).pop() || currentUrl) || currentUrl;
         col.requests.push({ method, url: currentUrl, name: reqName, headers, params, bodyType, body: bodyContent, auth });
       }
     }
@@ -6722,7 +6737,7 @@ async function saveApiToCollection() {
     colIdx = parseInt(picked, 10);
   }
   if (isNaN(colIdx) || !state.apiCollections[colIdx]) return;
-  const reqName = await showInputDialog('Request Name', 'Name for this request:', url.split('/').pop() || url) || url;
+  const reqName = await showInputDialog('Request Name', 'Name for this request:', url.split(/[/\\]/).pop() || url) || url;
   state.apiCollections[colIdx].requests.push({ method, url, name: reqName, headers, params, bodyType, body: bodyContent, auth });
   showToast(`Saved to "${state.apiCollections[colIdx].name}"`, 'info');
   renderApiCollections();
@@ -6795,7 +6810,7 @@ function flattenPostmanItems(items, folderPrefix = '') {
       if (typeof req.url === 'string') url = req.url;
       else if (req.url?.raw) url = req.url.raw;
       // Name
-      const name = item.name || url.split('/').pop() || url;
+      const name = item.name || url.split(/[/\\]/).pop() || url;
       // Headers
       const headers = {};
       if (Array.isArray(req.header)) {
@@ -7874,7 +7889,7 @@ function renderScreenshotCanvas() {
 
     const fontSize = 14;
     const lineHeight = 20;
-    const font = '14px "SF Mono", Menlo, Monaco, monospace';
+    const font = '14px "SF Mono", SFMono-Regular, Menlo, Monaco, "Cascadia Code", Consolas, "Courier New", monospace';
     ctx.font = font;
 
     const maxLineWidth = Math.max(...lines.map(l => ctx.measureText(l).width), 300);
@@ -7961,7 +7976,7 @@ function initDbClient() {
     const files = await window.apexStudio.openFileDialog();
     if (files && files[0]) {
       state.dbFilePath = files[0];
-      $('#db-filepath').textContent = files[0].split('/').pop();
+      $('#db-filepath').textContent = files[0].split(/[/\\]/).pop();
     }
   });
 
