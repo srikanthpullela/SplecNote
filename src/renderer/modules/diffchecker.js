@@ -1,5 +1,5 @@
 /* =============================================================
-   Diff Checker — module for CongaCode
+   Diff Checker — module for Apex Debug Studio
    Side-by-side or inline diff using Monaco's built-in diff editor
    ============================================================= */
 (function () {

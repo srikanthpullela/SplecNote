@@ -1,5 +1,5 @@
 /**
- * CongaCode — Main Process
+ * Apex Debug Studio — Main Process
  * Window management, file I/O, auto-save, session, menus, global search, context menu support.
  */
 
@@ -14,9 +14,79 @@ const {
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, execFileSync, execFile } = require('child_process');
 const chokidar = require('chokidar');
 const simpleGit = require('simple-git');
+
+// ---------------------------------------------------------------------------
+// Cross-platform shell invocation
+// ---------------------------------------------------------------------------
+// The app shells out to the Salesforce CLI (sf/sfdx). Those calls used to be
+// hardcoded to `/bin/zsh`, which does not exist on Windows — so every org
+// action failed there with `spawn /bin/zsh ENOENT`. These helpers pick the
+// right shell per platform:
+//   • macOS/Linux — a LOGIN shell (`-l`) so a GUI-launched app inherits the
+//     user's full PATH (where sf/sfdx live); zsh → bash → sh fallback.
+//   • Windows — cmd.exe (`/d /s /c`); GUI apps already inherit the user/system
+//     PATH, and `sf` resolves to its `sf.cmd` shim on PATH.
+const IS_WINDOWS = process.platform === 'win32';
+
+let _cachedUnixShell = null;
+function unixLoginShell() {
+  if (_cachedUnixShell) return _cachedUnixShell;
+  const candidates = [process.env.SHELL, '/bin/zsh', '/bin/bash', '/bin/sh'].filter(Boolean);
+  for (const sh of candidates) {
+    try { if (fs.existsSync(sh)) { _cachedUnixShell = sh; return sh; } } catch { /* keep looking */ }
+  }
+  _cachedUnixShell = '/bin/sh';
+  return _cachedUnixShell;
+}
+
+// Return { file, args } to run `command` through the platform's shell (for spawn()).
+function shellCommand(command) {
+  if (IS_WINDOWS) {
+    return { file: process.env.COMSPEC || 'cmd.exe', args: ['/d', '/s', '/c', command] };
+  }
+  return { file: unixLoginShell(), args: ['-l', '-c', command] };
+}
+
+// execSync/exec helpers that run a command through the platform shell and return
+// stdout. On Windows, Unix-only `2>/dev/null` noise-suppression is stripped
+// (stderr is already separate from the captured stdout, so it is redundant).
+function shellExecSync(command, opts = {}) {
+  const cmd = IS_WINDOWS ? command.replace(/\s*2>\/dev\/null/g, '') : command;
+  const { file, args } = shellCommand(cmd);
+  return execFileSync(file, args, opts);
+}
+
+// Async variant: runs `command` through the platform shell via execFile and
+// invokes the Node-style callback with (err, stdout, stderr).
+function shellExec(command, opts = {}, cb) {
+  const cmd = IS_WINDOWS ? command.replace(/\s*2>\/dev\/null/g, '') : command;
+  const { file, args } = shellCommand(cmd);
+  return execFile(file, args, opts, cb);
+}
+
+// Fully terminate a spawned child AND all of its descendants.
+// `proc.kill()` only signals the immediate shell wrapper we spawn — the real
+// worker (e.g. the `sf` CLI's node process that binds the OAuth callback port)
+// is a grandchild and survives, keeping the port held. To reclaim the port we
+// must kill the whole tree: on Unix the child is spawned detached so it leads
+// its own process group (kill the negative pid); on Windows use taskkill /T.
+function killProcessTree(proc, signal) {
+  if (!proc || proc.killed || proc.pid == null) return;
+  const sig = signal || 'SIGTERM';
+  try {
+    if (IS_WINDOWS) {
+      try { execFile('taskkill', ['/pid', String(proc.pid), '/T', '/F'], () => {}); } catch (_) { /* ignore */ }
+    } else {
+      // Negative pid → signal the entire process group (child + grandchildren).
+      try { process.kill(-proc.pid, sig); } catch (_) {
+        try { proc.kill(sig); } catch (_) { /* already gone */ }
+      }
+    }
+  } catch (_) { /* already gone */ }
+}
 
 // marked is ESM-only, loaded via dynamic import
 let markedFn = null;
@@ -30,22 +100,57 @@ async function getMarked() {
 }
 
 // Set app name FIRST — fixes "Electron" in macOS menu bar
-app.setName('CongaCode');
+app.setName('Apex Debug Studio');
+
+// ---------------------------------------------------------------------------
+// Never let a broken stdout/stderr pipe crash the app.
+// process.stdout / process.stderr are used purely for diagnostics (mirroring the
+// renderer console, log echoing). When our output is piped into a consumer that
+// exits first — e.g. `npm start | grep`, a closed terminal, or a parent that goes
+// away — the NEXT write to that pipe completes ASYNCHRONOUSLY with EPIPE. Node
+// surfaces it as an 'error' event on the stream; with no listener it escalates to
+// an uncaught exception that pops Electron's "A JavaScript error occurred in the
+// main process" dialog and takes the whole app down (repeatedly, on every console
+// line). A vanished diagnostic reader must never be fatal, so swallow these write
+// errors. try/catch around the write() call does NOT help — the failure is async.
+// ---------------------------------------------------------------------------
+for (const stream of [process.stdout, process.stderr]) {
+  if (stream && typeof stream.on === 'function') {
+    stream.on('error', (err) => {
+      if (err && (err.code === 'EPIPE' || err.code === 'EOF' || err.code === 'ERR_STREAM_DESTROYED')) return;
+      // Any other error writing to a diagnostic stream is equally non-fatal here;
+      // there is nowhere safe to report it (writing would recurse), so ignore it.
+    });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
-const CONGACODE_DIR = path.join(os.homedir(), 'CongaCode');
-const SESSION_FILE = path.join(CONGACODE_DIR, '.session.json');
-const RECENT_FILE = path.join(CONGACODE_DIR, '.recent.json');
-const SETTINGS_FILE = path.join(CONGACODE_DIR, 'settings.json');
-const AUTOSAVE_DIR = path.join(CONGACODE_DIR, 'AutoSave');
+const APP_DATA_DIR = path.join(os.homedir(), 'ApexDebugStudio');
+
+// One-time migration from the legacy ~/CongaCode data directory so existing
+// users keep their sessions, recent files, settings, bookmarks and auto-saves
+// after the rebrand to Apex Debug Studio.
+try {
+  const legacyDataDir = path.join(os.homedir(), 'CongaCode');
+  if (fs.existsSync(legacyDataDir) && !fs.existsSync(APP_DATA_DIR)) {
+    fs.renameSync(legacyDataDir, APP_DATA_DIR);
+  }
+} catch (_) { /* best effort — never block startup on migration */ }
+
+const SESSION_FILE = path.join(APP_DATA_DIR, '.session.json');
+const RECENT_FILE = path.join(APP_DATA_DIR, '.recent.json');
+const LOG_DIR = path.join(APP_DATA_DIR, 'logs');
+const RENDERER_LOG = path.join(LOG_DIR, 'renderer-console.log');
+const SETTINGS_FILE = path.join(APP_DATA_DIR, 'settings.json');
+const AUTOSAVE_DIR = path.join(APP_DATA_DIR, 'AutoSave');
 
 // File watcher instances (per watched directory)
 const watchers = new Map();
 
 function ensureDirs() {
-  for (const dir of [CONGACODE_DIR, AUTOSAVE_DIR]) {
+  for (const dir of [APP_DATA_DIR, AUTOSAVE_DIR]) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   }
 }
@@ -109,15 +214,15 @@ function buildSmartRecentMenu(recentFiles) {
 
   for (const fp of fileItems) {
     const rel = fp.substring(home.length + 1);
-    const segments = rel.split('/');
+    const segments = rel.split(/[/\\]/);
 
     let projectRoot;
     if (segments.length <= 1) {
       projectRoot = home;
     } else if (containers.has(segments[0]) && segments.length >= 3) {
-      projectRoot = home + '/' + segments[0] + '/' + segments[1];
+      projectRoot = home + path.sep + segments[0] + path.sep + segments[1];
     } else {
-      projectRoot = home + '/' + segments[0];
+      projectRoot = home + path.sep + segments[0];
     }
 
     if (!projectMap.has(projectRoot)) {
@@ -194,7 +299,7 @@ function updateDockMenu() {
 }
 
 // ---------------------------------------------------------------------------
-// Auto-save path: ~/CongaCode/AutoSave/YYYY-MM-DD/
+// Auto-save path: ~/ApexDebugStudio/AutoSave/YYYY-MM-DD/
 // Returns the day directory, creating it if needed.
 // ---------------------------------------------------------------------------
 function generateAutoSavePath(dateStr) {
@@ -230,19 +335,154 @@ function getAllFiles(dirPath, maxFiles = 5000) {
   return results;
 }
 
+// Resolve an external command to its full path cross-platform (`where` on
+// Windows, `which` elsewhere). Returns the absolute path or null if not found.
+// Using the resolved path (rather than the bare name) makes spawn() robust on
+// Windows, where a bare name may map to an .exe, .cmd or .bat shim.
+function resolveCommand(name) {
+  try {
+    const out = execFileSync(IS_WINDOWS ? 'where' : 'which', [name], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000,
+    });
+    const first = out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0];
+    return first || null;
+  } catch { return null; }
+}
+
+// Pure-JS "search in files" — the universal fallback used when neither ripgrep
+// nor grep is available (notably on Windows, which ships no grep). Returns the
+// same shape as parseSearchOutput: [{ filePath, matches: [{ line, text }] }].
+function jsSearchInFiles(dirPath, query, { isRegex, caseSensitive }) {
+  const files = getAllFiles(dirPath, 20000);
+  let test;
+  if (isRegex) {
+    let re;
+    try { re = new RegExp(query, caseSensitive ? '' : 'i'); } catch { return []; }
+    test = (line) => re.test(line);
+  } else {
+    const needle = caseSensitive ? query : query.toLowerCase();
+    test = (line) => (caseSensitive ? line : line.toLowerCase()).includes(needle);
+  }
+  const out = [];
+  let total = 0;
+  const MAX_TOTAL = 2000;
+  const MAX_FILE_SIZE = 2 * 1024 * 1024;
+  for (const fp of files) {
+    if (total >= MAX_TOTAL) break;
+    try {
+      const base = path.basename(fp);
+      if (base === 'package-lock.json' || /\.min\.(js|css)$|\.map$/.test(base)) continue;
+      const st = fs.statSync(fp);
+      if (st.size > MAX_FILE_SIZE) continue;
+      const content = fs.readFileSync(fp, 'utf-8');
+      if (content.indexOf('\u0000') !== -1) continue; // skip binary
+      const lines = content.split('\n');
+      const matches = [];
+      for (let i = 0; i < lines.length && total < MAX_TOTAL; i++) {
+        if (test(lines[i])) {
+          matches.push({ line: i + 1, text: lines[i].trim().slice(0, 200) });
+          total++;
+          if (matches.length >= 100) break;
+        }
+      }
+      if (matches.length) out.push({ filePath: fp, matches });
+    } catch {}
+  }
+  return out;
+}
+
+// Pure-JS grep for the TODO/FIXME scanner fallback. Produces `path:line:text`
+// lines (the same shape ripgrep/grep emit) so the existing parser is reused.
+function jsGrepTodos(folderPath, pattern) {
+  let re;
+  try { re = new RegExp(pattern, 'i'); } catch { return ''; }
+  const files = getAllFiles(folderPath, 20000);
+  const outLines = [];
+  const MAX = 5000;
+  for (const fp of files) {
+    if (outLines.length >= MAX) break;
+    const base = path.basename(fp);
+    if (/\.min\.(js|css)$|\.map$/.test(base) || base === 'package-lock.json' || base === 'yarn.lock') continue;
+    let content;
+    try {
+      const st = fs.statSync(fp);
+      if (st.size > 2 * 1024 * 1024) continue;
+      content = fs.readFileSync(fp, 'utf-8');
+    } catch { continue; }
+    if (content.indexOf('\u0000') !== -1) continue; // skip binary
+    const lines = content.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (re.test(lines[i])) {
+        outLines.push(`${fp}:${i + 1}:${lines[i]}`);
+        if (outLines.length >= MAX) break;
+      }
+    }
+  }
+  return outLines.join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Window
 // ---------------------------------------------------------------------------
 let mainWindow = null;
 
+// ---------------------------------------------------------------------------
+// Renderer console capture
+// Mirror the renderer's DevTools console (which also carries the Apex debugger's
+// console-panel output — see addConsoleEntry, which echoes through console.*) to
+// a rotating-free log file plus this process's stdout. This lets an external
+// watcher tail debugger failures live, with no manual copy-paste.
+// Log file: ~/ApexDebugStudio/logs/renderer-console.log
+// ---------------------------------------------------------------------------
+const CONSOLE_LEVEL_NAMES = ['LOG', 'INFO', 'WARNING', 'ERROR'];
+function attachConsoleCapture(win) {
+  try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (_) { /* best effort */ }
+  const writeLine = (line) => {
+    try { fs.appendFileSync(RENDERER_LOG, line); } catch (_) { /* best effort */ }
+    // Skip stdout once its downstream reader is gone; the global 'error' handler
+    // above is the real safety net (EPIPE surfaces asynchronously), this just
+    // avoids buffering into a dead pipe.
+    try {
+      if (!process.stdout.destroyed && process.stdout.writable !== false) {
+        process.stdout.write(`[renderer] ${line}`);
+      }
+    } catch (_) { /* best effort */ }
+  };
+  win.webContents.on('console-message', (_event, level, message, lineNo, sourceId) => {
+    const lvl = CONSOLE_LEVEL_NAMES[level] || `L${level}`;
+    const src = sourceId ? ` (${String(sourceId).split('/').pop()}:${lineNo})` : '';
+    writeLine(`${new Date().toISOString()} [${lvl}]${src} ${message}\n`);
+  });
+  win.webContents.on('render-process-gone', (_e, details) => {
+    writeLine(`${new Date().toISOString()} [CRASH] render-process-gone: ${JSON.stringify(details)}\n`);
+  });
+}
+
+function showWithFade(win) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.setOpacity(0);
+    win.show();
+    let op = 0;
+    const timer = setInterval(() => {
+      if (!win || win.isDestroyed()) { clearInterval(timer); return; }
+      op = Math.min(1, op + 0.14);
+      win.setOpacity(op);
+      if (op >= 1) clearInterval(timer);
+    }, 16);
+  } catch (e) {
+    try { win.show(); } catch (_) {}
+  }
+}
+
 function createNewWindow() {
   const win = new BrowserWindow({
     width: 1280, height: 800,
     minWidth: 600, minHeight: 400,
-    title: 'CongaCode',
+    title: 'Apex Debug Studio',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 14 },
-    backgroundColor: '#1e1e2e',
+    backgroundColor: '#0d1117',
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'preload.js'),
       contextIsolation: true,
@@ -253,7 +493,8 @@ function createNewWindow() {
   });
   // Load with ?new=1 so the renderer skips session restore
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'), { query: { new: '1' } });
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => showWithFade(win));
+  attachConsoleCapture(win);
 
   // Open external links in default browser for new windows too
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -280,10 +521,10 @@ function createWindow() {
     ...bounds,
     minWidth: 600,
     minHeight: 400,
-    title: 'CongaCode',
+    title: 'Apex Debug Studio',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 14 },
-    backgroundColor: '#1e1e2e',
+    backgroundColor: '#0d1117',
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'preload.js'),
       contextIsolation: true,
@@ -294,8 +535,9 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  attachConsoleCapture(mainWindow);
   mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
+    showWithFade(mainWindow);
     mainWindow.webContents.send('session:restore', session);
   });
 
@@ -331,7 +573,7 @@ function createWindow() {
 }
 
 // ---------------------------------------------------------------------------
-// Application menu — with "CongaCode" as first menu label
+// Application menu — with "Apex Debug Studio" as first menu label
 // ---------------------------------------------------------------------------
 // Helper: send IPC to the currently focused window (not just mainWindow)
 function sendToFocused(channel, ...args) {
@@ -350,17 +592,17 @@ function buildMenu() {
 
   const template = [
     ...(isMac ? [{
-      label: 'CongaCode',
+      label: 'Apex Debug Studio',
       submenu: [
-        { label: 'About CongaCode', role: 'about' },
+        { label: 'About Apex Debug Studio', role: 'about' },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
-        { label: 'Hide CongaCode', role: 'hide' },
+        { label: 'Hide Apex Debug Studio', role: 'hide' },
         { role: 'hideOthers' },
         { role: 'unhide' },
         { type: 'separator' },
-        { label: 'Quit CongaCode', role: 'quit' },
+        { label: 'Quit Apex Debug Studio', role: 'quit' },
       ],
     }] : []),
     {
@@ -467,7 +709,7 @@ function buildMenu() {
       role: 'help',
       submenu: [
         { label: 'Open AutoSave Folder', click: () => shell.openPath(AUTOSAVE_DIR) },
-        { label: 'Open CongaCode Folder', click: () => shell.openPath(CONGACODE_DIR) },
+        { label: 'Open Apex Debug Studio Folder', click: () => shell.openPath(APP_DATA_DIR) },
       ],
     },
   ];
@@ -523,15 +765,30 @@ ipcMain.handle('fs:read-dir', async (_e, dirPath) => {
 ipcMain.handle('fs:stat', async (_e, fp) => { try { const s = fs.statSync(fp); return { size: s.size, mtime: s.mtimeMs, isDirectory: s.isDirectory() }; } catch { return null; } });
 
 // ---------------------------------------------------------------------------
-// System-wide file search using macOS Spotlight (mdfind)
+// System-wide file search (cross-platform).
+//   macOS  → Spotlight `mdfind` (indexed, fast)
+//   Windows→ `where /r <home>` (walks the tree; capped by the timeout)
+//   Linux  → `find <home> -iname` (walks the tree; capped by the timeout)
 // ---------------------------------------------------------------------------
 ipcMain.handle('fs:system-search', async (_e, query) => {
   if (!query || query.length < 2) return [];
   return new Promise((resolve) => {
     const home = os.homedir();
-    // Use mdfind with -name for filename matching, scoped to home directory
-    const args = ['-name', query, '-onlyin', home];
-    const proc = spawn('mdfind', args);
+    let cmd, args;
+    if (process.platform === 'darwin') {
+      // Spotlight filename match, scoped to home directory.
+      cmd = 'mdfind';
+      args = ['-name', query, '-onlyin', home];
+    } else if (IS_WINDOWS) {
+      // where.exe recursive filename search. Wildcards match "contains".
+      cmd = 'where';
+      args = ['/r', home, `*${query}*`];
+    } else {
+      // POSIX find, case-insensitive "contains" filename match.
+      cmd = 'find';
+      args = [home, '-iname', `*${query}*`];
+    }
+    const proc = spawn(cmd, args);
     let output = '';
 
     // Timeout after 3 seconds
@@ -570,14 +827,16 @@ ipcMain.handle('fs:system-search', async (_e, query) => {
         .split('\n')
         .filter(line => line.trim().length > 0)
         .filter(fp => {
-          const rel = fp.substring(home.length);
+          // Normalize separators so the forward-slash noise patterns match on
+          // Windows (where paths come back with backslashes).
+          const rel = fp.substring(home.length).replace(/\\/g, '/');
           return !noisePatterns.some(p => rel.includes(p)) && !rel.startsWith('/.');
         });
 
       // Sort: prioritize shorter paths (closer to home), then alphabetical
       filtered.sort((a, b) => {
-        const depthA = a.split('/').length;
-        const depthB = b.split('/').length;
+        const depthA = a.split(/[/\\]/).length;
+        const depthB = b.split(/[/\\]/).length;
         if (depthA !== depthB) return depthA - depthB;
         return a.localeCompare(b);
       });
@@ -614,13 +873,22 @@ ipcMain.handle('fs:search-in-files', async (_e, dirPath, query, options) => {
   const isRegex = options?.isRegex || false;
   const caseSensitive = options?.caseSensitive || options?.matchCase || false;
 
-  return new Promise((resolve) => {
-    // Detect search tool: prefer ripgrep, fallback to grep
-    let cmd, args;
-    const hasRg = (() => { try { execSync('which rg', { stdio: 'pipe' }); return true; } catch { return false; } })();
+  // Prefer ripgrep everywhere (fast, respects .gitignore, skips binaries).
+  // Fall back to grep on Unix; on Windows (no grep) fall back to a pure-JS scan.
+  const rgPath = resolveCommand('rg');
+  const grepPath = !rgPath && !IS_WINDOWS ? resolveCommand('grep') : null;
 
-    if (hasRg) {
+  if (!rgPath && !grepPath) {
+    try { return jsSearchInFiles(dirPath, query, { isRegex, caseSensitive }); }
+    catch { return []; }
+  }
+
+  return new Promise((resolve) => {
+    let cmd, args;
+
+    if (rgPath) {
       // ripgrep: fast, respects .gitignore, skips binary
+      cmd = rgPath;
       args = [
         '--no-heading', '--line-number', '--color=never',
         '--max-count=100',        // max matches per file
@@ -638,9 +906,9 @@ ipcMain.handle('fs:search-in-files', async (_e, dirPath, query, options) => {
         args.push('-F', '--', query);
       }
       args.push(dirPath);
-      cmd = 'rg';
     } else {
-      // BSD grep fallback (macOS built-in)
+      // grep fallback (Unix only — Windows never reaches here)
+      cmd = grepPath;
       args = ['-rn', '--color=never', '-I'];
       if (!caseSensitive) args.push('-i');
       for (const d of IGNORED_DIRS) args.push(`--exclude-dir=${d}`);
@@ -651,13 +919,17 @@ ipcMain.handle('fs:search-in-files', async (_e, dirPath, query, options) => {
         args.push('-F', query);
       }
       args.push(dirPath);
-      cmd = 'grep';
     }
+
+    // Only augment PATH with Unix package dirs on Unix; they're meaningless on Windows.
+    const searchEnv = IS_WINDOWS
+      ? process.env
+      : { ...process.env, PATH: (process.env.PATH || '') + ':/opt/homebrew/bin:/usr/local/bin' };
 
     const proc = spawn(cmd, args, {
       cwd: dirPath,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PATH: process.env.PATH + ':/opt/homebrew/bin:/usr/local/bin' },
+      env: searchEnv,
     });
 
     let output = '';
@@ -668,7 +940,7 @@ ipcMain.handle('fs:search-in-files', async (_e, dirPath, query, options) => {
       // Hard limit: stop if output is huge (> 5MB)
       if (output.length > 5 * 1024 * 1024) {
         killed = true;
-        proc.kill('SIGTERM');
+        proc.kill();
       }
     });
     proc.stderr.on('data', () => {}); // ignore
@@ -676,7 +948,7 @@ ipcMain.handle('fs:search-in-files', async (_e, dirPath, query, options) => {
     // Timeout: kill after 30s
     const timer = setTimeout(() => {
       killed = true;
-      proc.kill('SIGTERM');
+      proc.kill();
     }, 30000);
 
     proc.on('close', () => {
@@ -691,7 +963,9 @@ ipcMain.handle('fs:search-in-files', async (_e, dirPath, query, options) => {
 
     proc.on('error', () => {
       clearTimeout(timer);
-      resolve([]);
+      // If the external tool fails to spawn for any reason, fall back to JS.
+      try { resolve(jsSearchInFiles(dirPath, query, { isRegex, caseSensitive })); }
+      catch { resolve([]); }
     });
   });
 });
@@ -730,7 +1004,7 @@ ipcMain.handle('session:load', async () => loadSession());
 ipcMain.handle('recent:add', async (_e, fp) => { addRecent(fp); buildMenu(); updateDockMenu(); return true; });
 ipcMain.handle('recent:get', async () => loadRecent());
 ipcMain.handle('recent:clear', async () => { saveRecent([]); buildMenu(); updateDockMenu(); return true; });
-ipcMain.handle('app:get-paths', async () => ({ congacodeDir: CONGACODE_DIR, autosaveDir: AUTOSAVE_DIR, home: os.homedir() }));
+ipcMain.handle('app:get-paths', async () => ({ appDataDir: APP_DATA_DIR, autosaveDir: AUTOSAVE_DIR, home: os.homedir() }));
 ipcMain.handle('app:new-window', async () => { createNewWindow(); return true; });
 ipcMain.handle('shell:show-item', async (_e, fp) => { shell.showItemInFolder(fp); return true; });
 ipcMain.handle('shell:open-path', async (_e, dp) => { shell.openPath(dp); return true; });
@@ -739,7 +1013,7 @@ ipcMain.handle('shell:open-terminal', async (_e, dp) => {
   if (process.platform === 'darwin') {
     exec(`open -a Terminal "${dp}"`);
   } else if (process.platform === 'win32') {
-    exec(`start cmd /K "cd /d ${dp}"`);
+    exec(`start "" cmd /K cd /d "${dp}"`);
   } else {
     exec(`x-terminal-emulator --working-directory="${dp}"`);
   }
@@ -1056,7 +1330,8 @@ ipcMain.handle('terminal:run', async (e, command) => {
   }
 
   return new Promise((resolve) => {
-    const proc = spawn('/bin/zsh', ['-l', '-c', command], {
+    const { file: shFile, args: shArgs } = shellCommand(command);
+    const proc = spawn(shFile, shArgs, {
       cwd: terminalCwd,
       env: { ...process.env, TERM: 'dumb', CLICOLOR: '0', NO_COLOR: '1' },
     });
@@ -1101,9 +1376,25 @@ ipcMain.handle('terminal:set-cwd', async (_e, cwd) => {
 // ---------------------------------------------------------------------------
 // Salesforce CLI helpers — execute commands and return captured output
 // ---------------------------------------------------------------------------
+// The interactive `sf org login web` flow binds a fixed local OAuth callback
+// port, so only one can run at a time. Track the active login child process so a
+// new login attempt can cancel a stale one (e.g. after the user closed the
+// browser) instead of colliding on the port.
+let activeLoginProc = null;
 ipcMain.handle('sf:exec', async (_e, command, cwd, timeoutMs) => {
   const timeout = timeoutMs || 120000;
   const isLoginCmd = /\borg\s+login\s+web\b/.test(command);
+  // Only one interactive web login can run at a time: the CLI binds a fixed
+  // OAuth callback port (1717). If a previous login is still waiting (e.g. the
+  // user closed the browser without finishing), kill its whole process tree
+  // before starting a new one so the retry doesn't fail with EADDRINUSE /
+  // "address already in use". Killing the tree (not just the shell wrapper)
+  // frees the port; a short pause lets the OS actually release it.
+  if (isLoginCmd && activeLoginProc && !activeLoginProc.killed) {
+    killProcessTree(activeLoginProc, 'SIGKILL');
+    activeLoginProc = null;
+    await new Promise((r) => setTimeout(r, 600));
+  }
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
@@ -1115,57 +1406,75 @@ ipcMain.handle('sf:exec', async (_e, command, cwd, timeoutMs) => {
       ? { ...process.env, BROWSER: process.env.BROWSER || '' }
       : { ...process.env, TERM: 'dumb', CLICOLOR: '0', NO_COLOR: '1', SF_JSON_RESULT: '1' };
 
-    const proc = spawn('/bin/zsh', ['-l', '-c', command], {
+    const { file: shFile, args: shArgs } = shellCommand(command);
+    const proc = spawn(shFile, shArgs, {
       cwd: cwd || os.homedir(),
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Give login commands their own process group (non-Windows) so we can kill
+      // the CLI's OAuth-server grandchild and free port 1717 on cancel/retry.
+      detached: isLoginCmd && !IS_WINDOWS,
     });
+    if (isLoginCmd) activeLoginProc = proc;
+    // For login: detect the auth URL, open it in the default browser, and tell
+    // the renderer so it can show live "browser opened" progress. Fire once.
+    let browserOpened = false;
+    const handleLoginUrl = (text) => {
+      if (!isLoginCmd || browserOpened) return;
+      const urlMatch = text.match(/(https?:\/\/[^\s]+login[^\s]*)/i)
+        || text.match(/(https?:\/\/localhost:\d+[^\s]*)/i)
+        || text.match(/(https?:\/\/[^\s]+)/i);
+      if (urlMatch && urlMatch[1]) {
+        browserOpened = true;
+        shell.openExternal(urlMatch[1]).catch(() => {});
+        try { _e.sender.send('sf:login-progress', { phase: 'browser-opened' }); } catch (_) { /* window gone */ }
+      }
+    };
 
     proc.stdout.on('data', (chunk) => {
       const text = chunk.toString();
       stdout += text;
-      // For login: detect the auth URL and open it in the default browser
-      if (isLoginCmd) {
-        const urlMatch = text.match(/(https?:\/\/[^\s]+login[^\s]*)/i)
-          || text.match(/(https?:\/\/localhost:\d+[^\s]*)/i)
-          || text.match(/(https?:\/\/[^\s]+)/i);
-        if (urlMatch && urlMatch[1]) {
-          shell.openExternal(urlMatch[1]).catch(() => {});
-        }
-      }
+      handleLoginUrl(text);
     });
     proc.stderr.on('data', (chunk) => {
       const text = chunk.toString();
       stderr += text;
-      // Also check stderr for URLs (some CLI versions print there)
-      if (isLoginCmd) {
-        const urlMatch = text.match(/(https?:\/\/[^\s]+login[^\s]*)/i)
-          || text.match(/(https?:\/\/localhost:\d+[^\s]*)/i)
-          || text.match(/(https?:\/\/[^\s]+)/i);
-        if (urlMatch && urlMatch[1]) {
-          shell.openExternal(urlMatch[1]).catch(() => {});
-        }
-      }
+      handleLoginUrl(text); // some CLI versions print the URL to stderr
     });
     proc.on('close', (code) => {
+      if (isLoginCmd && activeLoginProc === proc) activeLoginProc = null;
       done({ code, stdout, stderr });
     });
     proc.on('error', (err) => {
+      if (isLoginCmd && activeLoginProc === proc) activeLoginProc = null;
       done({ code: 1, stdout, stderr: err.message });
     });
     setTimeout(() => {
       if (!resolved && proc && !proc.killed) {
-        proc.kill('SIGTERM');
+        killProcessTree(proc, 'SIGTERM');
+        if (isLoginCmd && activeLoginProc === proc) activeLoginProc = null;
         done({ code: 137, stdout, stderr: 'Command timed out' });
       }
     }, timeout);
   });
 });
 
+// Cancel an in-flight interactive web login (user clicked "Cancel" on the
+// connect progress card, or closed the browser and wants to start fresh).
+// Kills the whole login process tree so the OAuth callback port is released
+// immediately and the next "+ Add Org" starts clean.
+ipcMain.handle('sf:cancel-login', async () => {
+  if (activeLoginProc && !activeLoginProc.killed) {
+    killProcessTree(activeLoginProc, 'SIGKILL');
+    activeLoginProc = null;
+    return { cancelled: true };
+  }
+  return { cancelled: false };
+});
+
 ipcMain.handle('sf:check-cli', async () => {
   try {
-    const { execSync } = require('child_process');
-    const version = execSync('/bin/zsh -l -c "sf --version 2>/dev/null || sfdx --version 2>/dev/null"', {
+    const version = shellExecSync('sf --version 2>/dev/null || sfdx --version 2>/dev/null', {
       timeout: 10000, encoding: 'utf8',
     }).trim();
     return { installed: true, version };
@@ -1176,8 +1485,7 @@ ipcMain.handle('sf:check-cli', async () => {
 
 ipcMain.handle('sf:org-info', async (_e, cwd) => {
   try {
-    const { execSync } = require('child_process');
-    const result = execSync('/bin/zsh -l -c "sf org display --json 2>/dev/null"', {
+    const result = shellExecSync('sf org display --json 2>/dev/null', {
       timeout: 15000, encoding: 'utf8', cwd: cwd || os.homedir(),
     });
     const json = JSON.parse(result);
@@ -1199,12 +1507,11 @@ ipcMain.handle('sf:org-info', async (_e, cwd) => {
 
 ipcMain.handle('sf:org-list', async (_e, cwd) => {
   try {
-    const { exec, execSync } = require('child_process');
     const effectiveCwd = cwd || os.homedir();
     // Use 'sf org list auth' — reads local auth files only, takes ~1-2s
     // vs 'sf org list' which contacts every org and takes 30-60s
     const result = await new Promise((resolve, reject) => {
-      exec('/bin/zsh -l -c "sf org list auth --json 2>/dev/null"', {
+      shellExec('sf org list auth --json 2>/dev/null', {
         timeout: 15000, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024,
         cwd: effectiveCwd,
       }, (err, stdout) => {
@@ -1235,7 +1542,7 @@ ipcMain.handle('sf:org-list', async (_e, cwd) => {
     // Get default org from project-local or global config
     let defaultUsername = null;
     try {
-      const dResult = execSync('/bin/zsh -l -c "sf config get target-org --json 2>/dev/null"', {
+      const dResult = shellExecSync('sf config get target-org --json 2>/dev/null', {
         timeout: 5000, encoding: 'utf8', cwd: effectiveCwd,
       });
       const dJson = JSON.parse(dResult);
@@ -1263,7 +1570,7 @@ ipcMain.handle('sf:org-list', async (_e, cwd) => {
 // ---------------------------------------------------------------------------
 const DEFAULT_SETTINGS = {
   fontSize: 14,
-  fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
+  fontFamily: "'SF Mono', SFMono-Regular, Menlo, Monaco, 'Cascadia Code', Consolas, 'Courier New', monospace",
   tabSize: 2,
   wordWrap: 'off',
   minimap: true,
@@ -1453,7 +1760,7 @@ ipcMain.handle('db:query', async (_e, filePath, query, tableName) => {
 // ---------------------------------------------------------------------------
 // Bookmarks persistence
 // ---------------------------------------------------------------------------
-const BOOKMARKS_FILE = path.join(CONGACODE_DIR, '.bookmarks.json');
+const BOOKMARKS_FILE = path.join(APP_DATA_DIR, '.bookmarks.json');
 
 ipcMain.handle('bookmarks:load', async () => {
   try { return JSON.parse(fs.readFileSync(BOOKMARKS_FILE, 'utf-8')); } catch { return []; }
@@ -1483,7 +1790,6 @@ ipcMain.handle('screenshot:save', async (e, dataUrl) => {
 // TODO / FIXME scanner — search workspace files via grep
 // ---------------------------------------------------------------------------
 ipcMain.handle('todos:scan', async (e, folderPath) => {
-  const { execFile } = require('child_process');
   // Strong tags: always matched anywhere (they're unambiguous as comment markers)
   // Weak tags: NOTE, WARN — only matched when inside comments
   const STRONG_TAGS = ['TODO', 'FIXME', 'HACK', 'BUG', 'XXX', 'TO-DO', 'DEBUG'];
@@ -1497,10 +1803,14 @@ ipcMain.handle('todos:scan', async (e, folderPath) => {
   const commentPrefixRegex = /^\s*(\/\/|\/\*+|<!--|\*|#|--|%|@|;|REM\b)/i;
 
   return new Promise((resolve) => {
-    const rgPath = require('path').join(__dirname, '..', '..', 'node_modules', '@vscode', 'ripgrep', 'bin', 'rg');
-    const tryRg = fs.existsSync(rgPath);
-    const cmd = tryRg ? rgPath : 'grep';
-    const args = tryRg
+    // Prefer the ripgrep binary bundled with the app (correct extension per OS),
+    // then any system ripgrep, then grep on Unix. Windows ships no grep, so when
+    // no native tool is found we synthesize matches with a pure-JS scan.
+    const bundledRg = path.join(__dirname, '..', '..', 'node_modules', '@vscode', 'ripgrep', 'bin', IS_WINDOWS ? 'rg.exe' : 'rg');
+    const rgCmd = fs.existsSync(bundledRg) ? bundledRg : resolveCommand('rg');
+    const grepCmd = !rgCmd && !IS_WINDOWS ? resolveCommand('grep') : null;
+    const cmd = rgCmd || grepCmd;
+    const args = rgCmd
       ? ['-n', '-i', '--no-heading', '-e', pattern, '-r',
          '--glob', '!node_modules', '--glob', '!.git', '--glob', '!dist',
          '--glob', '!build', '--glob', '!*.min.js', '--glob', '!*.min.css',
@@ -1521,7 +1831,8 @@ ipcMain.handle('todos:scan', async (e, folderPath) => {
          '--include=*.sql', '--include=*.xml',
          '--include=*.cls', '--include=*.trigger',
          folderPath];
-    execFile(cmd, args, { timeout: 15000, maxBuffer: 1024 * 1024 * 10 }, (err, stdout) => {
+    const onOutput = (err, stdout) => {
+      if (err && err.code === 'ENOENT') { onOutput(null, jsGrepTodos(folderPath, pattern)); return; }
       if (!stdout) { resolve({ items: [] }); return; }
       const items = [];
       const lines = stdout.split('\n');
@@ -1568,7 +1879,14 @@ ipcMain.handle('todos:scan', async (e, folderPath) => {
         });
       }
       resolve({ items });
-    });
+    };
+    if (cmd) {
+      execFile(cmd, args, { timeout: 15000, maxBuffer: 1024 * 1024 * 10 }, onOutput);
+    } else {
+      // No native search tool (e.g. Windows without ripgrep) — pure-JS scan.
+      try { onOutput(null, jsGrepTodos(folderPath, pattern)); }
+      catch { resolve({ items: [] }); }
+    }
   });
 });
 
@@ -1599,10 +1917,10 @@ function openFileInNewWindow(filePath) {
   const win = new BrowserWindow({
     width: 1280, height: 800,
     minWidth: 600, minHeight: 400,
-    title: 'CongaCode',
+    title: 'Apex Debug Studio',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 14 },
-    backgroundColor: '#1e1e2e',
+    backgroundColor: '#0d1117',
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'preload.js'),
       contextIsolation: true,
@@ -1613,7 +1931,7 @@ function openFileInNewWindow(filePath) {
   });
   // Load with ?new=1 so the renderer skips session restore (starts clean)
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'), { query: { new: '1' } });
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => showWithFade(win));
 
   // Once the renderer finishes loading, send the file to open
   win.webContents.once('did-finish-load', () => {
@@ -1653,14 +1971,23 @@ app.whenReady().then(() => {
   ensureDirs();
   appIsReady = true;
 
+  // Detect if launched as a login item (macOS auto-launch on restart).
+  // In that case, open the window hidden — user brings it up by clicking the dock icon.
+  const loginItemSettings = process.platform === 'darwin'
+    ? app.getLoginItemSettings()
+    : { wasOpenedAsHidden: false, wasOpenedAtLogin: false };
+  const openedAtLogin = loginItemSettings.wasOpenedAtLogin || loginItemSettings.wasOpenedAsHidden;
+
   // If files were queued (from open-file before ready), open each in a new window
   if (pendingFilesToOpen.length > 0) {
     pendingFilesToOpen.forEach(fp => openFileInNewWindow(fp));
     pendingFilesToOpen = [];
-  } else {
-    // No file to open — launch the normal main window with welcome screen
+  } else if (!openedAtLogin) {
+    // No file to open and not a login-item launch — show the normal main window
     createWindow();
   }
+  // If openedAtLogin and no files pending, don't create a window; the app lives
+  // in the dock and the user opens it from there when needed.
 
   // Set up dock menu with recent files
   updateDockMenu();
@@ -1687,6 +2014,8 @@ app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(
 app.on('before-quit', () => {
   // Clean up terminal
   if (terminalProc && !terminalProc.killed) terminalProc.kill('SIGTERM');
+  // Clean up any in-flight org login (detached → must be killed explicitly)
+  if (activeLoginProc && !activeLoginProc.killed) killProcessTree(activeLoginProc, 'SIGKILL');
   // Clean up file watchers
   for (const [key, watcher] of watchers) {
     watcher.close();

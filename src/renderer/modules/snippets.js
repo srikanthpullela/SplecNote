@@ -1,12 +1,12 @@
 /* ================================================================
-   CongaCode — Snippet Manager Module
+   Apex Debug Studio — Snippet Manager Module
    Save, tag, search, and insert reusable code snippets.
    ================================================================ */
 'use strict';
 
 (function () {
   // ---- State ----
-  const STORAGE_KEY = 'congacode-snippets';
+  const STORAGE_KEY = 'apexstudio-snippets';
   let snippets = [];
   let editingIdx = -1;
 

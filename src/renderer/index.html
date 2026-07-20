@@ -1,20 +1,38 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="github-dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: file: blob:; script-src 'self' 'unsafe-inline'; connect-src *;" />
-  <title>CongaCode</title>
+  <title>Apex Debug Studio</title>
   <link rel="stylesheet" href="styles.css" />
   <script>
-    // Apply saved theme before first paint to prevent flash
+    // Apply saved theme before first paint to prevent flash. Default = GitHub Dark.
+    // One-time: upgrade the legacy default ('dark'/none) to GitHub Dark. A flag
+    // (set by app.js after it also migrates the session) makes this run only once,
+    // so a user who later explicitly picks Dark keeps it.
     try {
-      const t = localStorage.getItem('congacode-theme');
-      if (t) document.documentElement.setAttribute('data-theme', t);
+      var MIG = 'apexstudio-theme-ghd-migrated';
+      var t = localStorage.getItem('apexstudio-theme') || localStorage.getItem('congacode-theme');
+      if (!localStorage.getItem(MIG) && (!t || t === 'dark')) {
+        t = 'github-dark';
+        try { localStorage.setItem('apexstudio-theme', 'github-dark'); } catch(_) {}
+      }
+      document.documentElement.setAttribute('data-theme', t ? (t === 'conga' ? 'apex' : t) : 'github-dark');
     } catch(e) {}
   </script>
 </head>
 <body>
+  <!-- Branded boot splash — painted immediately, masks Monaco load, dismissed by app.js after init() -->
+  <div id="app-splash" role="status" aria-label="Loading Apex Debug Studio">
+    <div class="splash-inner">
+      <img src="logo-large.svg" alt="" class="splash-logo" onerror="this.onerror=null;this.src='logo-large.png'" />
+      <div class="splash-title">Apex Debug Studio</div>
+      <div class="splash-tagline">Live Apex debugging, reimagined.</div>
+      <div class="splash-progress"><div class="splash-progress-bar"></div></div>
+    </div>
+  </div>
+
   <!-- Title bar -->
   <div id="titlebar">
     <div id="titlebar-drag"></div>
@@ -24,7 +42,7 @@
         <line x1="5.5" y1="2" x2="5.5" y2="14" stroke="currentColor" stroke-width="1.2"/>
       </svg>
     </button>
-    <span id="titlebar-title">CongaCode</span>
+    <span id="titlebar-title">Apex Debug Studio</span>
     <div id="titlebar-tools" class="titlebar-tools">
       <button class="titlebar-tool-btn" id="tbtn-api" title="API Client (⌃⇧A)">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
@@ -266,6 +284,15 @@
 
         <!-- Editor area with split support -->
         <div id="editor-split-container" class="editor-split-container">
+          <!-- Live-Org query loader overlay (shown while the debugger fetches from the org) -->
+          <div id="dbg-query-banner" class="dbg-query-banner hidden" role="status" aria-live="polite" title="Go to the line currently executing">
+            <span class="dbg-query-banner-spinner"></span>
+            <span class="dbg-query-banner-text">
+              <span class="dbg-query-banner-title">Querying the org…</span>
+              <span id="dbg-query-banner-detail" class="dbg-query-banner-detail"></span>
+            </span>
+            <span class="dbg-query-banner-go" aria-hidden="true">↧ Go to line</span>
+          </div>
           <!-- Monaco editor (primary) -->
           <div id="editor-container"></div>
           <!-- Split editor (secondary) -->
@@ -344,6 +371,76 @@
         </div>
       </div>
 
+      <!-- Debug Bottom Panel (Variables, Call Stack, Console, Breakpoints) -->
+      <div id="debug-panel" class="debug-panel hidden">
+        <div id="debug-panel-resizer" class="debug-panel-resizer"></div>
+        <div class="dbg-panel-header">
+          <div class="dbg-panel-tabs">
+            <button class="dbg-panel-tab active" data-tab="dbg-variables">Variables</button>
+            <button class="dbg-panel-tab" data-tab="dbg-watch">Watch</button>
+            <button class="dbg-panel-tab" data-tab="dbg-dataflow">Data Flow</button>
+            <button class="dbg-panel-tab" data-tab="dbg-callstack">Call Stack</button>
+            <button class="dbg-panel-tab" data-tab="dbg-console">Console</button>
+            <button class="dbg-panel-tab" data-tab="dbg-breakpoints">Breakpoints</button>
+            <button class="dbg-panel-tab" data-tab="dbg-orgactivity">⚡ Org &amp; Log</button>
+          </div>
+          <div class="dbg-panel-actions">
+            <button id="dbg-console-clear" class="tool-hdr-btn" title="Clear Console">⌫</button>
+            <button id="dbg-panel-close" class="tool-hdr-btn" title="Close panel">✕</button>
+          </div>
+        </div>
+        <div class="dbg-panel-body">
+          <div id="dbg-variables" class="dbg-tab-content active">
+            <div id="dbg-variables-body" class="dbg-scroll-body">
+              <div class="dbg-empty">No debug session active</div>
+            </div>
+          </div>
+          <div id="dbg-watch" class="dbg-tab-content">
+            <div id="dbg-watch-body" class="dbg-scroll-body">
+              <div class="dbg-empty">No watch expressions</div>
+            </div>
+            <div class="dbg-watch-input-row">
+              <span class="dbg-watch-icon">👁</span>
+              <input type="text" id="dbg-watch-input" class="dbg-watch-input" placeholder="Add watch expression…" spellcheck="false" autocomplete="off" />
+            </div>
+          </div>
+          <div id="dbg-callstack" class="dbg-tab-content">
+            <div id="dbg-callstack-body" class="dbg-scroll-body">
+              <div class="dbg-empty">No active call stack</div>
+            </div>
+          </div>
+          <div id="dbg-dataflow" class="dbg-tab-content">
+            <div id="dbg-dataflow-body" class="dbg-scroll-body">
+              <div class="dbg-empty">No tracked objects. While paused, hover a value and click 📌 to follow it — this tab then shows which methods read it and which modify it.</div>
+            </div>
+          </div>
+          <div id="dbg-console" class="dbg-tab-content">
+            <div id="dbg-console-body" class="dbg-scroll-body">
+              <div class="dbg-empty">Console — your System.debug() output appears here as the code runs.</div>
+            </div>
+            <div class="dbg-console-input-row">
+              <span class="dbg-console-prompt">&gt;</span>
+              <input type="text" id="dbg-console-input" class="dbg-console-input" placeholder="Evaluate expression, method, or SOQL…  e.g. flow  ·  CustomSettingUtil.isTurboPricing(flow)  ·  [SELECT Id FROM Account LIMIT 5]" spellcheck="false" autocomplete="off" />
+            </div>
+          </div>
+          <div id="dbg-breakpoints" class="dbg-tab-content">
+            <div id="dbg-breakpoints-body" class="dbg-scroll-body">
+              <div class="dbg-empty">No breakpoints set</div>
+            </div>
+          </div>
+          <div id="dbg-orgactivity" class="dbg-tab-content">
+            <div class="dbg-org-controls">
+              <span class="dbg-org-controls-label">Read mode</span>
+              <button id="dbg-systemmode-toggle" class="sf-btn-sysmode" title="User mode (default) reads only what the connected user can see. Turn on System mode to read FLS-hidden managed-package fields — it deploys a small read-only helper class to the org if one isn't already there.">🔒 User mode</button>
+              <button id="dbg-clearlogs" class="tool-hdr-btn dbg-clearlogs-btn" title="Delete this tool's Apex debug logs from the connected org (debug logs only, never business data)">🧹 Clear debug logs</button>
+            </div>
+            <div id="dbg-orgactivity-body" class="dbg-scroll-body">
+              <div class="dbg-empty">Turn on the ⚡ Live Org toggle to run the entry method against the connected org (read-only — changes are rolled back). Toggle it OFF then ON, or press Restart ⟳, to run again.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Status bar -->
       <div id="status-bar">
         <span id="status-git" class="status-clickable status-git hidden" title="Git Branch">⎇ main</span>
@@ -354,8 +451,9 @@
         <span id="status-eol">LF</span>
         <span id="status-indent">Spaces: 2</span>
         <span id="status-minimap" class="status-clickable" title="Toggle Minimap">Minimap</span>
-        <span id="status-theme" class="status-clickable" title="Change Theme">Theme: Dark</span>
+        <span id="status-theme" class="status-clickable" title="Change Theme">Theme: GitHub Dark</span>
         <span id="status-sf-org" class="status-clickable status-sf-org" title="Click to select Salesforce Org">⚡ Select Org</span>
+        <span id="status-reopen-debug" class="status-clickable hidden" title="Reopen the debug panel">🐞 Debug panel</span>
         <span id="status-autosave" class="status-autosave">● Auto-saved</span>
       </div>
     </main>
@@ -502,8 +600,9 @@
   <div id="welcome-screen">
     <div class="welcome-content">
       <div class="welcome-header">
-        <img src="logo-large.png" alt="CongaCode" class="welcome-logo" />
-        <!-- <p class="welcome-subtitle">Editing evolved</p> -->
+        <img src="logo-large.svg" alt="Apex Debug Studio" class="welcome-logo" onerror="this.onerror=null;this.src='logo-large.png'" />
+        <h1 class="welcome-title">Apex Debug Studio</h1>
+        <p class="welcome-subtitle">Live Apex debugging, reimagined.</p>
       </div>
 
       <!-- Spotlight Search Bar -->
@@ -853,7 +952,7 @@
             <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
           </div>
           <pre id="screenshot-code" class="screenshot-code"></pre>
-          <div id="screenshot-watermark-text" class="screenshot-watermark">CongaCode</div>
+          <div id="screenshot-watermark-text" class="screenshot-watermark">Apex Debug Studio</div>
         </div>
       </div>
     </div>
@@ -1087,6 +1186,8 @@
         <option value="">Checking orgs...</option>
       </select>
       <span id="sf-org-label" class="sf-org-detail"></span>
+      <button id="sf-systemmode-toggle" class="sf-btn-sysmode" title="User mode (default) — reads only what the connected user can see; nothing is deployed. Click to enable system mode for hidden managed-package fields.">🔒 User mode</button>
+      <button id="sf-clearlogs" class="tool-hdr-btn" title="Delete this tool's Apex debug logs from the connected org (debug logs only, never business data)">🧹 Clear logs</button>
       <button id="sf-org-refresh" class="tool-hdr-btn" title="Refresh org list">⟳</button>
       <button id="sf-org-login" class="sf-btn-login" title="Authenticate new org">+ Add Org</button>
     </div>
@@ -1241,10 +1342,13 @@
 
   <!-- Debug Toolbar (floating bar, shown during debug session) -->
   <div id="debug-toolbar" class="debug-toolbar hidden">
-    <span class="dbg-toolbar-label">DEBUGGING</span>
+    <span class="dbg-toolbar-label" id="dbg-drag-handle" title="Drag to move the debug bar">⠿ DEBUGGING</span>
     <div class="dbg-toolbar-buttons">
       <button id="dbg-btn-continue" class="dbg-toolbar-btn" title="Continue (F5)">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,2 14,8 3,14"/></svg>
+      </button>
+      <button id="dbg-btn-step-back" class="dbg-toolbar-btn dbg-btn-back" title="Step Back (⇧F10) — replay: go to the previous statement with its real recorded values" disabled>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="10" r="3"/><path d="M13 4H8a3 3 0 00-3 3"/><polyline points="8,2 5,4 8,6"/></svg>
       </button>
       <button id="dbg-btn-step-over" class="dbg-toolbar-btn" title="Step Over (F10)">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="10" r="3"/><path d="M3 4h5a3 3 0 013 3"/><polyline points="8,2 11,4 8,6"/></svg>
@@ -1262,58 +1366,15 @@
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>
       </button>
     </div>
-  </div>
-
-  <!-- Debug Bottom Panel (Variables, Call Stack, Console, Breakpoints) -->
-  <div id="debug-panel" class="debug-panel hidden">
-    <div id="debug-panel-resizer" class="debug-panel-resizer"></div>
-    <div class="dbg-panel-header">
-      <div class="dbg-panel-tabs">
-        <button class="dbg-panel-tab active" data-tab="dbg-variables">Variables</button>
-        <button class="dbg-panel-tab" data-tab="dbg-watch">Watch</button>
-        <button class="dbg-panel-tab" data-tab="dbg-callstack">Call Stack</button>
-        <button class="dbg-panel-tab" data-tab="dbg-console">Console</button>
-        <button class="dbg-panel-tab" data-tab="dbg-breakpoints">Breakpoints</button>
-      </div>
-      <div class="dbg-panel-actions">
-        <button id="dbg-console-clear" class="tool-hdr-btn" title="Clear Console">⌫</button>
-      </div>
+    <div class="dbg-liveorg" title="When ON, SOQL queries run against the connected Salesforce org so variables hold real data. DML is always simulated (never written to the org).">
+      <label class="dbg-liveorg-toggle">
+        <input type="checkbox" id="dbg-liveorg-checkbox" disabled />
+        <span class="dbg-liveorg-slider"></span>
+        <span class="dbg-liveorg-text">⚡ Live Org</span>
+      </label>
+      <span id="dbg-liveorg-status" class="dbg-liveorg-status disconnected">no org connected</span>
     </div>
-    <div class="dbg-panel-body">
-      <div id="dbg-variables" class="dbg-tab-content active">
-        <div id="dbg-variables-body" class="dbg-scroll-body">
-          <div class="dbg-empty">No debug session active</div>
-        </div>
-      </div>
-      <div id="dbg-watch" class="dbg-tab-content">
-        <div id="dbg-watch-body" class="dbg-scroll-body">
-          <div class="dbg-empty">No watch expressions</div>
-        </div>
-        <div class="dbg-watch-input-row">
-          <span class="dbg-watch-icon">👁</span>
-          <input type="text" id="dbg-watch-input" class="dbg-watch-input" placeholder="Add watch expression…" spellcheck="false" autocomplete="off" />
-        </div>
-      </div>
-      <div id="dbg-callstack" class="dbg-tab-content">
-        <div id="dbg-callstack-body" class="dbg-scroll-body">
-          <div class="dbg-empty">No active call stack</div>
-        </div>
-      </div>
-      <div id="dbg-console" class="dbg-tab-content">
-        <div id="dbg-console-body" class="dbg-scroll-body">
-          <div class="dbg-empty">Debug console</div>
-        </div>
-        <div class="dbg-console-input-row">
-          <span class="dbg-console-prompt">&gt;</span>
-          <input type="text" id="dbg-console-input" class="dbg-console-input" placeholder="Evaluate expression…  e.g. request.cartId" spellcheck="false" autocomplete="off" />
-        </div>
-      </div>
-      <div id="dbg-breakpoints" class="dbg-tab-content">
-        <div id="dbg-breakpoints-body" class="dbg-scroll-body">
-          <div class="dbg-empty">No breakpoints set</div>
-        </div>
-      </div>
-    </div>
+    <span id="dbg-exec-status" class="dbg-exec-status" style="display:none"></span>
   </div>
 
   <!-- Debug Request Input Modal -->
@@ -1326,6 +1387,13 @@
       <div class="dbg-modal-body">
         <div class="dbg-modal-info">Paste the raw API request JSON (VF Remoting, REST, or raw parameter object):</div>
         <div id="dbg-request-editor" class="dbg-request-editor"></div>
+        <div id="dbg-request-history-wrap" class="dbg-request-history-wrap hidden">
+          <div class="dbg-request-history-hdr">
+            <span>Recent requests</span>
+            <button id="dbg-history-clear" class="dbg-history-clear" title="Clear history">Clear</button>
+          </div>
+          <div id="dbg-request-history" class="dbg-request-history"></div>
+        </div>
       </div>
       <div class="dbg-modal-footer">
         <button id="dbg-modal-cancel" class="sf-btn">Cancel</button>
@@ -1345,6 +1413,8 @@
   <script src="modules/pomodoro.js"></script>
   <script src="modules/diffchecker.js"></script>
   <script src="modules/salesforce.js"></script>
+  <script src="modules/apexlang.js"></script>
+  <script src="modules/apexengine.js"></script>
   <script src="modules/apexdebugger.js"></script>
 </body>
 </html>

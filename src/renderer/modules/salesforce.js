@@ -1,5 +1,5 @@
 /**
- * CongaCode — Salesforce Module
+ * Apex Debug Studio — Salesforce Module
  * 5 sub-features: Quick API View, Apex Test Runner, Process Flow Visualizer,
  * Change Impact Analyzer, Deployment Simulator
  */
@@ -36,6 +36,145 @@
   function toast(msg, type) {
     if (window.showToast) window.showToast(msg, type);
   }
+
+  // ──────────────────────────────────────────────
+  // Persistent "Connecting to Salesforce" progress card (bottom-right).
+  // A normal toast auto-dismisses after a few seconds, so during the ~60s
+  // browser-login wait the user would see nothing. This card stays up with a
+  // spinner + live elapsed timer and updates as the flow progresses, so it's
+  // always obvious that something is happening.
+  // ──────────────────────────────────────────────
+  let _scpTimer = null;
+  let _scpStart = 0;
+  let _scpEl = null;
+  // Handler invoked when the user clicks "Cancel" on the connect progress card.
+  // loginNewOrg sets this while a login is in flight; cleared when it settles.
+  let _onConnectCancel = null;
+
+  function showConnectProgress(title, status) {
+    hideConnectProgress(true);
+    const el = document.createElement('div');
+    el.id = 'sf-connect-progress';
+    el.className = 'sf-connect-progress';
+    el.innerHTML =
+      '<div class="scp-spinner" aria-hidden="true"></div>' +
+      '<div class="scp-body">' +
+      '<div class="scp-title"></div>' +
+      '<div class="scp-status"></div>' +
+      '<div class="scp-timer"></div>' +
+      '</div>' +
+      '<button type="button" class="scp-cancel" title="Cancel sign-in">Cancel</button>';
+    document.body.appendChild(el);
+    el.querySelector('.scp-title').textContent = title || 'Connecting to Salesforce';
+    el.querySelector('.scp-status').textContent = status || 'Starting…';
+    const cancelBtn = el.querySelector('.scp-cancel');
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', () => {
+        if (typeof _onConnectCancel === 'function') _onConnectCancel();
+      });
+    }
+    _scpEl = el;
+    _scpStart = Date.now();
+    const timerEl = el.querySelector('.scp-timer');
+    const tick = () => {
+      const s = Math.floor((Date.now() - _scpStart) / 1000);
+      timerEl.textContent = `${s}s elapsed · waits up to 60s`;
+    };
+    tick();
+    _scpTimer = setInterval(tick, 1000);
+    return el;
+  }
+
+  function setConnectProgress(status) {
+    if (_scpEl) {
+      const s = _scpEl.querySelector('.scp-status');
+      if (s) s.textContent = status;
+    }
+  }
+
+  function finishConnectProgress(ok, msg) {
+    if (!_scpEl) return;
+    if (_scpTimer) { clearInterval(_scpTimer); _scpTimer = null; }
+    const el = _scpEl;
+    el.classList.add(ok ? 'scp-done' : 'scp-error');
+    const sp = el.querySelector('.scp-spinner');
+    if (sp) { sp.classList.add('scp-static'); sp.textContent = ok ? '✓' : '✗'; }
+    const cancelBtn = el.querySelector('.scp-cancel');
+    if (cancelBtn) cancelBtn.remove(); // nothing left to cancel once it's settled
+    el.querySelector('.scp-title').textContent = ok ? 'Connected' : 'Connection failed';
+    el.querySelector('.scp-status').textContent = msg || (ok ? 'Success' : 'Please try again');
+    const t = el.querySelector('.scp-timer');
+    if (t) t.textContent = '';
+    setTimeout(() => hideConnectProgress(), ok ? 2500 : 5000);
+  }
+
+  function hideConnectProgress(immediate) {
+    if (_scpTimer) { clearInterval(_scpTimer); _scpTimer = null; }
+    const el = _scpEl || document.getElementById('sf-connect-progress');
+    if (el) {
+      if (immediate) { el.remove(); }
+      else { el.classList.add('scp-out'); setTimeout(() => el.remove(), 250); }
+    }
+    _scpEl = null;
+  }
+
+  // ──────────────────────────────────────────────
+  // Friendly CLI messages.
+  // The Salesforce CLI prints noise to stderr on almost every command — most
+  // notably "Warning: @salesforce/cli update available from x to y." — which was
+  // leaking into the UI and looking like a scary failure. These helpers strip
+  // that noise and translate the common failure causes into calm, reassuring,
+  // actionable messages, so the user is never shown a raw CLI/stack error.
+  // ──────────────────────────────────────────────
+  function stripSfNoise(text) {
+    if (!text) return [];
+    return String(text)
+      .replace(/\x1b\[[0-9;]*m/g, '')                        // ANSI colour codes
+      .split('\n')
+      .map((l) => l.replace(/^\s*[›»>*•\-]+\s*/, '').trim())  // strip bullet prefixes
+      .filter((l) => l.length > 0)
+      .filter((l) => !isSfNoiseLine(l));
+  }
+
+  /** A single line of pure Salesforce-CLI noise (update notice etc.) — safe to hide. */
+  function isSfNoiseLine(l) {
+    const s = String(l).replace(/^\s*[›»>*•\-]+\s*/, '').trim();
+    return /update available/i.test(s)
+      || /^warning:\s*@salesforce/i.test(s)
+      || /@salesforce\/cli\s+update/i.test(s)
+      || /to update,?\s*run/i.test(s)
+      || /npm\s+(i|install)\b.*@salesforce/i.test(s);
+  }
+
+  /** True when a CLI result is only noise (e.g. just the update warning). */
+  function isOnlySfNoise(stderr, stdout) {
+    return stripSfNoise([stderr, stdout].filter(Boolean).join('\n')).length === 0;
+  }
+
+  /** Turn a raw org-connect failure into a calm, non-scary, actionable line. */
+  function friendlyConnectError(stderr, stdout) {
+    const lines = stripSfNoise([stderr, stdout].filter(Boolean).join('\n'));
+    const j = lines.join(' ').toLowerCase();
+    const has = (...subs) => subs.some((s) => j.includes(s));
+
+    if (has('eaddrinuse', 'address already in use', ':1717', 'port 1717', 'listen eacces'))
+      return 'A previous sign-in was still open, so we closed it. Please click "+ Add Org" and try again.';
+    if (has('timed out', 'timeout'))
+      return 'The sign-in wasn\u2019t finished in time. Click "+ Add Org" to try again when you\u2019re ready.';
+    if (has('invalid_grant', 'expired', 'already redeemed'))
+      return 'That sign-in link expired. Click "+ Add Org" to start a fresh sign-in.';
+    if (has('access_denied', 'user canceled', 'user cancelled', 'canceled', 'cancelled', 'end of file', 'aborted', 'closed'))
+      return 'Sign-in was cancelled \u2014 no problem. Click "+ Add Org" whenever you\u2019d like to connect.';
+    if (has('enotfound', 'getaddrinfo', 'econnrefused', 'etimedout', 'network', 'unable to connect', 'socket hang up'))
+      return 'We couldn\u2019t reach Salesforce. Check your internet connection and try again.';
+    if (has('command not found', 'enoent', 'not recognized', 'is not installed', 'cannot find'))
+      return 'The Salesforce CLI wasn\u2019t found. Please install it, then try connecting again.';
+    if (lines.length === 0)
+      return 'Sign-in wasn\u2019t completed. Click "+ Add Org" to try again.';
+    // A genuine but unrecognised error — keep the surface calm; detail goes to the console.
+    return 'We couldn\u2019t finish connecting. Please try again \u2014 if it keeps happening, reconnect the org.';
+  }
+
 
   /** Navigate to a line in the editor with a brief highlight flash */
   async function goToLineWithFlash(filePath, lineNum, content) {
@@ -115,7 +254,7 @@
     const folder = getFolderPath();
     if (!folder || !username) return;
     try {
-      const api = window.congacode;
+      const api = window.apexStudio;
       if (!api || !api.readSettings) return;
       const settings = await api.readSettings();
       if (!settings.sfOrgMap) settings.sfOrgMap = {};
@@ -129,7 +268,7 @@
     const folder = getFolderPath();
     if (!folder) return null;
     try {
-      const api = window.congacode;
+      const api = window.apexStudio;
       if (!api || !api.readSettings) return null;
       const settings = await api.readSettings();
       return (settings.sfOrgMap && settings.sfOrgMap[folder]) || null;
@@ -161,7 +300,7 @@
   /** Execute a Salesforce CLI command, capture and return full output */
   async function sfExec(command, timeoutMs) {
     const folder = getFolderPath() || undefined;
-    const api = window.congacode;
+    const api = window.apexStudio;
     if (!api || !api.sfExec) {
       throw new Error('sfExec IPC not available');
     }
@@ -194,7 +333,7 @@
     sel.disabled = true;
     if (label) label.textContent = '';
 
-    const api = window.congacode;
+    const api = window.apexStudio;
     if (!api || !api.sfCheckCli) {
       dot.classList.add('no-cli');
       sel.innerHTML = '<option value="">IPC bridge not available</option>';
@@ -302,14 +441,55 @@
     // Persist selection for this repo
     saveOrgForRepo(sel.value);
     updateStatusBarOrg();
+    // Offer to deploy the system-mode helper class if this connected org lacks it.
+    notifySystemHelperOnConnect(connected);
+  }
+
+  /**
+   * Ask the Apex debugger to verify (and, with consent, deploy) its system-mode
+   * helper class on the freshly connected org. Fire-and-forget; safe if the
+   * debugger module isn't loaded yet.
+   */
+  function notifySystemHelperOnConnect(connected) {
+    try {
+      if (connected && typeof window.apexDebuggerCheckSystemHelper === 'function' && typeof window.sfGetActiveOrg === 'function') {
+        window.apexDebuggerCheckSystemHelper(window.sfGetActiveOrg());
+      }
+    } catch (_) { /* non-fatal */ }
   }
 
   /** Authenticate a new org via browser OAuth flow */
+  let _loginGen = 0;
   async function loginNewOrg(alias, instanceUrl) {
+    // Each attempt gets a generation id. If the user retries, a newer attempt
+    // supersedes this one — the stale attempt must not stomp the shared progress
+    // card or show a duplicate error when its (now cancelled) CLI process exits.
+    const myGen = ++_loginGen;
+    const current = () => myGen === _loginGen;
+
     const btn = $('#sf-org-login');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Waiting...'; }
     updateStatusBarOrg('⚡ Authenticating...');
-    toast('Opening browser for Salesforce login... (60s timeout)', 'info');
+    showConnectProgress('Connecting to Salesforce', 'Opening your browser…');
+    // Let the user bail out of a stuck sign-in from the progress card. Cancelling
+    // kills the CLI login (freeing the OAuth port) and resets to a fresh state so
+    // they can immediately try again — with the same alias if they like.
+    _onConnectCancel = () => cancelConnect(myGen);
+
+    // Live progress from the main process (fires when the browser is opened).
+    let unsub = null;
+    try {
+      if (window.apexStudio && window.apexStudio.on) {
+        unsub = window.apexStudio.on('sf:login-progress', (data) => {
+          if (current() && data && data.phase === 'browser-opened') {
+            setConnectProgress('Browser opened — finish the login there, then come back…');
+          }
+        });
+      }
+    } catch (_) { /* progress is best-effort */ }
+    // Fallback nudges in case no signal arrives, so the text never looks frozen.
+    const t1 = setTimeout(() => { if (current()) setConnectProgress('Complete the Salesforce login in your browser…'); }, 5000);
+    const t2 = setTimeout(() => { if (current()) setConnectProgress('Still waiting for you to authorize in the browser…'); }, 20000);
 
     try {
       let cmd = 'sf org login web';
@@ -317,24 +497,58 @@
       if (instanceUrl) cmd += ` --instance-url ${instanceUrl}`;
       const { code, stdout, stderr } = await sfExec(cmd, 60000);
 
+      // A newer attempt (or a cancel) has taken over — stay silent here.
+      if (!current()) return;
+
       if (code === 0) {
-        toast(`Org ${alias || ''} authenticated successfully!`, 'success');
+        finishConnectProgress(true, `Connected${alias ? ' as ' + alias : ''}`);
       } else {
-        const errMsg = stderr || stdout || 'Authentication failed or was cancelled';
-        toast(errMsg.split('\n')[0], 'error');
+        const detail = stripSfNoise([stderr, stdout].filter(Boolean).join('\n')).join(' ');
+        if (detail) clog(`Org connect did not complete: ${detail}`, 'sf-console-dim'); // technical detail → console only
+        finishConnectProgress(false, friendlyConnectError(stderr, stdout));
       }
     } catch (err) {
-      const msg = err.message || '';
-      if (msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('timed out')) {
-        toast('Authentication timed out — browser login was not completed in 60s', 'warning');
-      } else {
-        toast(`Login error: ${msg}`, 'error');
-      }
+      if (!current()) return;
+      const msg = (err && err.message) || '';
+      if (msg) clog(`Org connect error: ${msg}`, 'sf-console-dim');
+      finishConnectProgress(false, friendlyConnectError(msg, ''));
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = '+ Add Org'; }
-      updateStatusBarOrg(); // reset status bar text
-      await checkOrgConnection();
+      clearTimeout(t1);
+      clearTimeout(t2);
+      if (unsub) { try { unsub(); } catch (_) { /* ignore */ } }
+      // Only the newest attempt resets shared UI / refreshes the org list.
+      if (current()) {
+        _onConnectCancel = null;
+        if (btn) { btn.disabled = false; btn.textContent = '+ Add Org'; }
+        updateStatusBarOrg(); // reset status bar text
+        await checkOrgConnection();
+        // A freshly authenticated org is auto-selected without firing the dropdown
+        // 'change' event, so trigger the system-mode helper check explicitly.
+        notifySystemHelperOnConnect(sfState.orgConnected);
+      }
     }
+  }
+
+  /**
+   * Cancel an in-flight browser sign-in from the progress card's Cancel button.
+   * Bumps the login generation so the (soon-to-exit) CLI process can't post a
+   * late error, tells the main process to kill the login tree (freeing the OAuth
+   * port), then quietly resets to a fresh state — no scary error shown.
+   */
+  async function cancelConnect(gen) {
+    if (gen != null && gen !== _loginGen) return; // already superseded/settled
+    _loginGen++;            // silence the in-flight attempt's resolution
+    _onConnectCancel = null;
+    hideConnectProgress(true);
+    try {
+      if (window.apexStudio && window.apexStudio.sfCancelLogin) {
+        await window.apexStudio.sfCancelLogin();
+      }
+    } catch (_) { /* best-effort */ }
+    const btn = $('#sf-org-login');
+    if (btn) { btn.disabled = false; btn.textContent = '+ Add Org'; }
+    updateStatusBarOrg();
+    toast('Sign-in cancelled — you can try again anytime.', 'info');
   }
 
   // ──────────────────────────────────────────────
@@ -420,12 +634,15 @@
         + (item.tags ? `<span style="margin-left:8px;font-size:10px;opacity:.5">${escHtml(item.tags)}</span>` : '')
         + (item.detail ? `<span style="margin-left:auto;font-size:10px;color:var(--text-muted)">${escHtml(item.detail)}</span>` : '');
       div.addEventListener('click', () => { hideOrgPicker(); item.action(); });
-      div.addEventListener('mouseenter', () => orgPickerUpdateSelected(i));
+      // Highlight on hover, but DON'T scrollIntoView — the pointer is already on
+      // the item. Scrolling here would shift the list under a stationary cursor,
+      // firing mouseenter on a new item → a self-perpetuating scroll loop.
+      div.addEventListener('mouseenter', () => orgPickerUpdateSelected(i, false));
       results.appendChild(div);
     }
   }
 
-  function orgPickerUpdateSelected(idx) {
+  function orgPickerUpdateSelected(idx, scroll = true) {
     const results = $('#org-picker-results');
     if (!results) return;
     const items = results.querySelectorAll('.cp-item');
@@ -433,7 +650,8 @@
     orgPickerSelectedIndex = Math.max(0, Math.min(idx, items.length - 1));
     if (items[orgPickerSelectedIndex]) {
       items[orgPickerSelectedIndex].classList.add('selected');
-      items[orgPickerSelectedIndex].scrollIntoView({ block: 'nearest' });
+      // Only scroll for keyboard navigation; hover must never scroll (loop guard).
+      if (scroll) items[orgPickerSelectedIndex].scrollIntoView({ block: 'nearest' });
     }
   }
 
@@ -516,7 +734,7 @@
 
   /** Recursively gather .cls and .trigger files */
   async function gatherApexFiles(folderPath) {
-    const api = window.congacode;
+    const api = window.apexStudio;
     if (!api) return [];
     const files = [];
     try {
@@ -537,7 +755,7 @@
   /** Read file content via IPC */
   async function readFile(fp) {
     try {
-      return await window.congacode.readFile(fp);
+      return await window.apexStudio.readFile(fp);
     } catch { return null; }
   }
 
@@ -562,7 +780,7 @@
   function parseEndpoints(content, filePath) {
     const endpoints = [];
     const lines = content.split('\n');
-    const fileName = filePath.split('/').pop().replace('.cls', '');
+    const fileName = filePath.split(/[/\\]/).pop().replace('.cls', '');
 
     // Check for @RestResource at class level
     const restMatch = content.match(/@RestResource\s*\(\s*urlMapping\s*=\s*'([^']+)'/i);
@@ -682,7 +900,7 @@
 
     detectSalesforceProject(folder);
     const resultsDiv = $('#sf-api-results');
-    const fileName = singleFile ? singleFile.split('/').pop() : null;
+    const fileName = singleFile ? singleFile.split(/[/\\]/).pop() : null;
     resultsDiv.innerHTML = `<div class="sf-empty">⏳ Scanning ${fileName || 'all files'} for endpoints...</div>`;
 
     const files = singleFile ? [singleFile] : await gatherApexFiles(folder);
@@ -757,7 +975,7 @@
     if (ep.urlMapping) metaHtml += `<br><strong>URL:</strong> ${escapeHtml(ep.urlMapping)}`;
     if (ep.httpMethod) metaHtml += `<br><strong>HTTP Method:</strong> ${ep.httpMethod}`;
     if (ep.returnType) metaHtml += `<br><strong>Returns:</strong> ${escapeHtml(ep.returnType)}`;
-    metaHtml += `<br><strong>File:</strong> ${escapeHtml(ep.filePath.split('/').pop())} (line ${ep.line})`;
+    metaHtml += `<br><strong>File:</strong> ${escapeHtml(ep.filePath.split(/[/\\]/).pop())} (line ${ep.line})`;
     meta.innerHTML = metaHtml;
 
     // Render parameters
@@ -827,7 +1045,7 @@
           const qs = Object.entries(params).filter(([,v]) => v).map(([k,v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
           if (qs) url += `?${qs}`;
         }
-        const cmd = `cd "${folder}" && sf api request rest "${url}" --method ${method}${tof}${bodyFlag} 2>&1`;
+        const cmd = `sf api request rest "${url}" --method ${method}${tof}${bodyFlag} 2>&1`;
         output.textContent = `$ sf api request rest "${url}" --method ${method}${tof}\n\n⏳ Running...`;
         const { code, stdout, stderr } = await sfExec(cmd, 60000);
         const responseText = stdout || stderr || '(no output)';
@@ -885,11 +1103,17 @@
           return;
         }
 
-        // Execute anonymous Apex via sf apex run using temp file
-        const escapedApex = apexCode.replace(/'/g, "'\\''");
-        const cmd = `cd "${folder}" && tmpf=$(mktemp /tmp/conga_apex_XXXXXX.apex) && printf '%s' '${escapedApex}' > "$tmpf" && sf apex run --file "$tmpf"${tof} --json 2>&1; rm -f "$tmpf"`;
+        // Execute anonymous Apex via `sf apex run` using a temp file written
+        // through the main process — cross-platform (no mktemp/printf/rm, none
+        // of which exist on Windows). sfExec already runs in the project folder.
+        const paths = await window.apexStudio.getPaths?.();
+        const tmpDir = paths?.appDataDir || paths?.home || folder || '.';
+        const tmpFile = `${tmpDir}/.ads_endpoint_test.apex`;
+        await window.apexStudio.writeFile(tmpFile, apexCode);
+        const cmd = `sf apex run --file "${tmpFile}"${tof} --json 2>&1`;
         output.textContent = `Anonymous Apex:\n${apexCode}\n\n⏳ Executing on org...`;
         const { code, stdout, stderr } = await sfExec(cmd, 60000);
+        try { await window.apexStudio.deleteFile?.(tmpFile); } catch (_) { /* best effort */ }
 
         let resultText = '';
         try {
@@ -972,7 +1196,7 @@
   function parseTestClass(content, filePath) {
     if (!/@isTest/i.test(content)) return null;
     const lines = content.split('\n');
-    const fileName = filePath.split('/').pop().replace('.cls', '');
+    const fileName = filePath.split(/[/\\]/).pop().replace('.cls', '');
     const methods = [];
     const seen = new Set();
 
@@ -1006,7 +1230,7 @@
     if (!folder) { toast('Open a folder first', 'warn'); return; }
 
     const resultsDiv = $('#sf-tests-results');
-    const fileName = singleFile ? singleFile.split('/').pop() : null;
+    const fileName = singleFile ? singleFile.split(/[/\\]/).pop() : null;
     resultsDiv.innerHTML = `<div class="sf-empty">⏳ Scanning ${fileName || 'all files'} for test classes...</div>`;
 
     clearConsole();
@@ -1281,7 +1505,7 @@
 
     // Real CLI execution
     const tof = targetOrgFlag();
-    const cmd = `cd "${folder}" && sf apex run test --synchronous --result-format json --code-coverage${tof} 2>&1`;
+    const cmd = `sf apex run test --synchronous --result-format json --code-coverage${tof} 2>&1`;
     clog(`$ sf apex run test --synchronous --result-format json --code-coverage${tof}`, 'sf-console-cmd');
     const spinner = clogSpinner('Executing tests on org...');
 
@@ -1325,7 +1549,7 @@
         if (stderr) {
           clog('── stderr ──', 'sf-console-error');
           for (const line of stderr.split('\n').slice(0, 30)) {
-            if (line.trim()) clog(`  ${line}`, 'sf-console-error');
+            if (line.trim() && !isSfNoiseLine(line)) clog(`  ${line}`, 'sf-console-error');
           }
         }
         if (stdout) {
@@ -1402,7 +1626,7 @@
     clearConsole();
     clog(`═══ RUN CLASS: ${tc.className} ═══`, 'sf-console-header-line');
     clog(`Methods: ${tc.methods.length}`, 'sf-console-dim');
-    clog(`File: ${tc.filePath.split('/').pop()}`, 'sf-console-dim');
+    clog(`File: ${tc.filePath.split(/[/\\]/).pop()}`, 'sf-console-dim');
     if (sfState.orgConnected && sfState.orgInfo) {
       clog(`Org: ${sfState.orgInfo.username}`, 'sf-console-dim');
     }
@@ -1430,7 +1654,7 @@
 
     const folder = getFolderPath();
     const tof = targetOrgFlag();
-    const cmd = `cd "${folder}" && sf apex run test --class-names ${tc.className} --synchronous --result-format json${tof} 2>&1`;
+    const cmd = `sf apex run test --class-names ${tc.className} --synchronous --result-format json${tof} 2>&1`;
     clog(`$ sf apex run test --class-names ${tc.className} --synchronous --result-format json${tof}`, 'sf-console-cmd');
     const spinner = clogSpinner('Executing on org...');
 
@@ -1457,7 +1681,7 @@
         if (stderr) {
           clog('── Error Output ──', 'sf-console-error');
           for (const line of stderr.split('\n').slice(0, 20)) {
-            if (line.trim()) clog(`  ${line}`, 'sf-console-error');
+            if (line.trim() && !isSfNoiseLine(line)) clog(`  ${line}`, 'sf-console-error');
           }
         }
         if (stdout) {
@@ -1547,7 +1771,7 @@
     } else {
       const folder = getFolderPath();
       const tof = targetOrgFlag();
-      const cmd = `cd "${folder}" && sf apex run test --tests ${tc.className}.${method.name} --synchronous --result-format json${tof} 2>&1`;
+      const cmd = `sf apex run test --tests ${tc.className}.${method.name} --synchronous --result-format json${tof} 2>&1`;
       clog(`$ sf apex run test --tests ${tc.className}.${method.name} --synchronous --result-format json${tof}`, 'sf-console-cmd');
       const spinner = clogSpinner(`  Executing on org...`);
 
@@ -1574,7 +1798,7 @@
           clogResolve(spinner, `⚠ Non-JSON response (exit code ${code})`, 'sf-console-warn');
           if (stderr) {
             for (const line of stderr.split('\n').slice(0, 10)) {
-              if (line.trim()) clog(`  ${line}`, 'sf-console-error');
+              if (line.trim() && !isSfNoiseLine(line)) clog(`  ${line}`, 'sf-console-error');
             }
           }
           // Simulate
@@ -1924,7 +2148,7 @@
     }
     _flowPickerFiles = apexFiles.map(fp => ({
       path: fp,
-      name: fp.split('/').pop(),
+      name: fp.split(/[/\\]/).pop(),
       dir: fp.replace(folder + '/', '').replace(/\/[^/]+$/, ''),
     }));
     _flowPickerFiles.sort((a, b) => a.name.localeCompare(b.name));
@@ -2006,7 +2230,7 @@
     closeFlowPicker();
     _flowFilePath = filePath;
     const nameEl = $('#sf-flow-filename');
-    if (nameEl) nameEl.textContent = filePath.split('/').pop();
+    if (nameEl) nameEl.textContent = filePath.split(/[/\\]/).pop();
     // Read and auto-generate flow
     try {
       _flowContent = await readFile(filePath);
@@ -2014,7 +2238,7 @@
         _flowNodes = parseApexFlow(_flowContent);
         sfState.flowData = _flowNodes;
         renderFlowDiagram(_flowNodes);
-        toast(`Flow: ${_flowNodes.length} nodes from ${filePath.split('/').pop()}`, 'success');
+        toast(`Flow: ${_flowNodes.length} nodes from ${filePath.split(/[/\\]/).pop()}`, 'success');
       } else {
         $('#sf-flow-canvas').innerHTML = '<div class="sf-empty">Could not read file.</div>';
       }
@@ -2035,7 +2259,7 @@
           _flowFilePath = activeTab.filePath;
           _flowContent = window.state.editor.getValue();
           const nameEl = $('#sf-flow-filename');
-          if (nameEl) nameEl.textContent = activeTab.filePath.split('/').pop();
+          if (nameEl) nameEl.textContent = activeTab.filePath.split(/[/\\]/).pop();
         } else {
           // No apex file open — show picker
           showFlowFilePicker();
@@ -2083,7 +2307,7 @@
       const content = await readFile(fp);
       if (!content) continue;
       _impactContentCache[fp] = content;
-      const baseName = fp.split('/').pop().replace(/\.(cls|trigger)$/, '');
+      const baseName = fp.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
 
       if (fp.endsWith('.trigger')) {
         const trigMatch = content.match(/trigger\s+(\w+)\s+on\s+(\w+)/i);
@@ -2212,15 +2436,15 @@
     if (scopeSelect.value === 'current') {
       const activeTab = window.state && window.state.tabs.find(t => t.id === window.state.activeTabId);
       if (activeTab && activeTab.filePath) {
-        const name = activeTab.filePath.split('/').pop().replace(/\.(cls|trigger)$/, '');
+        const name = activeTab.filePath.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
         targetClasses = [name];
       }
     } else {
       try {
-        const status = await window.congacode.gitStatus(folder);
+        const status = await window.apexStudio.gitStatus(folder);
         if (status && status.files) {
           targetClasses = status.files
-            .map(f => f.path.split('/').pop().replace(/\.(cls|trigger)$/, ''))
+            .map(f => f.path.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, ''))
             .filter(n => sfState.classIndex[n] || sfState.triggerIndex[n]);
         }
       } catch {
@@ -2485,7 +2709,7 @@
 
     if (scopeSelect.value === 'modified') {
       try {
-        const status = await window.congacode.gitStatus(folder);
+        const status = await window.apexStudio.gitStatus(folder);
         if (status && status.files) {
           filesToDeploy = status.files.map(f => f.path);
         }
@@ -2508,7 +2732,7 @@
     for (const fp of allFiles) {
       const content = _impactContentCache[fp] || await readFile(fp);
       if (!content) continue;
-      const fileName = fp.split('/').pop();
+      const fileName = fp.split(/[/\\]/).pop();
       const syntaxIssues = validateApexSyntax(content, fileName);
       issues.push(...syntaxIssues);
     }
@@ -2581,11 +2805,11 @@
     for (const fp of allFiles) {
       const metaFile = fp + '-meta.xml';
       try {
-        await window.congacode.stat(metaFile);
+        await window.apexStudio.stat(metaFile);
       } catch {
         issues.push({
           type: 'warn',
-          file: fp.split('/').pop(),
+          file: fp.split(/[/\\]/).pop(),
           message: 'Missing -meta.xml companion file',
         });
       }
@@ -2596,7 +2820,7 @@
     for (const fp of allFiles) {
       const content = _impactContentCache[fp] || await readFile(fp);
       if (!content) continue;
-      const fileName = fp.split('/').pop();
+      const fileName = fp.split(/[/\\]/).pop();
       const bpIssues = checkBestPractices(content, fileName);
       issues.push(...bpIssues);
     }
@@ -2911,7 +3135,7 @@
     let sourceFlag = '';
     if (scopeSelect.value === 'modified') {
       try {
-        const status = await window.congacode.gitStatus(folder);
+        const status = await window.apexStudio.gitStatus(folder);
         if (status && status.files && status.files.length > 0) {
           const modifiedPaths = status.files.map(f => f.path).filter(p =>
             p.endsWith('.cls') || p.endsWith('.trigger') || p.endsWith('.js') ||
@@ -2939,7 +3163,7 @@
       }
     }
 
-    const cmd = `cd "${folder}" && sf project deploy start${dryRunFlag}${sourceFlag}${tof} --json --wait 30 2>&1`;
+    const cmd = `sf project deploy start${dryRunFlag}${sourceFlag}${tof} --json --wait 30 2>&1`;
     const displayCmd = `sf project deploy start${dryRunFlag}${sourceFlag ? ' --source-dir ...' : ''}${tof} --wait 30`;
     clog(`$ ${displayCmd}`, 'sf-console-cmd');
     const spinner = clogSpinner(`${mode}...`);
@@ -3125,7 +3349,7 @@
     const logDiv = $('#sf-deploy-log');
     const tof = targetOrgFlag();
 
-    resultsDiv.innerHTML = `<div class="sf-empty">⏳ DEPLOYING ${targetPath.split('/').pop()}...</div>`;
+    resultsDiv.innerHTML = `<div class="sf-empty">⏳ DEPLOYING ${targetPath.split(/[/\\]/).pop()}...</div>`;
     logDiv.classList.remove('hidden');
     logDiv.textContent = '';
 
@@ -3134,8 +3358,8 @@
     clog(`Source: ${targetPath}`, 'sf-console-dim');
     if (sfState.selectedOrg) clog(`Target: ${sfState.selectedOrg}`, 'sf-console-dim');
 
-    const cmd = `cd "${folder}" && sf project deploy start --source-dir "${targetPath}"${tof} --json --wait 30 2>&1`;
-    clog(`$ sf project deploy start --source-dir "${targetPath.split('/').pop()}"${tof} --wait 30`, 'sf-console-cmd');
+    const cmd = `sf project deploy start --source-dir "${targetPath}"${tof} --json --wait 30 2>&1`;
+    clog(`$ sf project deploy start --source-dir "${targetPath.split(/[/\\]/).pop()}"${tof} --wait 30`, 'sf-console-cmd');
     const spinner = clogSpinner('DEPLOYING...');
 
     try {
@@ -3403,6 +3627,10 @@
     $('#sf-org-refresh')?.addEventListener('click', checkOrgConnection);
     $('#sf-org-select')?.addEventListener('change', onOrgSelectChange);
     $('#sf-org-login')?.addEventListener('click', () => showOrgPicker());
+    // System-mode opt-in toggle + debug-log cleanup (handled by the Apex debugger module)
+    $('#sf-systemmode-toggle')?.addEventListener('click', () => window.apexDebuggerToggleSystemMode?.());
+    $('#sf-clearlogs')?.addEventListener('click', () => window.apexDebuggerClearDebugLogs?.());
+    try { window.apexDebuggerUpdateSystemModeUi?.(); } catch (_) {}
     checkOrgConnection();
 
     // Org picker popup
@@ -3423,4 +3651,17 @@
 
   window.initSalesforce = init;
   window.refreshSalesforceOrgs = checkOrgConnection;
+
+  /**
+   * Expose the currently selected/connected org so other modules (e.g. the Apex
+   * debugger's Live Org mode) can run CLI queries against it.
+   * @returns {{ org: string|null, connected: boolean, info: object|null }}
+   */
+  window.sfGetActiveOrg = function () {
+    return {
+      org: sfState.selectedOrg || null,
+      connected: !!sfState.orgConnected,
+      info: sfState.orgInfo || null,
+    };
+  };
 })();

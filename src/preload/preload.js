@@ -1,10 +1,10 @@
 /**
- * CongaCode — Preload Script
+ * Apex Debug Studio — Preload Script
  * Secure IPC bridge with fs ops for context menus, global search, quick open, etc.
  */
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('congacode', {
+const apexStudioApi = {
   // Dialogs
   openFileDialog: () => ipcRenderer.invoke('dialog:open-file'),
   openFolderDialog: () => ipcRenderer.invoke('dialog:open-folder'),
@@ -67,6 +67,7 @@ contextBridge.exposeInMainWorld('congacode', {
 
   // Salesforce CLI
   sfExec: (command, cwd, timeoutMs) => ipcRenderer.invoke('sf:exec', command, cwd, timeoutMs),
+  sfCancelLogin: () => ipcRenderer.invoke('sf:cancel-login'),
   sfCheckCli: () => ipcRenderer.invoke('sf:check-cli'),
   sfOrgInfo: (cwd) => ipcRenderer.invoke('sf:org-info', cwd),
   sfOrgList: (cwd) => ipcRenderer.invoke('sf:org-list', cwd),
@@ -119,6 +120,7 @@ contextBridge.exposeInMainWorld('congacode', {
       'nav:back', 'nav:forward',
       'session:restore', 'app:before-quit', 'help:shortcuts',
       'watch:change',
+      'sf:login-progress',
     ];
     if (valid.includes(channel)) {
       const listener = (_event, ...args) => callback(...args);
@@ -126,4 +128,9 @@ contextBridge.exposeInMainWorld('congacode', {
       return () => ipcRenderer.removeListener(channel, listener);
     }
   },
-});
+};
+
+// Expose the bridge under the new brand name, plus a legacy `congacode` alias
+// (same object) so any not-yet-migrated call sites keep working.
+contextBridge.exposeInMainWorld('apexStudio', apexStudioApi);
+contextBridge.exposeInMainWorld('congacode', apexStudioApi);

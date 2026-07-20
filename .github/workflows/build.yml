@@ -1,0 +1,88 @@
+name: Build desktop apps
+
+# Builds the Apex Debug Studio Electron app for both macOS and Windows on every push /
+# pull request to the default branch (and on demand). Each OS job produces
+# installable artifacts (macOS: .dmg + .zip, Windows: .exe (NSIS) + .zip) and
+# uploads them so they can be downloaded from the run summary.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+            platform: mac
+          - os: windows-latest
+            name: Windows
+            platform: win
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # electron-builder's DMG step shells out to `python`; GitHub's macOS
+      # runners only ship `python3`, so make a plain `python` available.
+      - name: Set up Python (for macOS dmg-builder)
+        if: matrix.platform == 'mac'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        # Prefer the reproducible, lockfile-exact install; fall back to a normal
+        # install if the lockfile and the runner's npm disagree on a platform-specific
+        # optional dependency (e.g. the Windows-only squirrel packages).
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+        shell: bash
+
+      - name: Build macOS app
+        if: matrix.platform == 'mac'
+        # --publish never: just build the artifacts, don't try to publish a
+        # GitHub release (electron-builder auto-publishes when it detects CI,
+        # which would require a GH_TOKEN we intentionally don't provide).
+        run: npm run build -- --publish never
+        env:
+          # No Apple Developer certificate on CI — build unsigned instead of
+          # failing on a missing identity.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Build Windows app
+        if: matrix.platform == 'win'
+        run: npx --no-install electron-builder --win --publish never
+        env:
+          # No Windows code-signing certificate on CI — build unsigned.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-debug-studio-${{ matrix.platform }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.exe
+            dist/*.blockmap
+            dist/latest*.yml

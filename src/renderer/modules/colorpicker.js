@@ -1,5 +1,5 @@
 /* ================================================================
-   CongaCode — Color Picker Module
+   Apex Debug Studio — Color Picker Module
    Detect colors in code, show inline swatches, visual picker.
    ================================================================ */
 'use strict';
