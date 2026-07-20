@@ -106,6 +106,64 @@
     _scpEl = null;
   }
 
+  // ──────────────────────────────────────────────
+  // Friendly CLI messages.
+  // The Salesforce CLI prints noise to stderr on almost every command — most
+  // notably "Warning: @salesforce/cli update available from x to y." — which was
+  // leaking into the UI and looking like a scary failure. These helpers strip
+  // that noise and translate the common failure causes into calm, reassuring,
+  // actionable messages, so the user is never shown a raw CLI/stack error.
+  // ──────────────────────────────────────────────
+  function stripSfNoise(text) {
+    if (!text) return [];
+    return String(text)
+      .replace(/\x1b\[[0-9;]*m/g, '')                        // ANSI colour codes
+      .split('\n')
+      .map((l) => l.replace(/^\s*[›»>*•\-]+\s*/, '').trim())  // strip bullet prefixes
+      .filter((l) => l.length > 0)
+      .filter((l) => !isSfNoiseLine(l));
+  }
+
+  /** A single line of pure Salesforce-CLI noise (update notice etc.) — safe to hide. */
+  function isSfNoiseLine(l) {
+    const s = String(l).replace(/^\s*[›»>*•\-]+\s*/, '').trim();
+    return /update available/i.test(s)
+      || /^warning:\s*@salesforce/i.test(s)
+      || /@salesforce\/cli\s+update/i.test(s)
+      || /to update,?\s*run/i.test(s)
+      || /npm\s+(i|install)\b.*@salesforce/i.test(s);
+  }
+
+  /** True when a CLI result is only noise (e.g. just the update warning). */
+  function isOnlySfNoise(stderr, stdout) {
+    return stripSfNoise([stderr, stdout].filter(Boolean).join('\n')).length === 0;
+  }
+
+  /** Turn a raw org-connect failure into a calm, non-scary, actionable line. */
+  function friendlyConnectError(stderr, stdout) {
+    const lines = stripSfNoise([stderr, stdout].filter(Boolean).join('\n'));
+    const j = lines.join(' ').toLowerCase();
+    const has = (...subs) => subs.some((s) => j.includes(s));
+
+    if (has('eaddrinuse', 'address already in use', ':1717', 'port 1717', 'listen eacces'))
+      return 'A previous sign-in was still open, so we closed it. Please click "+ Add Org" and try again.';
+    if (has('timed out', 'timeout'))
+      return 'The sign-in wasn\u2019t finished in time. Click "+ Add Org" to try again when you\u2019re ready.';
+    if (has('invalid_grant', 'expired', 'already redeemed'))
+      return 'That sign-in link expired. Click "+ Add Org" to start a fresh sign-in.';
+    if (has('access_denied', 'user canceled', 'user cancelled', 'canceled', 'cancelled', 'end of file', 'aborted', 'closed'))
+      return 'Sign-in was cancelled \u2014 no problem. Click "+ Add Org" whenever you\u2019d like to connect.';
+    if (has('enotfound', 'getaddrinfo', 'econnrefused', 'etimedout', 'network', 'unable to connect', 'socket hang up'))
+      return 'We couldn\u2019t reach Salesforce. Check your internet connection and try again.';
+    if (has('command not found', 'enoent', 'not recognized', 'is not installed', 'cannot find'))
+      return 'The Salesforce CLI wasn\u2019t found. Please install it, then try connecting again.';
+    if (lines.length === 0)
+      return 'Sign-in wasn\u2019t completed. Click "+ Add Org" to try again.';
+    // A genuine but unrecognised error — keep the surface calm; detail goes to the console.
+    return 'We couldn\u2019t finish connecting. Please try again \u2014 if it keeps happening, reconnect the org.';
+  }
+
+
   /** Navigate to a line in the editor with a brief highlight flash */
   async function goToLineWithFlash(filePath, lineNum, content) {
     // Close SF panel if open
@@ -389,7 +447,14 @@
   }
 
   /** Authenticate a new org via browser OAuth flow */
+  let _loginGen = 0;
   async function loginNewOrg(alias, instanceUrl) {
+    // Each attempt gets a generation id. If the user retries, a newer attempt
+    // supersedes this one — the stale attempt must not stomp the shared progress
+    // card or show a duplicate error when its (now cancelled) CLI process exits.
+    const myGen = ++_loginGen;
+    const current = () => myGen === _loginGen;
+
     const btn = $('#sf-org-login');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Waiting...'; }
     updateStatusBarOrg('⚡ Authenticating...');
@@ -400,15 +465,15 @@
     try {
       if (window.apexStudio && window.apexStudio.on) {
         unsub = window.apexStudio.on('sf:login-progress', (data) => {
-          if (data && data.phase === 'browser-opened') {
+          if (current() && data && data.phase === 'browser-opened') {
             setConnectProgress('Browser opened — finish the login there, then come back…');
           }
         });
       }
     } catch (_) { /* progress is best-effort */ }
     // Fallback nudges in case no signal arrives, so the text never looks frozen.
-    const t1 = setTimeout(() => setConnectProgress('Complete the Salesforce login in your browser…'), 5000);
-    const t2 = setTimeout(() => setConnectProgress('Still waiting for you to authorize in the browser…'), 20000);
+    const t1 = setTimeout(() => { if (current()) setConnectProgress('Complete the Salesforce login in your browser…'); }, 5000);
+    const t2 = setTimeout(() => { if (current()) setConnectProgress('Still waiting for you to authorize in the browser…'); }, 20000);
 
     try {
       let cmd = 'sf org login web';
@@ -416,33 +481,34 @@
       if (instanceUrl) cmd += ` --instance-url ${instanceUrl}`;
       const { code, stdout, stderr } = await sfExec(cmd, 60000);
 
+      // A newer attempt has taken over — let it own the UI, stay silent here.
+      if (!current()) return;
+
       if (code === 0) {
-        toast(`Org ${alias || ''} authenticated successfully!`, 'success');
-        finishConnectProgress(true, `Authenticated${alias ? ' as ' + alias : ''}`);
+        finishConnectProgress(true, `Connected${alias ? ' as ' + alias : ''}`);
       } else {
-        const errMsg = stderr || stdout || 'Authentication failed or was cancelled';
-        toast(errMsg.split('\n')[0], 'error');
-        finishConnectProgress(false, errMsg.split('\n')[0]);
+        const detail = stripSfNoise([stderr, stdout].filter(Boolean).join('\n')).join(' ');
+        if (detail) clog(`Org connect did not complete: ${detail}`, 'sf-console-dim'); // technical detail → console only
+        finishConnectProgress(false, friendlyConnectError(stderr, stdout));
       }
     } catch (err) {
-      const msg = err.message || '';
-      if (msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('timed out')) {
-        toast('Authentication timed out — browser login was not completed in 60s', 'warning');
-        finishConnectProgress(false, 'Timed out — login not completed in 60s');
-      } else {
-        toast(`Login error: ${msg}`, 'error');
-        finishConnectProgress(false, msg || 'Login error');
-      }
+      if (!current()) return;
+      const msg = (err && err.message) || '';
+      if (msg) clog(`Org connect error: ${msg}`, 'sf-console-dim');
+      finishConnectProgress(false, friendlyConnectError(msg, ''));
     } finally {
       clearTimeout(t1);
       clearTimeout(t2);
       if (unsub) { try { unsub(); } catch (_) { /* ignore */ } }
-      if (btn) { btn.disabled = false; btn.textContent = '+ Add Org'; }
-      updateStatusBarOrg(); // reset status bar text
-      await checkOrgConnection();
-      // A freshly authenticated org is auto-selected without firing the dropdown
-      // 'change' event, so trigger the system-mode helper check explicitly.
-      notifySystemHelperOnConnect(sfState.orgConnected);
+      // Only the newest attempt resets shared UI / refreshes the org list.
+      if (current()) {
+        if (btn) { btn.disabled = false; btn.textContent = '+ Add Org'; }
+        updateStatusBarOrg(); // reset status bar text
+        await checkOrgConnection();
+        // A freshly authenticated org is auto-selected without firing the dropdown
+        // 'change' event, so trigger the system-mode helper check explicitly.
+        notifySystemHelperOnConnect(sfState.orgConnected);
+      }
     }
   }
 
@@ -1440,7 +1506,7 @@
         if (stderr) {
           clog('── stderr ──', 'sf-console-error');
           for (const line of stderr.split('\n').slice(0, 30)) {
-            if (line.trim()) clog(`  ${line}`, 'sf-console-error');
+            if (line.trim() && !isSfNoiseLine(line)) clog(`  ${line}`, 'sf-console-error');
           }
         }
         if (stdout) {
@@ -1572,7 +1638,7 @@
         if (stderr) {
           clog('── Error Output ──', 'sf-console-error');
           for (const line of stderr.split('\n').slice(0, 20)) {
-            if (line.trim()) clog(`  ${line}`, 'sf-console-error');
+            if (line.trim() && !isSfNoiseLine(line)) clog(`  ${line}`, 'sf-console-error');
           }
         }
         if (stdout) {
@@ -1689,7 +1755,7 @@
           clogResolve(spinner, `⚠ Non-JSON response (exit code ${code})`, 'sf-console-warn');
           if (stderr) {
             for (const line of stderr.split('\n').slice(0, 10)) {
-              if (line.trim()) clog(`  ${line}`, 'sf-console-error');
+              if (line.trim() && !isSfNoiseLine(line)) clog(`  ${line}`, 'sf-console-error');
             }
           }
           // Simulate

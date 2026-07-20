@@ -1355,9 +1355,22 @@ ipcMain.handle('terminal:set-cwd', async (_e, cwd) => {
 // ---------------------------------------------------------------------------
 // Salesforce CLI helpers — execute commands and return captured output
 // ---------------------------------------------------------------------------
+// The interactive `sf org login web` flow binds a fixed local OAuth callback
+// port, so only one can run at a time. Track the active login child process so a
+// new login attempt can cancel a stale one (e.g. after the user closed the
+// browser) instead of colliding on the port.
+let activeLoginProc = null;
 ipcMain.handle('sf:exec', async (_e, command, cwd, timeoutMs) => {
   const timeout = timeoutMs || 120000;
   const isLoginCmd = /\borg\s+login\s+web\b/.test(command);
+  // Only one interactive web login can run at a time: the CLI binds a fixed
+  // OAuth callback port (1717). If a previous login is still waiting (e.g. the
+  // user closed the browser without finishing), kill it before starting a new
+  // one so the retry doesn't fail with EADDRINUSE / "address already in use".
+  if (isLoginCmd && activeLoginProc && !activeLoginProc.killed) {
+    try { activeLoginProc.kill('SIGTERM'); } catch (_) { /* already gone */ }
+    activeLoginProc = null;
+  }
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
@@ -1375,6 +1388,7 @@ ipcMain.handle('sf:exec', async (_e, command, cwd, timeoutMs) => {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    if (isLoginCmd) activeLoginProc = proc;
     // For login: detect the auth URL, open it in the default browser, and tell
     // the renderer so it can show live "browser opened" progress. Fire once.
     let browserOpened = false;
@@ -1401,14 +1415,17 @@ ipcMain.handle('sf:exec', async (_e, command, cwd, timeoutMs) => {
       handleLoginUrl(text); // some CLI versions print the URL to stderr
     });
     proc.on('close', (code) => {
+      if (isLoginCmd && activeLoginProc === proc) activeLoginProc = null;
       done({ code, stdout, stderr });
     });
     proc.on('error', (err) => {
+      if (isLoginCmd && activeLoginProc === proc) activeLoginProc = null;
       done({ code: 1, stdout, stderr: err.message });
     });
     setTimeout(() => {
       if (!resolved && proc && !proc.killed) {
         proc.kill('SIGTERM');
+        if (isLoginCmd && activeLoginProc === proc) activeLoginProc = null;
         done({ code: 137, stdout, stderr: 'Command timed out' });
       }
     }, timeout);
