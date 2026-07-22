@@ -582,6 +582,25 @@ function sendToFocused(channel, ...args) {
   win?.webContents.send(channel, ...args);
 }
 
+// CI stamps package.json's version to "1.0.<GITHUB_RUN_NUMBER>" before every
+// build (see .github/workflows/build.yml), so app.getVersion() doubles as a
+// build-freshness indicator: the trailing number is the CI run number that
+// produced this exact binary, letting anyone confirm a download matches the
+// latest run at github.com/srikanthpullela/Apex-Debug-Studio/actions.
+function showAboutDialog() {
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  dialog.showMessageBox(win, {
+    type: 'info',
+    title: 'About Apex Debug Studio',
+    message: 'Apex Debug Studio',
+    detail:
+      `Version ${app.getVersion()}\n\n` +
+      `Electron ${process.versions.electron} · Node ${process.versions.node}\n\n` +
+      'The version number\'s last segment is the GitHub Actions run number that produced this build — compare it to the latest run to confirm you have the newest release.',
+    buttons: ['OK'],
+  });
+}
+
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   const recentFiles = loadRecent();
@@ -709,6 +728,10 @@ function buildMenu() {
     {
       role: 'help',
       submenu: [
+        ...(!isMac ? [
+          { label: 'About Apex Debug Studio', click: () => showAboutDialog() },
+          { type: 'separator' },
+        ] : []),
         { label: 'Open AutoSave Folder', click: () => shell.openPath(AUTOSAVE_DIR) },
         { label: 'Open Apex Debug Studio Folder', click: () => shell.openPath(APP_DATA_DIR) },
       ],
@@ -1992,6 +2015,15 @@ function openFileInNewWindow(filePath) {
 app.whenReady().then(() => {
   ensureDirs();
   appIsReady = true;
+
+  // Customize the native macOS/Linux About panel to surface the CI-stamped
+  // build version (see showAboutDialog() above for why this matters).
+  app.setAboutPanelOptions({
+    applicationName: 'Apex Debug Studio',
+    applicationVersion: app.getVersion(),
+    version: `Electron ${process.versions.electron}`,
+    copyright: 'Splec Developers',
+  });
 
   // Detect if launched as a login item (macOS auto-launch on restart).
   // In that case, open the window hidden — user brings it up by clicking the dock icon.
