@@ -1217,7 +1217,7 @@ html, body {
 #app-splash {
   position: fixed; inset: 0; z-index: 100000;
   display: flex; align-items: center; justify-content: center;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
   background:
     radial-gradient(1200px 820px at 50% 30%, rgba(88, 166, 255, 0.10), transparent 60%),
     radial-gradient(820px 560px at 50% 118%, rgba(163, 113, 247, 0.08), transparent 62%),
@@ -1227,13 +1227,19 @@ html, body {
 }
 #app-splash.splash-hidden { opacity: 0; pointer-events: none; }
 #app-splash.splash-done { display: none; }
+/* Only a top strip moves the window; the rest stays resizable during load. */
+.splash-drag-strip {
+  position: absolute; top: 0; left: 0; right: 0; height: 38px;
+  -webkit-app-region: drag;
+}
 .splash-inner {
   display: flex; flex-direction: column; align-items: center;
+  max-width: min(90vw, 460px); text-align: center;
   transform: translateY(-2%);
   animation: splashFadeIn .5s ease both;
 }
 .splash-logo {
-  width: 132px; height: 132px;
+  width: clamp(84px, 20vw, 132px); height: auto; aspect-ratio: 1 / 1;
   user-select: none; -webkit-user-drag: none;
   filter:
     drop-shadow(0 14px 34px rgba(0, 0, 0, 0.42))
@@ -1241,18 +1247,18 @@ html, body {
   animation: splashLogoPop .62s cubic-bezier(.2, .7, .2, 1) both;
 }
 .splash-title {
-  margin-top: 22px;
-  font-size: 26px; font-weight: 700; letter-spacing: .2px;
+  margin-top: clamp(14px, 3vh, 22px);
+  font-size: clamp(18px, 4.5vw, 26px); font-weight: 700; letter-spacing: .2px;
   color: var(--text-primary, #e6edf3);
 }
 .splash-tagline {
   margin-top: 6px;
-  font-size: 13.5px;
+  font-size: clamp(11px, 2.6vw, 13.5px);
   color: var(--text-muted, #8b949e);
 }
 .splash-progress {
-  margin-top: 28px;
-  width: 210px; height: 4px; border-radius: 4px;
+  margin-top: clamp(16px, 4vh, 28px);
+  width: min(210px, 60vw); height: 4px; border-radius: 4px;
   background: rgba(240, 246, 252, 0.06);
   box-shadow: inset 0 0 0 1px rgba(240, 246, 252, 0.04);
   overflow: hidden;
