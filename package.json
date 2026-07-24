@@ -7,8 +7,12 @@
   "scripts": {
     "start": "electron .",
     "dev": "NODE_ENV=development electron .",
+    "test": "node --test \"test/*.test.js\"",
     "build": "electron-builder --mac",
     "build:all": "electron-builder --mac --win"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "author": "Apex Debug Studio",
   "license": "MIT",

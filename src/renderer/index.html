@@ -489,6 +489,24 @@
     </div>
   </div>
 
+  <!-- Generic Input Dialog (replaces blocked prompt/confirm) -->
+  <div id="input-dialog-overlay" class="modal-overlay hidden" style="align-items:flex-start;padding-top:20vh;">
+    <div class="curl-import-modal" style="width:400px;">
+      <div class="curl-import-header" style="padding:8px 14px;">
+        <span id="input-dialog-title" class="curl-import-title">Input</span>
+        <button id="btn-input-dialog-close" class="tool-hdr-btn">✕</button>
+      </div>
+      <div class="curl-import-body" style="padding:10px 14px;">
+        <p id="input-dialog-message" class="curl-import-hint" style="margin-bottom:6px;"></p>
+        <input id="input-dialog-input" type="text" class="api-url" style="width:100%;margin-top:2px;padding:6px 8px;" spellcheck="false" />
+      </div>
+      <div class="curl-import-footer" style="padding:8px 14px;">
+        <button id="btn-input-dialog-cancel" class="curl-import-btn curl-import-cancel">Cancel</button>
+        <button id="btn-input-dialog-ok" class="curl-import-btn curl-import-apply">OK</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Context menu (file tree) -->
   <div id="context-menu" class="context-menu hidden">
     <div class="ctx-item" data-action="new-file">📄 New File</div>
