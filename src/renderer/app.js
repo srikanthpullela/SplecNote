@@ -931,9 +931,25 @@ async function openFileDialog() {
   }
 }
 
+// Normalized key for comparing two filesystem paths. Monaco's `uri.fsPath`
+// (used by the debugger's "▶ Debug with Request" CodeLens) can differ from the
+// raw path a tab was opened with — notably on Windows, where drive letters are
+// lower-cased (`c:\` vs `C:\`) and separators can be mixed. Comparing the raw
+// strings then MISSES the already-open tab and opens a duplicate. Normalize
+// separators, and (only for Windows-style paths, whose filesystem is
+// case-insensitive) fold case, so the dedup below is reliable cross-platform.
+function _fsPathKey(p) {
+  if (!p) return '';
+  let s = String(p).replace(/\\/g, '/');
+  if (/^[a-zA-Z]:\//.test(s)) s = s.toLowerCase(); // Windows drive path
+  return s;
+}
+
 async function openFile(filePath, content) {
-  // Check if already open
-  const existing = state.tabs.find((t) => t.filePath === filePath);
+  // Check if already open (path-normalized so a differently-cased/separated path
+  // for the same file focuses the existing tab instead of duplicating it).
+  const key = _fsPathKey(filePath);
+  const existing = state.tabs.find((t) => _fsPathKey(t.filePath) === key);
   if (existing) { activateTab(existing.id); return; }
   const name = filePath.split(/[/\\]/).pop();
 
@@ -1804,6 +1820,29 @@ function clearSearchDecorations() {
   }
 }
 
+// Hard cap on in-file search matches. A pattern that matches almost everything
+// (e.g. `.`, `\s`, a single common letter) on a large file yields hundreds of
+// thousands of hits; building that many decorations/edits freezes the renderer.
+const SEARCH_MATCH_LIMIT = 5000;
+
+// Run model.findMatches defensively: an invalid regex must never throw up the
+// stack, an over-long pattern (usually a mis-paste) is rejected before it can
+// stall the regex engine, and the result count is capped so a match-everything
+// query can't freeze the app. Returns { matches, capped, error }.
+function safeFindMatches(model, query, isRegex, isCase, isWhole) {
+  if (!model || !query) return { matches: [], capped: false, error: null };
+  if (isRegex && query.length > 1000) return { matches: [], capped: false, error: new Error('pattern too long') };
+  try {
+    const matches = model.findMatches(
+      query, true, isRegex, isCase, isWhole ? 'true' : null, false, SEARCH_MATCH_LIMIT + 1
+    );
+    const capped = matches.length > SEARCH_MATCH_LIMIT;
+    return { matches: capped ? matches.slice(0, SEARCH_MATCH_LIMIT) : matches, capped, error: null };
+  } catch (err) {
+    return { matches: [], capped: false, error: err };
+  }
+}
+
 function doSearch() {
   clearSearchDecorations();
   const query = dom.searchInput.value;
@@ -1816,7 +1855,8 @@ function doSearch() {
   const isRegex = dom.searchRegex.checked;
   const isWhole = dom.searchWhole.checked;
 
-  const matches = model.findMatches(query, true, isRegex, isCase, isWhole ? 'true' : null, false);
+  const { matches, capped, error } = safeFindMatches(model, query, isRegex, isCase, isWhole);
+  if (error) { dom.searchCount.textContent = isRegex ? 'Invalid pattern' : 'Search error'; return; }
   if (matches.length === 0) { dom.searchCount.textContent = 'No results'; return; }
 
   const decorations = matches.map((m) => ({
@@ -1828,7 +1868,9 @@ function doSearch() {
   }));
 
   state.searchDecorations = state.editor.deltaDecorations([], decorations);
-  dom.searchCount.textContent = `${matches.length} results`;
+  dom.searchCount.textContent = capped
+    ? `${SEARCH_MATCH_LIMIT}+ results (showing first ${SEARCH_MATCH_LIMIT})`
+    : `${matches.length} results`;
 
   // Navigate to first match
   const pos = state.editor.getPosition();
@@ -1847,7 +1889,7 @@ function searchNav(dir) {
   const isCase = dom.searchCase.checked;
   const isRegex = dom.searchRegex.checked;
   const isWhole = dom.searchWhole.checked;
-  const matches = model.findMatches(query, true, isRegex, isCase, isWhole ? 'true' : null, false);
+  const { matches } = safeFindMatches(model, query, isRegex, isCase, isWhole);
   if (matches.length === 0) return;
 
   const pos = state.editor.getPosition();
@@ -1887,11 +1929,14 @@ function replaceAll() {
   const isCase = dom.searchCase.checked;
   const isRegex = dom.searchRegex.checked;
   const isWhole = dom.searchWhole.checked;
-  const matches = model.findMatches(query, true, isRegex, isCase, isWhole ? 'true' : null, false);
+  const { matches, capped, error } = safeFindMatches(model, query, isRegex, isCase, isWhole);
+  if (error) { dom.searchCount.textContent = isRegex ? 'Invalid pattern' : 'Search error'; return; }
   const edits = matches.map((m) => ({ range: m.range, text: dom.replaceInput.value }));
   state.editor.executeEdits('replaceAll', edits);
   clearSearchDecorations();
-  dom.searchCount.textContent = `${edits.length} replaced`;
+  dom.searchCount.textContent = capped
+    ? `${edits.length} replaced (capped — run again for more)`
+    : `${edits.length} replaced`;
 }
 
 function initSearch() {

@@ -466,51 +466,134 @@ function parseApexStatements(sourceLines, startLine, endLine) {
  */
 function findBlockEnd(lines, lineIdx) {
   let depth = 0;
+  let opened = false;
   for (let i = lineIdx; i < lines.length; i++) {
     const line = lines[i];
     for (const ch of line) {
-      if (ch === '{') depth++;
-      if (ch === '}') { depth--; if (depth <= 0) return i; }
+      if (ch === '{') { depth++; opened = true; }
+      else if (ch === '}') {
+        // Ignore a close-brace that PRECEDES this block's own opening '{' — e.g.
+        // the leading '}' of `} else if (...) {`, `} else {`, `} catch (...) {`,
+        // `} finally {`. Without this guard the leading '}' drives depth negative
+        // and returns this same line, which (in the else-if chain handler) makes
+        // parseApexStatements recurse on an identical range forever → "Maximum
+        // call stack size exceeded", silently aborting the debug session.
+        if (!opened) continue;
+        depth--;
+        if (depth <= 0) return i;
+      }
     }
   }
   return lines.length - 1;
 }
 
+/* ----------------------------------------------------------------------------
+ * Apex method-declaration recognizer (shared by the "▶ Debug with Request"
+ * CodeLens, the context-menu action, and findMethodInSource so they always
+ * agree on what counts as a method).
+ *
+ * The access modifier is OPTIONAL — package-default methods (`String foo()`),
+ * interface methods, and `webservice` methods have none — and modifiers may
+ * appear in any order (`static public`, `global webservice static`, …). The
+ * return type may carry generics (`Map<String,List<X>>`) or an array suffix
+ * (`Account[]`). Control-flow lines (`if (`, `for (`, `return foo(`, …) and
+ * property accessors are rejected so we never paint a bogus lens.
+ * ------------------------------------------------------------------------- */
+const APEX_METHOD_MODIFIERS = 'global|public|private|protected|webservice|static|final|abstract|virtual|override|transient|testmethod';
+// Reserved words that can never be an Apex method name or return type — used to
+// reject control flow that otherwise resembles `Type name(` (e.g. `return foo(`).
+const APEX_RESERVED_NON_METHOD = new Set(['if','for','while','switch','catch','return','else','do','finally','try','new','throw']);
+const APEX_METHOD_DECL_RE = new RegExp(
+  '^\\s*' +
+  '(?:@\\w+\\s*(?:\\([^)]*\\))?\\s*)*' +                          // leading annotations
+  '(?:(?:' + APEX_METHOD_MODIFIERS + ')\\s+)*' +                  // modifiers (any order)
+  '([A-Za-z_][\\w.]*(?:\\s*<[^;{}()]*>)?(?:\\s*\\[\\s*\\])?)' +    // return type (generics/array)
+  '\\s+([A-Za-z_]\\w*)\\s*\\(',                                   // method name + (
+  'i'
+);
+
+/** Return the method name declared at the start of `text`, or null. */
+function matchApexMethodName(text) {
+  if (!text) return null;
+  const m = APEX_METHOD_DECL_RE.exec(text);
+  if (!m) return null;
+  if (/\b(class|interface|enum|trigger)\b/i.test(text)) return null; // type decl, not a method
+  const retType = m[1].trim().toLowerCase();
+  const name = m[2];
+  if (APEX_RESERVED_NON_METHOD.has(retType)) return null;
+  if (APEX_RESERVED_NON_METHOD.has(name.toLowerCase())) return null;
+  return name;
+}
+
+/**
+ * Build a candidate signature string starting at line index `i`: a method whose
+ * return type/name/`(` is wrapped across lines (no `(` yet, and no statement
+ * terminator/brace/assignment on the head line) is stitched together with up to
+ * the next few lines so multi-line signatures are still recognized.
+ */
+function apexSignatureProbe(lines, i) {
+  let probe = lines[i];
+  if (!probe.includes('(') && !/[;{}=]/.test(probe)) {
+    for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+      probe += ' ' + lines[j];
+      if (probe.includes('(')) break;
+    }
+  }
+  return probe;
+}
+
 /**
  * Find a method in source code, return { startLine (0-based body start), endLine (0-based body end), params: [{type, name}] }
+ * When `targetLine` (1-based, the signature line the CodeLens was clicked on) is
+ * given, the search starts there so the CORRECT overload is picked when several
+ * methods share a name.
  */
-function findMethodInSource(source, methodName) {
+function findMethodInSource(source, methodName, targetLine) {
   const lines = source.split('\n');
-  const methodRegex = new RegExp(
-    `(?:public|private|protected|global)\\s+(?:static\\s+)?(?:override\\s+)?(?:testMethod\\s+)?(?:[\\w<>\\[\\],.\\s]+?)\\s+${escapeRegex(methodName)}\\s*\\(`,
-    'i'
-  );
-  for (let i = 0; i < lines.length; i++) {
-    if (methodRegex.test(lines[i])) {
-      // Extract parameters
-      let sigText = '';
-      for (let j = i; j < Math.min(i + 5, lines.length); j++) {
-        sigText += lines[j];
-        if (sigText.includes(')')) break;
-      }
-      const paramsPart = sigText.match(/\(([^)]*)\)/);
-      const params = [];
-      if (paramsPart && paramsPart[1].trim()) {
-        for (const p of paramsPart[1].split(',')) {
-          const parts = p.trim().split(/\s+/);
-          if (parts.length >= 2) {
-            params.push({ type: parts.slice(0, -1).join(' '), name: parts[parts.length - 1] });
-          }
+
+  const tryAt = (i) => {
+    if (/\b(class|interface|enum|trigger)\b/i.test(lines[i])) return null;
+    if (lines[i].trim().startsWith('@')) return null;
+    const probe = apexSignatureProbe(lines, i);
+    if (matchApexMethodName(probe) !== methodName) return null;
+    // Extract parameters from the (possibly multi-line) signature.
+    let sigText = '';
+    for (let j = i; j < Math.min(i + 6, lines.length); j++) {
+      sigText += lines[j];
+      if (sigText.includes(')')) break;
+    }
+    const paramsPart = sigText.match(/\(([^)]*)\)/);
+    const params = [];
+    if (paramsPart && paramsPart[1].trim()) {
+      for (const p of paramsPart[1].split(',')) {
+        const parts = p.trim().split(/\s+/);
+        if (parts.length >= 2) {
+          params.push({ type: parts.slice(0, -1).join(' '), name: parts[parts.length - 1] });
         }
       }
-      // Find the opening brace
-      let braceStart = i;
-      for (let j = i; j < Math.min(i + 10, lines.length); j++) {
-        if (lines[j].includes('{')) { braceStart = j; break; }
-      }
-      const bodyEnd = findBlockEnd(lines, braceStart);
-      return { startLine: braceStart + 1, endLine: bodyEnd - 1, params, signatureLine: i };
     }
+    // Find the opening brace (abstract/interface methods have none → skip them).
+    let braceStart = -1;
+    for (let j = i; j < Math.min(i + 12, lines.length); j++) {
+      if (lines[j].includes('{')) { braceStart = j; break; }
+      if (lines[j].includes(';')) return null; // declaration only, no body to debug
+    }
+    if (braceStart < 0) return null;
+    const bodyEnd = findBlockEnd(lines, braceStart);
+    return { startLine: braceStart + 1, endLine: bodyEnd - 1, params, signatureLine: i };
+  };
+
+  // Prefer the exact signature line the lens was clicked on (disambiguates overloads).
+  if (typeof targetLine === 'number' && targetLine >= 1) {
+    for (let i = targetLine - 1; i <= Math.min(lines.length - 1, targetLine + 2); i++) {
+      if (i < 0) continue;
+      const hit = tryAt(i);
+      if (hit) return hit;
+    }
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const hit = tryAt(i);
+    if (hit) return hit;
   }
   return null;
 }
@@ -981,8 +1064,8 @@ function parseClassFields(source) {
     }
     // Only parse fields at class body depth (depth === 1 after class declaration)
     if (!inClass || depth !== 1) continue;
-    // Skip method declarations
-    if (/(?:public|private|protected|global)\s+(?:static\s+)?(?:override\s+)?(?:testMethod\s+)?(?:[\w<>\[\],.\s]+?)\s+\w+\s*\(/.test(trimmed)) continue;
+    // Skip method declarations (any modifier order, incl. webservice / no-modifier).
+    if (matchApexMethodName(trimmed)) continue;
     // Skip comments, annotations
     if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('@')) continue;
 
@@ -1298,11 +1381,11 @@ async function resolveClassFile(className) {
    6. EXECUTION CONTROLLER — Step through parsed statements
    ================================================================ */
 
-async function startDebugSession(filePath, methodName, requestParams) {
+async function startDebugSession(filePath, methodName, requestParams, signatureLine) {
   const source = await window.apexStudio.readFile(filePath);
   if (!source) { window.showToast?.('Could not read file', 'error'); return; }
 
-  const methodInfo = findMethodInSource(source, methodName);
+  const methodInfo = findMethodInSource(source, methodName, signatureLine);
   if (!methodInfo) { window.showToast?.(`Method "${methodName}" not found`, 'error'); return; }
 
   // Start FINEST-logging setup in the BACKGROUND now (if an org is connected), so the
@@ -1316,6 +1399,7 @@ async function startDebugSession(filePath, methodName, requestParams) {
   debugState.paused = true;
   debugState.entryFile = filePath;
   debugState.entryMethod = methodName;
+  debugState.entrySignatureLine = (typeof signatureLine === 'number' && signatureLine >= 1) ? signatureLine : (methodInfo.signatureLine + 1);
   debugState.entryLine = methodInfo.signatureLine + 1;
   debugState.consoleLog = [];
   debugState.orgLog = [];
@@ -1330,8 +1414,16 @@ async function startDebugSession(filePath, methodName, requestParams) {
   if (debugState.engineOrgEvalCache) debugState.engineOrgEvalCache.clear();
   if (debugState.engineDescribeCache) debugState.engineDescribeCache.clear();
 
-  // Parse class-level fields
-  const classFields = parseClassFields(source);
+  // Parse class-level fields. Best-effort: the live interpreter/engine is the REAL
+  // executor, so a local-parser failure must NEVER abort the session (that would
+  // look like "nothing happens" when Start Debugging is clicked).
+  let classFields;
+  try {
+    classFields = parseClassFields(source);
+  } catch (e) {
+    console.warn('[apexdebugger] parseClassFields failed; continuing with empty field scope:', e);
+    classFields = { publicFields: {}, privateFields: {}, staticFields: {}, allFields: {} };
+  }
   const className = filePath.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
   debugState.classFieldsCache.set(className, classFields);
 
@@ -1349,9 +1441,18 @@ async function startDebugSession(filePath, methodName, requestParams) {
     });
   }
 
-  // Parse the method body
+  // Parse the method body. Best-effort (see parseClassFields note above): if the
+  // local statement parser throws (e.g. an unusual control-flow shape), fall back
+  // to an empty local preview and let the live interpreter/engine drive execution
+  // rather than silently aborting the whole session.
   const lines = source.split('\n');
-  const statements = parseApexStatements(lines, methodInfo.startLine, methodInfo.endLine);
+  let statements;
+  try {
+    statements = parseApexStatements(lines, methodInfo.startLine, methodInfo.endLine);
+  } catch (e) {
+    console.warn('[apexdebugger] parseApexStatements failed; using engine execution only:', e);
+    statements = [];
+  }
 
   // Push initial call stack frame
   debugState.callStack = [{
@@ -1365,9 +1466,11 @@ async function startDebugSession(filePath, methodName, requestParams) {
     pc: 0  // program counter — index into statements array
   }];
 
-  // Open file in editor at method start
-  const content = await window.apexStudio.readFile(filePath);
-  await window.openFile(filePath, content);
+  // Focus the file in the editor at the method start. openFile() de-dupes by
+  // (normalized) path, so clicking "▶ Debug with Request" on the file you're
+  // already viewing focuses that tab instead of re-opening a duplicate. Reuse the
+  // `source` already read above rather than reading the same file a second time.
+  await window.openFile(filePath, source);
 
   // Show debug UI
   showDebugUI();
@@ -1859,9 +1962,18 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
             return [];
           }
         }
-        const res = await execSoql(soql);
+        let res = await execSoql(soql);
         if (res._appliedSavedFix && !probe) {
           addConsoleEntry('info', '🛠 Applied your saved SOQL fix for this query.');
+        }
+        // System-mode self-heal: if a managed-package field was hidden (a silently
+        // dropped column, or an FLS/permission error) and the read-only helper class
+        // isn't actually on the org, offer to (re)deploy it and re-read THIS query in
+        // system mode so the hidden value is included. Real queries only (never probes);
+        // no-op unless ⚡ system mode is ON and a hidden field was actually detected.
+        if (!probe) {
+          const healed = await maybeHealWithSystemHelper(soql, res);
+          if (healed) res = healed;
         }
         if (res.error) {
           // Auth/session/IP-restriction failure → trip the circuit ONCE (friendly message),
@@ -2140,11 +2252,21 @@ async function startEngineSession(filePath, methodName, requestParams, source) {
   }
 
   const className = filePath.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
-  if (!engine.registry.get(className)) return false;
+  if (!engine.registry.get(className)) {
+    addConsoleEntry('warn', `Live interpreter didn't find class "${className}" in this file — falling back to org-replay mode.`);
+    return false;
+  }
   const methods = engine.registry.get(className).findMethods(methodName);
-  if (!methods.length) return false;
+  if (!methods.length) {
+    addConsoleEntry('warn', `Live interpreter didn't find method "${methodName}" in ${className} — falling back to org-replay mode.`);
+    return false;
+  }
 
-  const args = (methods[0].params || []).map((p, i) =>
+  // Pick the overload whose parameter count matches the supplied request (so debugging
+  // an overloaded method binds the right signature instead of always methods[0]).
+  const reqLen = Array.isArray(requestParams) ? requestParams.length : 0;
+  const method = methods.find(m => (m.params || []).length === reqLen) || methods[0];
+  const args = (method.params || []).map((p, i) =>
     requestParams && requestParams[i] !== undefined ? JSON.parse(JSON.stringify(requestParams[i])) : null);
 
   debugState.engineMode = true;
@@ -2651,6 +2773,63 @@ async function execSoql(soql, opts) {
   return result;
 }
 
+/**
+ * System-mode self-heal for FLS-hidden managed-package data.
+ *
+ * When ⚡ System mode is ON but the read-only helper class isn't actually deployed
+ * (never was on a fresh org, or the user deleted it mid-session), a managed-package
+ * field the connected user lacks FLS for comes back either as a silently DROPPED
+ * column (the query is rewritten without it and the field reads as null downstream
+ * → NullPointerException) or as a hard field/permission error. Being a System
+ * Administrator does NOT help here: managed-package FLS can hide the field even from
+ * admins on user-mode reads — only the deployed helper's AccessLevel.SYSTEM_MODE
+ * reads it. (This is the exact "even though I enabled system mode it never asked to
+ * push the helper, and the run fails on Data__c" report.)
+ *
+ * So: re-verify LIVE whether the helper exists (bypassing the ensureSystemHelper
+ * cache, since the class may have been deleted since we last looked); if it's
+ * missing, offer to (re)deploy it to the CONNECTED org (the consent modal names the
+ * target — the user's DX org), and on success re-run the SAME query in system mode.
+ * Returns the fresh system-mode result, or null to leave the original result as-is
+ * (helper already present → field genuinely absent; deploy declined/failed; org not
+ * verifiable; or not applicable).
+ */
+async function maybeHealWithSystemHelper(soql, res) {
+  if (!isSystemModeEnabled() || !liveOrgAvailable()) return null;
+  // Was a managed-package field actually hidden? Two shapes: a silently dropped
+  // column, or an FLS/field-access error. Ignore CLI/auth failures (handled by the
+  // circuit breaker) and purely structural query errors.
+  const dropped = (res && res.droppedColumns && res.droppedColumns.length) ? res.droppedColumns : null;
+  const flsError = res && res.error && !_looksLikeCliAuthError(res.error) &&
+    /No such column|INVALID_FIELD|INSUFFICIENT_ACCESS|is not accessible|doesn.?t exist on this object/i.test(res.error);
+  if (!dropped && !flsError) return null;
+  const org = getActiveOrg();
+  if (!org || !org.org) return null;
+  // Don't re-nag: if the user already declined, or the deploy already failed for this
+  // org this session, stay in user mode silently (toggling ⚡ off/on re-offers it).
+  const cachedStatus = debugState.sysHelper.get(org.org);
+  if (cachedStatus === 'declined' || cachedStatus === 'unavailable') return null;
+  // LIVE presence check (bypasses the cache) — the class may have been deleted from
+  // the org, or never deployed on this fresh org.
+  let exists = null;
+  try { exists = await systemHelperExists(org); } catch (_) { exists = null; }
+  if (exists === true) return null;   // helper IS deployed → field genuinely absent (package version differs), not FLS
+  if (exists === null) return null;   // org not verifiable right now (auth/IP/CLI) → leave normal handling
+  // Helper confirmed missing → clear any stale cached status (the 'privileged' admin
+  // short-circuit, or a stale 'ready') so ensureSystemHelper re-evaluates and actually
+  // shows the deploy consent, then offer to deploy to THIS org.
+  debugState.sysHelper.delete(org.org);
+  addConsoleEntry('warn', `🔒 This method needs a managed-package field that isn't readable in user mode${dropped ? ` (${dropped.join(', ')})` : ''}. The read-only system-mode helper class isn't deployed on this org — offering to deploy it so the real value can be read (managed-package FLS hides this field even from System Administrators on user-mode reads).`);
+  renderConsolePanel();
+  let status = 'unavailable';
+  try { status = await ensureSystemHelper(org, true); } catch (_) { status = 'unavailable'; }
+  if (status !== 'ready') return null; // declined / couldn't deploy → stay in user mode (already reported)
+  addConsoleEntry('info', '⚡ Helper deployed — re-reading this query in system mode (full FLS/CRUD) so the hidden field is included…');
+  renderConsolePanel();
+  debugState.orgQueryCache.delete(soql); // bust the user-mode (column-dropped) cached result
+  try { return await execSoql(soql); } catch (_) { return null; }
+}
+
 /* ======================================================================
  * SYSTEM-MODE helper class
  * ----------------------------------------------------------------------
@@ -2769,8 +2948,9 @@ async function toggleSystemMode() {
       // Explicit opt-in → run the consent + deploy flow now so the first hidden-field read is instant.
       debugState.sysHelper.delete(org.org);
       try {
-        const status = await ensureSystemHelper(org);
+        const status = await ensureSystemHelper(org, true);
         if (status === 'declined') { addConsoleEntry('info', 'System mode left OFF — helper deploy was declined. Reads stay in user mode.'); setSystemMode(false); }
+        else if (status === 'authblocked') { addConsoleEntry('warn', "System mode is ON, but this org couldn't be reached to check or deploy the read-only helper class — the org session looks expired or IP-restricted. Re-connect the org (＋ Add Org → sign in) from an allowed network, then toggle system mode again. Until then, hidden fields show as 🔒."); }
         else if (status === 'unavailable') { addConsoleEntry('warn', 'System mode is ON, but the helper class could not be deployed to this org (likely no deploy permission). Hidden fields will show as 🔒 until it can be deployed or the user is granted access.'); }
         else if (status === 'privileged') { addConsoleEntry('info', "System mode ON — you're connected as a System Administrator (full data access), so user-mode reads already return every field. No helper class was deployed."); }
       } catch (_) { /* non-fatal */ }
@@ -2809,15 +2989,25 @@ function dbgEscapeHtml(str) {
 
 /** Helper-class presence on the org: true (present), false (absent), null (couldn't check). */
 async function systemHelperExists(org) {
+  // Reset the auth-failure signal each check; an EXPLICIT system-mode toggle reads it
+  // (via ensureSystemHelper) to distinguish "org unreachable → tell the user to
+  // reconnect" from "helper simply absent → offer to deploy it".
+  debugState._sysHelperAuthErr = false;
   if (!org || !org.org) return null;
   const folder = window.state?.folderPath;
   const cmd = `sf data query --use-tooling-api --query "SELECT Id FROM ApexClass WHERE Name='${SYS_HELPER_CLASS}' LIMIT 1" --json --target-org ${org.org}`;
   try {
-    const { stdout } = await window.apexStudio.sfExec(cmd, folder, 60000);
+    const { stdout, stderr } = await window.apexStudio.sfExec(cmd, folder, 60000);
     const parsed = parseSfJson(stdout);
     if (parsed && parsed.status === 0 && parsed.result) {
       return (parsed.result.records || []).length > 0;
     }
+    // Query didn't succeed — note whether it looks like an org auth/session/IP failure
+    // (the kind re-connecting fixes) so the caller can respond appropriately.
+    const failText = (parsed && (parsed.message || parsed.name))
+      ? `${parsed.name || ''} ${parsed.message || ''}`
+      : `${stdout || ''} ${stderr || ''}`;
+    if (_looksLikeOrgAuthError(failText)) debugState._sysHelperAuthErr = true;
   } catch (_) { /* fall through → unknown */ }
   return null; // query itself failed (auth/CLI) — org not verifiable right now
 }
@@ -3033,7 +3223,7 @@ function showSoqlFixModal({ soql, error, resolvedSoql }) {
  * 'declined', or 'unavailable'. Prompts for consent + deploys only when needed.
  * Caches per org (and dedupes concurrent callers via an in-flight promise).
  */
-async function ensureSystemHelper(org) {
+async function ensureSystemHelper(org, explicit = false) {
   if (!org || !org.org) return 'unavailable';
   const key = org.org;
   const cached = debugState.sysHelper.get(key);
@@ -3043,13 +3233,37 @@ async function ensureSystemHelper(org) {
   const p = (async () => {
     const exists = await systemHelperExists(org);
     if (exists === true) return 'ready';
-    if (exists === null) return 'unavailable'; // org not verifiable now → use user mode, don't prompt
-    // Helper absent. If the connected user already has org-wide data access
-    // (System Administrator / Modify All / View All Data), plain user mode reads
-    // every field — so skip the deploy consent panel entirely for them.
-    let fullAccess = null;
-    try { fullAccess = await connectedUserHasFullAccess(org); } catch (_) { fullAccess = null; }
-    if (fullAccess === true) return 'privileged';
+    if (exists === null) {
+      // Couldn't verify whether the helper is deployed (auth/IP/CLI/timeout/quoting).
+      // AUTO-RESUME + on-demand reads (explicit=false): stay silently in user mode.
+      if (!explicit) return 'unavailable';
+      // EXPLICIT ⚡ toggle: the user just asked for system mode, so never leave them
+      // with no response. If the org itself is unreachable (expired/IP-restricted
+      // session) a deploy would fail too → signal 'authblocked' so the caller tells
+      // them to re-connect. Otherwise fall through and OFFER to deploy the helper
+      // (treating "can't confirm" like "absent") — this is the case a fresh user hits
+      // when the existence check silently failed and no popup ever appeared.
+      if (debugState._sysHelperAuthErr) return 'authblocked';
+    }
+    // Helper absent (exists === false), or unverifiable on an explicit toggle with a
+    // reachable org.
+    //
+    // PRIVILEGED short-circuit — ONLY on the implicit/auto path. A user with org-wide
+    // access (System Administrator / Modify All / View All Data) reads most fields in
+    // plain user mode, so during normal stepping we don't nag them to deploy anything.
+    //
+    // On an EXPLICIT ⚡ toggle we DO offer to deploy even for such users: managed-package
+    // objects (e.g. Apttus/Conga Apttus_Config2__TempObject__c) can keep fields
+    // FLS-hidden even from a System Administrator on user-mode REST — the very case that
+    // throws "Column … doesn't exist / Data__c not available" and aborts the run. Only the
+    // deployed helper's AccessLevel.SYSTEM_MODE reads them reliably, so when the user
+    // explicitly asks for system mode and the helper is missing, always show the deploy
+    // consent (targeting the connected org — their DX org — which the modal names).
+    if (!explicit) {
+      let fullAccess = null;
+      try { fullAccess = await connectedUserHasFullAccess(org); } catch (_) { fullAccess = null; }
+      if (fullAccess === true) return 'privileged';
+    }
     const ok = await showSystemHelperConsent(org);
     if (!ok) return 'declined';
     addConsoleEntry('info', `⏳ Deploying system-mode helper class ${SYS_HELPER_CLASS} to ${org.info?.alias || org.org}…`);
@@ -3844,30 +4058,54 @@ function escapeApexString(s) {
 }
 
 /** Extract signature info (return type, static flag, params) for a method. */
-function getEntrySignature(source, methodName) {
+function getEntrySignature(source, methodName, targetLine) {
   const lines = source.split('\n');
+  const esc = escapeRegex(methodName);
+  // Optional annotations, optional modifiers (any order, possibly none — package-default /
+  // webservice methods), then the return type, then THIS method's name + "(".
   const re = new RegExp(
-    `((?:public|private|protected|global)\\s+(?:(static)\\s+)?(?:override\\s+)?(?:testMethod\\s+)?([\\w<>\\[\\],.\\s]+?)\\s+${escapeRegex(methodName)}\\s*\\()`,
+    '^\\s*(?:@\\w+\\s*(?:\\([^)]*\\))?\\s*)*' +
+    '((?:(?:' + APEX_METHOD_MODIFIERS + ')\\s+)*)' +                 // modifier run (may be empty)
+    '([A-Za-z_][\\w.]*(?:\\s*<[^;{}()]*>)?(?:\\s*\\[\\s*\\])?)' +     // return type
+    '\\s+' + esc + '\\s*\\(',
     'i'
   );
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(re);
-    if (m && !/\b(class|interface|enum|trigger)\b/i.test(lines[i])) {
-      let sigText = '';
-      for (let j = i; j < Math.min(i + 6, lines.length); j++) {
-        sigText += lines[j] + ' ';
-        if (sigText.includes(')')) break;
-      }
-      const paramsPart = sigText.match(/\(([^)]*)\)/);
-      const params = [];
-      if (paramsPart && paramsPart[1].trim()) {
-        for (const p of paramsPart[1].split(',')) {
-          const parts = p.trim().split(/\s+/);
-          if (parts.length >= 2) params.push({ type: parts.slice(0, -1).join(' '), name: parts[parts.length - 1] });
-        }
-      }
-      return { returnType: (m[3] || '').trim(), isStatic: !!m[2], params, signatureLine: i + 1 };
+
+  const tryAt = (i) => {
+    if (i < 0 || i >= lines.length) return null;
+    const probe = apexSignatureProbe(lines, i);
+    if (/\b(class|interface|enum|trigger)\b/i.test(probe)) return null;
+    const m = probe.match(re);
+    if (!m) return null;
+    const modifiers = (m[1] || '').toLowerCase();
+    const returnType = (m[2] || '').trim();
+    if (APEX_RESERVED_NON_METHOD.has(returnType.toLowerCase())) return null;
+    let sigText = '';
+    for (let j = i; j < Math.min(i + 6, lines.length); j++) {
+      sigText += lines[j] + ' ';
+      if (sigText.includes(')')) break;
     }
+    const paramsPart = sigText.match(/\(([^)]*)\)/);
+    const params = [];
+    if (paramsPart && paramsPart[1].trim()) {
+      for (const p of paramsPart[1].split(',')) {
+        const parts = p.trim().split(/\s+/);
+        if (parts.length >= 2) params.push({ type: parts.slice(0, -1).join(' '), name: parts[parts.length - 1] });
+      }
+    }
+    return { returnType, isStatic: /\bstatic\b/.test(modifiers), params, signatureLine: i + 1 };
+  };
+
+  // Prefer the exact signature line (disambiguates overloads) when known.
+  if (typeof targetLine === 'number' && targetLine >= 1) {
+    for (let i = targetLine - 1; i <= targetLine + 1; i++) {
+      const hit = tryAt(i);
+      if (hit) return hit;
+    }
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const hit = tryAt(i);
+    if (hit) return hit;
   }
   return null;
 }
@@ -4291,7 +4529,7 @@ async function runEntryMethodInOrg() {
   const source = await window.apexStudio.readFile(filePath);
   if (!source) { window.showToast?.('Could not read entry file', 'error'); return; }
 
-  const sig = getEntrySignature(source, methodName);
+  const sig = getEntrySignature(source, methodName, debugState.entrySignatureLine);
   if (!sig) { window.showToast?.(`Could not parse signature for ${methodName}`, 'error'); return; }
   sig.__methodName = methodName;
   debugState.entryDeclLine = sig.signatureLine || 0;
@@ -6086,9 +6324,12 @@ async function debugStepOut() {
 
 async function debugRestart() {
   if (!debugState.entryFile || !debugState.entryMethod) return;
+  const entryFile = debugState.entryFile;
+  const entryMethod = debugState.entryMethod;
+  const entrySignatureLine = debugState.entrySignatureLine;
   const params = debugState.parsedRequest?.params || [];
   stopDebugSession();
-  await startDebugSession(debugState.entryFile, debugState.entryMethod, params);
+  await startDebugSession(entryFile, entryMethod, params, entrySignatureLine);
 }
 
 /**
@@ -8664,6 +8905,7 @@ function showRequestModal(filePath, methodName, signatureLine) {
   // Store target info
   modal.dataset.filePath = filePath;
   modal.dataset.methodName = methodName;
+  modal.dataset.signatureLine = (typeof signatureLine === 'number' && signatureLine >= 1) ? String(signatureLine) : '';
 
   // Create mini Monaco editor for JSON input if not already created
   if (!debugState.miniEditorInstance) {
@@ -8786,6 +9028,7 @@ function startDebugFromModal() {
 
   const filePath = modal.dataset.filePath;
   const methodName = modal.dataset.methodName;
+  const signatureLine = modal.dataset.signatureLine ? parseInt(modal.dataset.signatureLine, 10) : undefined;
   const jsonText = debugState.miniEditorInstance?.getValue() || '';
 
   // Parse the request
@@ -8801,7 +9044,7 @@ function startDebugFromModal() {
   hideRequestModal();
 
   // Start debug session
-  startDebugSession(filePath, methodName, parsed.params);
+  startDebugSession(filePath, methodName, parsed.params, signatureLine);
 }
 
 /* ================================================================
@@ -8842,7 +9085,7 @@ function registerDebugProviders() {
       const lines = model.getLinesContent();
       const uri = model.uri;
       const uriKey = uri.toString();
-      const methodRegex = /(?:public|private|protected|global)\s+(?:static\s+)?(?:override\s+)?(?:testMethod\s+)?(?:[\w<>\[\],.\s]+?)\s+(\w+)\s*\(/i;
+      const fileName = uri.path.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
 
       // Clear previous entries for this model
       for (const key of _codeLensMap.keys()) {
@@ -8850,29 +9093,28 @@ function registerDebugProviders() {
       }
 
       for (let i = 0; i < lines.length; i++) {
-        const match = lines[i].match(methodRegex);
-        if (match) {
-          // Skip if this looks like a class declaration
-          if (/\b(class|interface|enum|trigger)\b/i.test(lines[i])) continue;
-          // Skip annotations-only lines
-          if (lines[i].trim().startsWith('@')) continue;
-          // Skip constructors (method name matches class name)
-          const fileName = uri.path.split(/[/\\]/).pop().replace(/\.(cls|trigger)$/, '');
-          if (match[1] === fileName) continue;
+        // Skip type declarations and annotation-only lines.
+        if (/\b(class|interface|enum|trigger)\b/i.test(lines[i])) continue;
+        if (lines[i].trim().startsWith('@')) continue;
+        // Recognize the method (handles no-modifier / webservice / multi-modifier /
+        // generic+array returns, and signatures wrapped across lines).
+        const methodName = matchApexMethodName(apexSignatureProbe(lines, i));
+        if (!methodName) continue;
+        // Skip constructors (method name matches class name).
+        if (methodName === fileName) continue;
 
-          const filePath = uri.fsPath || uri.path;
-          const lineNum = i + 1;
-          _codeLensMap.set(uriKey + ':' + lineNum, { filePath, methodName: match[1], line: lineNum });
+        const filePath = uri.fsPath || uri.path;
+        const lineNum = i + 1;
+        _codeLensMap.set(uriKey + ':' + lineNum, { filePath, methodName, line: lineNum });
 
-          lenses.push({
-            range: { startLineNumber: lineNum, startColumn: 1, endLineNumber: lineNum, endColumn: 1 },
-            command: {
-              id: CMD_ID,
-              title: '▶ Debug with Request',
-              arguments: [filePath, match[1], lineNum]
-            }
-          });
-        }
+        lenses.push({
+          range: { startLineNumber: lineNum, startColumn: 1, endLineNumber: lineNum, endColumn: 1 },
+          command: {
+            id: CMD_ID,
+            title: '▶ Debug with Request',
+            arguments: [filePath, methodName, lineNum]
+          }
+        });
       }
       return { lenses, dispose: () => {} };
     },
@@ -8893,19 +9135,16 @@ function registerDebugProviders() {
       contextMenuGroupId: 'z_debug',
       contextMenuOrder: 0,
       run: (ed) => {
-        // Fallback for context menu (not CodeLens): detect method at cursor
+        // Fallback for context menu (not CodeLens): detect the nearest method at/above the cursor.
         const model = ed.getModel();
         const position = ed.getPosition();
         if (!model || !position) return;
         const fp = model.uri.fsPath || model.uri.path;
         const lines = model.getLinesContent();
-        const mRe = /(?:public|private|protected|global)\s+(?:static\s+)?(?:override\s+)?(?:testMethod\s+)?(?:[\w<>\[\],.\s]+?)\s+(\w+)\s*\(/i;
         for (let i = position.lineNumber - 1; i >= Math.max(0, position.lineNumber - 20); i--) {
-          const m = lines[i].match(mRe);
-          if (m && !/\b(class|interface|enum|trigger)\b/i.test(lines[i]) && !lines[i].trim().startsWith('@')) {
-            showRequestModal(fp, m[1], i + 1);
-            return;
-          }
+          if (/\b(class|interface|enum|trigger)\b/i.test(lines[i]) || lines[i].trim().startsWith('@')) continue;
+          const name = matchApexMethodName(apexSignatureProbe(lines, i));
+          if (name) { showRequestModal(fp, name, i + 1); return; }
         }
       }
     });
@@ -9984,16 +10223,12 @@ function initApexDebugger() {
           const fp = (model.uri.fsPath || model.uri.path);
 
           const lines = model.getLinesContent();
-          const methodRegex = /(?:public|private|protected|global)\s+(?:static\s+)?(?:override\s+)?(?:testMethod\s+)?(?:[\w<>\[\],.\s]+?)\s+(\w+)\s*\(/i;
           let targetMethod = null;
           let targetLine = 0;
           for (let i = position.lineNumber - 1; i >= Math.max(0, position.lineNumber - 20); i--) {
-            const m = lines[i].match(methodRegex);
-            if (m && !/\b(class|interface|enum|trigger)\b/i.test(lines[i]) && !lines[i].trim().startsWith('@')) {
-              targetMethod = m[1];
-              targetLine = i + 1;
-              break;
-            }
+            if (/\b(class|interface|enum|trigger)\b/i.test(lines[i]) || lines[i].trim().startsWith('@')) continue;
+            const name = matchApexMethodName(apexSignatureProbe(lines, i));
+            if (name) { targetMethod = name; targetLine = i + 1; break; }
           }
           if (targetMethod) {
             showRequestModal(fp, targetMethod, targetLine);
